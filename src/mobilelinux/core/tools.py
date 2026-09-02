@@ -89,6 +89,21 @@ TOOLS: dict[str, Tool] = {
     "debsecan": Tool(
         "debsecan", "map installed Debian/Kali packages to CVEs",
         "apt install debsecan", optional=True),
+    "nc": Tool(
+        "nc", "stream images to a rescue shell (netcat)",
+        "apt install netcat-openbsd"),
+    "ssh": Tool(
+        "ssh", "stream images / run commands over SSH to a booted device",
+        "apt install openssh-client"),
+    "git": Tool(
+        "git", "clone distro build recipes",
+        "apt install git"),
+    "chroot": Tool(
+        "chroot", "run the distro integration phase in the rootfs",
+        "apt install coreutils (usually preinstalled; needs root)"),
+    "go": Tool(
+        "go", "build debos (the Debian/Kali rootfs builder)",
+        "https://go.dev/dl/ then: go install github.com/go-debos/debos/cmd/debos@latest"),
 }
 
 

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate schemas & device definitions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Validate schemas + devices + manifests
+        run: python ci/validate.py
+      - name: Sanity: list-devices must include rhodep + 5 devices
+        run: |
+          out=$(mobilelinux list-devices)
+          echo "$out"
+          echo "$out" | grep -q rhodep
+          echo "$out" | grep -q pine64-pinephone
+          echo "$out" | grep -q oneplus-enchilada
+          echo "$out" | grep -q google-sargo
+          echo "$out" | grep -q samsung-m0
+          echo "$out" | grep -q purism-librem5
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run pytest
+        run: pytest -q
+
+  check-scripts:
+    name: Shell scripts sanity (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck migrated device scripts
+        run: |
+          # Non-fatal informational pass over shipped shell scripts.
+          find devices security -name '*.sh' -print0 \
+            | xargs -0 -r shellcheck -S warning || true
+
+  build-dry-run:
+    name: Build/flash dry-run (no hardware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Build rhodep (dry-run; reports missing tools)
+        run: mobilelinux --dry-run build rhodep --distro kali
+      - name: Check compatibility report
+        run: mobilelinux check rhodep
+      - name: OTA sign/verify round-trip
+        run: |
+          mobilelinux keygen --channel dev
+          python - <<'PY'
+          from pathlib import Path
+          from mobilelinux.ota import signing
+          priv=Path("keys/dev.ed25519.key"); pub=Path("keys/dev.ed25519.pub")
+          body=b"hello"
+          sig=signing.sign(body, priv)
+          assert signing.verify(body, sig, pub)
+          assert not signing.verify(b"tampered", sig, pub)
+          print("sign/verify OK")
+          PY

@@ -18,6 +18,7 @@ for _cls in (
     generic.StorageTest, generic.UsbTest, generic.WifiTest, generic.BluetoothTest,
     generic.AudioTest, generic.BatteryTest, generic.ChargingTest, generic.ModemTest,
     generic.GnssTest, generic.NfcTest, generic.SensorsTest, generic.VibratorTest,
+    generic.CameraTest, generic.FingerprintTest,
 ):
     _register(_cls)
 

@@ -220,6 +220,39 @@ class SensorsTest(HardwareTest):
                           f"{len(iio)} IIO device(s)")
 
 
+class CameraTest(HardwareTest):
+    name = "camera"
+    title = "Camera"
+
+    def run(self, device, env: TestEnv) -> TestResult:
+        if not env.on_device:
+            return TestResult(self.name, Outcome.SKIP, "run on device")
+        feat = device.feature("camera")
+        if feat and feat.status in ("broken", "unsupported"):
+            return TestResult(self.name, Outcome.WARN,
+                              "camera not functional per definition (mainline HAL limitation)")
+        v4l = self.glob("/dev/video*")
+        media = self.glob("/dev/media*")
+        if v4l or media:
+            return TestResult(self.name, Outcome.PASS,
+                              f"{len(v4l)} video + {len(media)} media node(s)")
+        return TestResult(self.name, Outcome.WARN, "no V4L2/media device")
+
+
+class FingerprintTest(HardwareTest):
+    name = "fingerprint"
+    title = "Fingerprint"
+
+    def run(self, device, env: TestEnv) -> TestResult:
+        if not env.on_device:
+            return TestResult(self.name, Outcome.SKIP, "run on device")
+        feat = device.feature("fingerprint")
+        if feat and feat.status == "not-present":
+            return TestResult(self.name, Outcome.SKIP, "no fingerprint hardware")
+        # libfprint devices are hard to probe generically.
+        return TestResult(self.name, Outcome.WARN, "fingerprint probing not automated")
+
+
 class VibratorTest(HardwareTest):
     name = "vibrator"
     title = "Vibrator"
