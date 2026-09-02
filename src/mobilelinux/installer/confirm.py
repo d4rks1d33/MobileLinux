@@ -34,6 +34,14 @@ def confirm_destructive(
     print(f"Installation strategy:")
     print(f"  {strategy}")
     print()
+    print(ui.grey(
+        "Disclaimer: you run this AT YOUR OWN RISK. The authors and contributors\n"
+        "accept NO liability for damaged, bricked or lost devices/data. This tool\n"
+        "does not modify the bootloader itself, so recovery is normally possible\n"
+        "via the device's rescue/fastboot flow \u2014 but no outcome is guaranteed.\n"
+        "See DISCLAIMER.md."
+    ))
+    print()
 
     if dry_run:
         ui.note("[dry-run] no partitions will be written")

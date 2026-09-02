@@ -8,6 +8,10 @@ Everything, organized by what you want to do. Start here.
 > running **Kali Linux + Phosh** on a mainline kernel. More screenshots in
 > [build-and-flash.md](build-and-flash.md#proof-it-works).
 
+> ⚠️ **Use at your own risk.** Flashing phones can erase data or, rarely, brick a
+> device. The authors accept **no liability** — read
+> **[../DISCLAIMER.md](../DISCLAIMER.md)** before you flash anything.
+
 ---
 
 ## Start here

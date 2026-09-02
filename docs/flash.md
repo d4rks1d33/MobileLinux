@@ -1,5 +1,11 @@
 # Flashing a Device
 
+> ⚠️ **At your own risk.** Flashing can erase data and, in rare cases, leave a
+> device unbootable. The authors accept **no liability** — see
+> [DISCLAIMER.md](../DISCLAIMER.md). This tool never touches the bootloader and
+> only writes the partitions a device declares, so recovery is *normally*
+> possible ([recovery.md](recovery.md)), but not guaranteed. **Back up first.**
+
 `mobilelinux flash <device>` installs a built image onto a phone using the
 device's declared install strategy. It is written to be **conservative**: it
 refuses to write anything until it has verified the artifacts, confirmed the

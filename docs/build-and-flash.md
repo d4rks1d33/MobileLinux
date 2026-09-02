@@ -1,5 +1,11 @@
 # Build and Flash — the definitive end-to-end guide
 
+> ⚠️ **At your own risk.** The flashing part of this guide can erase data and, in
+> rare cases, leave a device unbootable. The authors accept **no liability** —
+> see [DISCLAIMER.md](../DISCLAIMER.md). By design the tool never modifies the
+> bootloader and only writes declared partitions, so recovery is *normally*
+> possible ([recovery.md](recovery.md)) — but not guaranteed. **Back up first.**
+
 This is the complete, accurate walkthrough for taking a device from nothing to a
 booted Linux desktop with the **MobileLinux** framework: check → (optional
 kernel-config) → build → flash → first boot → test, plus **exactly where every

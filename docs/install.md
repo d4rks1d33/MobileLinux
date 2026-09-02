@@ -1,5 +1,11 @@
 # Installing MobileLinux on a Supported Device
 
+> ⚠️ **At your own risk.** Installing replaces the OS and erases user data, and
+> flashing carries a small risk of leaving a device unbootable. The authors
+> accept **no liability** — see [DISCLAIMER.md](../DISCLAIMER.md). Recovery is
+> *normally* possible ([recovery.md](recovery.md)) because the bootloader is
+> never touched, but not guaranteed. **Back up everything first.**
+
 This guide covers the end-to-end path for a **user** installing MobileLinux on a
 device that already has a definition in the tree: check it is supported, build
 the images, flash, and boot.

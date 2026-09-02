@@ -57,6 +57,16 @@ Key ideas:
 - **Nothing is claimed as "supported" without evidence.** Hardware status is
   evidence-based and drives an objective support percentage.
 
+## ⚠️ Disclaimer
+
+**Flashing phones is risky. You use MobileLinux entirely at your own risk.** The
+authors accept **no liability for bricked devices or lost data**. By design this
+tool never touches the bootloader itself and only writes the partitions a device
+declares (with confirmation, `--dry-run`, and hash checks), so recovery is
+*normally* possible via the device's rescue/fastboot flow — but **no outcome is
+guaranteed**. **Back up first.** Read **[DISCLAIMER.md](DISCLAIMER.md)** and
+[docs/recovery.md](docs/recovery.md) before flashing.
+
 ## Quick start
 
 ```bash

@@ -1,5 +1,9 @@
 # Recovery
 
+> ⚠️ Recovery is *normally* possible because MobileLinux never touches the
+> bootloader, but it is **not guaranteed**. The authors accept **no liability**
+> for bricked devices or lost data — see [DISCLAIMER.md](../DISCLAIMER.md).
+
 This document explains how to get a device **working again** after something goes
 wrong with an update: a failed OTA, a non-booting kernel, a corrupt root
 filesystem, or an update interrupted by power loss. It also explains the
