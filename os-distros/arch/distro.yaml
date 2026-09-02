@@ -1,0 +1,29 @@
+id: arch
+name: Arch Linux ARM
+base: arch
+family: arch              # arch-family: does NOT consume a .deb kernel
+package_manager: pacman
+builder: pacstrap         # (or archlinux-arm rootfs + pacstrap-style flow)
+suite: rolling
+architectures: [aarch64]
+default_desktop: phosh
+# Arch builds its own kernel (make/PKGBUILD), so devices targeting Arch set
+# kernel.provider.kind: none and provide an Arch kernel PKGBUILD flavor rather
+# than inheriting the pmOS aport.
+kernel_flavor: arch
+
+status: planned           # descriptor only; no backend registered yet
+
+security:
+  model: rolling
+  update_command: [pacman, -Syu]
+  cve_source: arch-security  # Arch Security Team advisories
+
+notes: >
+  PLANNED. Arch (and Arch-based distros: EndeavourOS, Manjaro-ARM, etc.) do NOT
+  inherit the pmOS aport the same way — they build the kernel with make/PKGBUILD.
+  So an Arch target needs its own kernel packaging (provider.kind: none) and a
+  pacstrap-style rootfs builder. This is the biggest departure from the shared
+  pmOS-provider model and is intentionally left for later. Debian-based distros
+  (Debian/Ubuntu/Pop!_OS) are the natural next targets because they reuse the
+  existing Kali/debos path.

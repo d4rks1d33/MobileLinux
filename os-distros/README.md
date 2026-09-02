@@ -7,11 +7,18 @@ never touches hardware support.
 
 | Distro | Base | Builder | Kernel flavor | Status |
 |--------|------|---------|---------------|--------|
-| [`postmarketos/`](postmarketos/) | Alpine | pmbootstrap | `pmos` | supported |
-| [`kali/`](kali/) | Debian | debos | `kali` | supported |
-| _debian/_ | Debian | debos | `debian` | planned |
-| _ubuntu/_ | Debian | debos | `ubuntu` | planned |
-| _arch/_ | Arch | pacman/PKGBUILD | (own) | planned |
+| [`postmarketos/`](postmarketos/) | Alpine | pmbootstrap | `pmos` | **supported** |
+| [`kali/`](kali/) | Debian | debos | `kali` | **supported** |
+| [`debian/`](debian/) | Debian | debos | `debian` | planned |
+| [`ubuntu/`](ubuntu/) | Debian | debos | `ubuntu` | planned |
+| [`arch/`](arch/) | Arch | pacstrap/PKGBUILD | (own) | planned |
+
+More distros are expected over time (e.g. **Pop!_OS** and other Debian/Ubuntu
+derivatives via the debos path; **EndeavourOS / Manjaro-ARM** and other
+Arch derivatives via the pacstrap path). Debian-based distros are the natural
+next targets because they reuse Kali's existing debos + `linux-image .deb`
+pipeline; Arch-based distros need their own kernel packaging
+(`provider.kind: none`).
 
 Each distro directory contains:
 

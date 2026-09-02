@@ -32,6 +32,35 @@ def test_pmos_alias():
     assert b.name == "postmarketos"
 
 
+def test_kali_package_lists_are_real():
+    from mobilelinux.distros.kali import _read_package_list
+    base = _read_package_list(REPO_ROOT / "os-distros/kali/packages/base.list")
+    assert "kali-menu" in base
+    assert "initramfs-tools" in base
+    phone = _read_package_list(REPO_ROOT / "os-distros/kali/packages/phone-role.list")
+    assert "mobian-phosh-phone" in phone
+
+
+def test_kali_integration_config_loads():
+    import yaml
+    cfg = yaml.safe_load(
+        (REPO_ROOT / "os-distros/kali/configuration/integration.yaml").read_text())
+    assert "droid-juicer.service" in cfg["mask_services"]
+    assert "qrtr-ns" in cfg["enable_services"]
+    # apt holds must run last in the install order
+    assert cfg["userspace_install_order"][-1] == "apt"
+
+
+def test_planned_distros_present():
+    import yaml
+    for d in ("debian", "ubuntu", "arch"):
+        data = yaml.safe_load((REPO_ROOT / f"os-distros/{d}/distro.yaml").read_text())
+        assert data["status"] == "planned"
+    # debian/ubuntu are debian-family (reuse the .deb path); arch is not
+    assert yaml.safe_load((REPO_ROOT / "os-distros/debian/distro.yaml").read_text())["family"] == "debian"
+    assert yaml.safe_load((REPO_ROOT / "os-distros/arch/distro.yaml").read_text())["family"] == "arch"
+
+
 def test_catalog_loads_with_categories_and_presets():
     cat = catalog_for_distro(_repo(), "kali")
     assert "usb_wifi_injection" in cat.categories

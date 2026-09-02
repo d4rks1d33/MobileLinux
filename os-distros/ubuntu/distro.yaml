@@ -1,0 +1,23 @@
+id: ubuntu
+name: Ubuntu (Touch / mainline)
+base: debian
+family: debian            # debian-family: consumes a linux-image .deb kernel
+package_manager: apt
+builder: debos
+suite: noble              # 24.04; pin per release
+architectures: [aarch64, armhf]
+default_desktop: lomiri   # Ubuntu Touch ships Lomiri; phosh/plasma also possible
+kernel_flavor: ubuntu
+
+status: planned           # descriptor only; no backend registered yet
+
+security:
+  model: stable
+  update_command: [apt-get, -y, upgrade]
+  cve_source: ubuntu-security-notices
+
+notes: >
+  PLANNED. Ubuntu is Debian-based, so it reuses the debos + linux-image .deb
+  path. Note Ubuntu Touch has its own image/OTA model (system-image) which may
+  be integrated later; a plain mainline Ubuntu rootfs fits the standard flow.
+  Add an UbuntuBackend + an 'ubuntu' kernel flavor fragment per device.

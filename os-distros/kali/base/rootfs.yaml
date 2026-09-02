@@ -1,0 +1,25 @@
+# Kali base rootfs recipe (debos).
+#
+# Kali is Debian-based, so the base rootfs is produced by DEBOS using the
+# upstream kali-nethunter-pro recipes (a fork of mobian-recipes). This file
+# points the backend at that recipe and records the parameters; the backend
+# clones the recipe, drops in the generated device config + device .debs, runs
+# debos to produce the rootfs tarball, then runs the chroot integration phase
+# (see ../configuration/integration.yaml).
+#
+# We do NOT vendor the upstream recipe here (it is large and maintained
+# upstream); we reference it and pin nothing by default. Pin a commit for
+# reproducible releases.
+
+recipe:
+  source: https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-pro
+  ref: main                 # pin to a commit SHA for reproducible release builds
+  rootfs_yaml: rootfs.yaml  # entry recipe inside the upstream tree
+  image_yaml: image.yaml    # NOTE: cannot partition in a container -> chroot phase
+
+parameters:
+  suite: kali-rolling
+  variant: nonfree          # include non-free firmware where allowed
+  # architecture + desktop are supplied per build from the device + --desktop.
+
+# Output: rootfs-<arch>-<desktop>-nonfree.tar.xz (~920 MB on rhodep).

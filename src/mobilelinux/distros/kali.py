@@ -28,7 +28,24 @@ from pathlib import Path
 from ..core import ui
 from .base import BuildRequest, DistroBackend, RootfsResult
 
+try:
+    import yaml
+except Exception:  # pragma: no cover
+    yaml = None
+
 UPSTREAM_RECIPE = "https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-pro"
+
+
+def _read_package_list(path: Path) -> list[str]:
+    """Read a `.list` file: one package per line, '#' comments ignored."""
+    if not path.is_file():
+        return []
+    pkgs = []
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            pkgs.append(line)
+    return pkgs
 
 
 class KaliBackend(DistroBackend):
@@ -134,12 +151,18 @@ class KaliBackend(DistroBackend):
         ui.info("  chroot integration:")
         runner.run(["sh", "-c", f"mkdir -p {root} && tar xJf {tarball} -C {root}"], dangerous=True)
 
-        # Base phone role + initramfs + SoC glue.
-        pkgs = ["initramfs-tools", "qcom-support-common"]
+        # Base packages come from the distro's package lists (os-distros/kali/
+        # packages/), so they are editable data, not hardcoded.
+        pkgdir = self.dir / "packages"
+        pkgs = _read_package_list(pkgdir / "base.list")
         if req.desktop == "phosh":
-            pkgs += ["mobian-phosh-phone", "nautilus"]
-        runner.run(["chroot", str(root), "apt-get", "install", "-y", "--no-install-recommends", *pkgs],
-                   tool="chroot", dangerous=True)
+            pkgs += _read_package_list(pkgdir / "phone-role.list")
+        build_deps = _read_package_list(pkgdir / "build-deps.list")
+        if pkgs:
+            runner.run(["chroot", str(root), "apt-get", "install", "-y",
+                        "--no-install-recommends", *pkgs],
+                       tool="chroot", dangerous=True)
+            ui.note(f"    - base packages: {', '.join(pkgs)}")
 
         # Device .debs.
         deb_names = [p["name"] for p in device.device_packages if p.get("kind") == "deb"]
@@ -149,28 +172,44 @@ class KaliBackend(DistroBackend):
                         "dpkg -i /srv/*.deb || apt-get -fy install"],
                        tool="chroot", dangerous=True)
 
-        # Enable firmware/modem services declared by the SoC layer.
-        enable = self._soc_services(device)
+        # Distro integration config (services to enable/mask, install order).
+        integ = self._load_integration()
+
+        # Services to enable: distro-declared + SoC services from the device.
+        enable = list(integ.get("enable_services", []))
+        if not enable:  # fallback to SoC default if config missing
+            enable = self._soc_services(device)
         if enable:
             runner.run(["chroot", str(root), "systemctl", "enable", *enable],
                        tool="chroot", dangerous=True)
+            ui.note(f"    - enabled: {', '.join(enable)}")
 
-        # First-boot masks (droid-juicer, systemd-repart).
-        masks = device.first_boot.get("mask_services", [])
+        # Masks: distro-level (droid-juicer/systemd-repart) + device first_boot.
+        masks = list(integ.get("mask_services", []))
+        for m in device.first_boot.get("mask_services", []):
+            if m not in masks:
+                masks.append(m)
         if masks:
             runner.run(["chroot", str(root), "systemctl", "mask", *masks],
                        tool="chroot", dangerous=True)
             ui.note(f"    - masked: {', '.join(masks)}")
 
-        # Device userspace installers (audio/modem/sensors/etc), then apt holds LAST.
+        # Device userspace installers, in the distro-declared order (apt LAST).
+        order = integ.get("userspace_install_order", [])
         for pkg in device.device_packages:
             if pkg.get("kind") in ("installer-script", "config"):
                 ui.note(f"    - install layer: {pkg['name']} ({pkg['source']})")
-        ui.note("    - apply-holds.sh (LAST): pin packages + protect all laid-down files")
+        if integ.get("apply_apt_holds", True):
+            ui.note("    - apply-holds.sh (LAST): pin packages + protect laid-down files")
+
+    def _load_integration(self) -> dict:
+        path = self.dir / "configuration" / "integration.yaml"
+        if path.is_file() and yaml is not None:
+            return yaml.safe_load(path.read_text()) or {}
+        return {}
 
     def _soc_services(self, device) -> list[str]:
-        # Services that the SoC modem/firmware layer needs enabled. Declared via
-        # a modem-support device package on Qualcomm.
+        # Fallback when the distro integration config is absent.
         if device.soc_vendor == "qualcomm":
             return ["qrtr-ns", "rmtfs", "pd-mapper", "tqftpserv"]
         return []

@@ -1,0 +1,14 @@
+# Kali base packages installed into the rootfs during chroot integration.
+# One package per line; '#' comments allowed. These are apt package names.
+#
+# The generic Phosh rootfs from debos ships callaudiod/feedbackd/modemmanager
+# but NOT the phone UI apps or SoC glue; these fill that in.
+
+# initramfs + Qualcomm SoC glue (modem/wifi/bt bring-up prerequisites)
+initramfs-tools
+qcom-support-common
+
+# Kali metapackages
+kali-linux-default
+kali-themes-mobile
+kali-menu

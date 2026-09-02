@@ -1,0 +1,6 @@
+# The "phone role" for Phosh: dialer (Calls), SMS (Chatty), MMS, Contacts,
+# ModemManager auto-config, and a file manager. Installed when desktop=phosh.
+# Verified on rhodep: installing mobian-phosh-phone made the Phone/Contacts/
+# Messages apps appear in the Phosh drawer by default.
+mobian-phosh-phone
+nautilus

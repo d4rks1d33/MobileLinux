@@ -1,0 +1,24 @@
+id: debian
+name: Debian
+base: debian
+family: debian            # debian-family: consumes a linux-image .deb kernel
+package_manager: apt
+builder: debos
+suite: trixie             # or bookworm/sid; pin per release
+architectures: [aarch64, armhf]
+default_desktop: phosh
+kernel_flavor: debian     # add a 'debian' flavor fragment to devices you target
+
+status: planned           # descriptor only; no backend registered yet
+
+security:
+  model: stable
+  update_command: [apt-get, -y, upgrade]
+  cve_source: debian-security-tracker
+
+notes: >
+  PLANNED. Debian shares the Kali build path (Debian-based, debos + linux-image
+  .deb). To enable it: add a DebianBackend (likely subclassing the Kali/debos
+  flow with a Debian suite + package lists), register it, and add a 'debian'
+  kernel flavor fragment to the devices you want to support (the kernel/patches/
+  DTB are shared with pmOS/Kali; only the config delta differs).

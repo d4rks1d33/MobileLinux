@@ -1,0 +1,5 @@
+# Build-time dependencies needed inside the chroot to compile the device's
+# userspace helpers (e.g. the modem tqftpserv/memshare binaries). These are NOT
+# shipped in the final image unless a package needs them at runtime.
+libqrtr-dev
+libzstd-dev

@@ -1,0 +1,22 @@
+# postmarketOS base rootfs (pmbootstrap).
+#
+# pmOS is Alpine-based, so there is NO debos and NO apt package lists. The rootfs
+# is produced directly by `pmbootstrap install`, which builds Alpine + the pmos
+# kernel flavor + the selected UI and images the rootfs itself (it carries its
+# own boot/root subpartition table). The kernel is installed as an apk, not a
+# .deb.
+
+builder: pmbootstrap
+
+# pmbootstrap is configured per build from the device + --desktop, then install
+# builds and images the rootfs.
+steps:
+  - [pmbootstrap, config, device, "<codename>"]
+  - [pmbootstrap, config, ui, "<desktop>"]      # e.g. phosh
+  - [pmbootstrap, install, --split]
+
+# UI packages are pulled by the pmbootstrap UI selection (deviceinfo /
+# postmarketos-ui-<ui>); there is no separate apt package list here.
+# Extra packages can be added with `pmbootstrap config extra_packages "..."`.
+
+# Output: ~/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs/<codename>.img
