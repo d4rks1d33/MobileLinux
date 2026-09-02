@@ -1,0 +1,66 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 11:25:00 -0300
+Subject: [PATCH] DIAGNOSTIC: drm/msm/dsi: log the raw error registers
+
+Not for source= beyond the investigation it belongs to.
+
+dsi_err_worker() prints err_work_state and nothing else, which collapses
+six registers into six bits -- and each handler clears its register
+before anyone can read it. So the only thing that ever reaches the log
+is "dsi_err_worker: status=5", which is not enough to tell a real fault
+from a benign one.
+
+It is worse than merely coarse. dsi_fifo_status() raises
+DSI_ERR_STATE_FIFO for *any* non-zero FIFO_STATUS, and that register
+carries DLN0_LP_FIFO_EMPTY, DLN0_HS_FIFO_EMPTY and the same for lanes
+1-3 -- an idle FIFO is empty, so those bits are a normal condition
+rather than an error. Part of "status=5" may be nothing at all.
+
+Snapshot FIFO_STATUS, TIMEOUT_STATUS, ACK_ERR_STATUS, STATUS0,
+DLN0_PHY_ERR and CLK_STATUS before the handlers run, and print them
+ratelimited along with the CMD_MODE_MDP_BUSY and CMD_MODE_DMA_BUSY bits,
+so the state of the link at the moment of the error is visible too.
+
+Written for the glitched lines this panel paints while the brightness
+ramps down under a repainting compositor, after three plausible fixes
+were built, flashed and disproven: sending the brightness in LP instead
+of HS, raising the DSI clock from 100% to 230% of the theoretical
+minimum, and waiting for CMD_MODE_MDP_BUSY to clear before starting a
+command DMA. None changed the artefact, and the last never timed out
+once, so the contention theory behind it is unsupported. This stops the
+guessing and asks the hardware instead.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -1684,6 +1684,29 @@
+ 
+ static void dsi_error(struct msm_dsi_host *msm_host)
+ {
++	/*
++	 * DIAGNOSTIC. dsi_err_worker() only ever prints err_work_state, which
++	 * collapses six registers into six bits and is cleared by the handlers
++	 * below before anyone can look at it. "status=5" is therefore all the
++	 * information that reaches the log, and it is not enough to tell a real
++	 * fault from a benign one -- dsi_fifo_status() in particular raises
++	 * DSI_ERR_STATE_FIFO for *any* non-zero FIFO_STATUS, and that register
++	 * carries DLN*_FIFO_EMPTY bits, which are a normal idle condition.
++	 *
++	 * Snapshot the raw values before the handlers clear them.
++	 */
++	u32 d_fifo = dsi_read(msm_host, REG_DSI_FIFO_STATUS);
++	u32 d_tout = dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS);
++	u32 d_ack = dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS);
++	u32 d_stat = dsi_read(msm_host, REG_DSI_STATUS0);
++	u32 d_phy = dsi_read(msm_host, REG_DSI_DLN0_PHY_ERR);
++	u32 d_clk = dsi_read(msm_host, REG_DSI_CLK_STATUS);
++
++	pr_err_ratelimited("dsi-diag: fifo=%08x timeout=%08x ack=%08x status0=%08x phy=%08x clk=%08x mdp_busy=%d dma_busy=%d\n",
++			   d_fifo, d_tout, d_ack, d_stat, d_phy, d_clk,
++			   !!(d_stat & DSI_STATUS0_CMD_MODE_MDP_BUSY),
++			   !!(d_stat & DSI_STATUS0_CMD_MODE_DMA_BUSY));
++
+ 	/* disable dsi error interrupt */
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 0);
+ 

@@ -1,0 +1,77 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: enable WiFi and Bluetooth
+
+Enable the wifi node from sm6375.dtsi (qcom,wcn3990-wifi at 0xc800000) with
+the regulators mapped from the vendor blair.dtsi icnss node via
+holi-regulators-pm6125.dtsi. It has qcom,msa-fixed-perm, so no modem is
+needed to set up the MSA permissions.
+
+Add the Bluetooth (also WCN3990) on UART1 / QUPv3 SE1, which the vendor DT
+confirms (hsuart0 = &qupv3_se1_4uart; compatible = "qcom,wcn3990"). btqca
+builds the firmware names itself (qca/crbtfwXX.tlv, qca/crnvXX.bin) so no
+firmware-name property is needed.
+
+Also add a serial alias: qcom_geni_serial assigns the port line number from
+an alias and fails the probe with "Invalid line -19" (-ENODEV) without one.
+It accepts "serialN" and, for compatibility, "hsuartN" -- the latter being
+what the vendor DT uses.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -34,6 +34,16 @@
+ 	qcom,msm-id = <507 0x10000>;
+ 	qcom,board-id = <0x4d 0xb200>;
+ 
++	/*
++	 * qcom_geni_serial needs an alias to assign a line number to the port;
++	 * without this the probe fails with "Invalid line -19" (-ENODEV).
++	 * It accepts "serialN" and, for compatibility, "hsuartN", which is what
++	 * the vendor DT uses (hsuart0 = &qupv3_se1_4uart).
++	 */
++	aliases {
++		serial0 = &uart1;
++	};
++
+ 	chosen {
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+@@ -575,6 +585,39 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * Bluetooth: WCN3990 on UART1 (QUPv3 SE1). The vendor DT confirms it:
++ *   hsuart0 = &qupv3_se1_4uart;  compatible = "qcom,wcn3990";
++ * The regulators come from the bt_wcn3990 node in blair.dtsi, mapped to the
++ * nombres de mainline via holi-regulators-pm6125.dtsi:
++ *   vddio  = L9A  -> pm6125_l9
++ *   vddxo  = L16A -> pm6125_l16
++ *   vddrf  = L2A  -> pm6125_l2
++ *   vddch0 = L23A -> pm6125_l23
++ * max-speed taken from the standard WCN3990 baud rate in mainline (3.2 Mbps).
++ */
++&uart1 {
++	status = "okay";
++
++	bluetooth: bluetooth {
++		compatible = "qcom,wcn3990-bt";
++
++		vddio-supply = <&pm6125_l9>;
++		vddxo-supply = <&pm6125_l16>;
++		vddrf-supply = <&pm6125_l2>;
++		vddch0-supply = <&pm6125_l23>;
++
++		max-speed = <3200000>;
++
++		/*
++		 * No firmware-name needed: btqca builds the name itself from the
++		 * chip version it reads (qca/crbtfw%02x.tlv + qca/crnv%02x.bin),
++		 * which are the files installed by the
++		 * paquete firmware-motorola-rhodep en /lib/firmware/qca/.
++		 */
++	};
++};
++
+ &xo_board_clk {
+ 	clock-frequency = <19200000>;
+ };

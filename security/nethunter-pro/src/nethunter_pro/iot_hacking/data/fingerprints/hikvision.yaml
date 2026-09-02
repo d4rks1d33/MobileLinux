@@ -1,0 +1,28 @@
+id: hikvision
+version: 1
+device_type: camera
+vendor: Hikvision
+family: hikvision
+threshold: 60
+matchers:
+  - name: http-webserver
+    type: http_header
+    path: /
+    header_regex: 'Server:\s*App-webs|Server:\s*DNVRS-Webs|Hikvision'
+    confidence: 80
+  - name: http-body
+    type: http_body
+    path: /
+    regex: 'Hikvision|/doc/page/login\.asp'
+    confidence: 50
+  - name: port-8000
+    type: port
+    port: 8000
+    confidence: 20
+  - name: port-554-rtsp
+    type: port
+    port: 554
+    confidence: 10
+metadata:
+  playbook: hikvision
+  known_cves: ["CVE-2021-36260", "CVE-2017-7921"]

@@ -1,0 +1,8 @@
+# rmtfs resolves the modem's storage requests under /dev/disk/by-partlabel using
+# the bare partition names. On this device modemst1, modemst2 and fsc are
+# unsuffixed but fsg is A/B suffixed (fsg_a / fsg_b), so without an alias rmtfs
+# would fail to serve the factory NV backup if the modem ever asked for it.
+#
+# The modem has not been observed requesting it (a cold boot only shows
+# /boot/modem_fs1 and /boot/modem_fs2 being opened), so this is preventive.
+ENV{PARTNAME}=="fsg_a", SYMLINK+="disk/by-partlabel/fsg"

@@ -1,0 +1,46 @@
+From: rhodep port <none@example.com>
+Date: Tue, 25 Aug 2026 01:10:00 -0300
+Subject: [PATCH] net: ipa: do not add the memory offset to a size
+
+init_modem_driver_req() tells the modem where its hardware statistics regions
+are and how big they are:
+
+	req.hw_stats_quota_base_addr = ipa->mem_offset + mem->offset;
+	req.hw_stats_quota_size = ipa->mem_offset + mem->size;
+
+The base address is right. The size is not. `ipa->mem_offset` is where IPA's
+local memory starts, read from SHARED_MEM_SIZE, and it belongs in an address,
+not in a length. The same mistake is repeated for the drop statistics region.
+
+Downstream sends the plain size for both:
+
+	req.hw_stats_quota_size = IPA_MEM_PART(stats_quota_q6_size);
+	req.hw_drop_stats_table_size = IPA_MEM_PART(stats_drop_size);
+
+If mem_offset is zero on a given SoC this never mattered, which is presumably
+why it has survived. Where it is not zero, the modem is told a region is that
+many bytes longer than it is, and the quota region here is 0x30 bytes with the
+AP's own quota region immediately after it at 0x1d30.
+
+Send the size.
+---
+--- a/drivers/net/ipa/ipa_qmi.c
++++ b/drivers/net/ipa/ipa_qmi.c
+@@ -380,7 +380,7 @@
+ 			req.hw_stats_quota_base_addr =
+ 				ipa->mem_offset + mem->offset;
+ 			req.hw_stats_quota_size_valid = 1;
+-			req.hw_stats_quota_size = ipa->mem_offset + mem->size;
++			req.hw_stats_quota_size = mem->size;
+ 		}
+ 
+ 		/* If the DROP stats region is defined, include it */
+@@ -390,7 +390,7 @@
+ 			req.hw_stats_drop_base_addr =
+ 				ipa->mem_offset + mem->offset;
+ 			req.hw_stats_drop_size_valid = 1;
+-			req.hw_stats_drop_size = ipa->mem_offset + mem->size;
++			req.hw_stats_drop_size = mem->size;
+ 		}
+ 	}
+ 

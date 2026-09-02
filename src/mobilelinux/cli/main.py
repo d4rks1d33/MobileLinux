@@ -16,51 +16,69 @@ from .context import Context
 from . import commands
 
 
+def _add_global_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", help="path to the mobilelinux repository (default: autodetect)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print actions without executing anything")
+    parser.add_argument("--execute", action="store_true",
+                        help="actually run build/flash steps (default: plan only)")
+    parser.add_argument("--allow-dangerous", action="store_true",
+                        help="permit ops that touch real block/loop devices (implies --execute)")
+    parser.add_argument("-q", "--quiet", action="store_true", help="reduce output")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="assume yes to confirmations (dangerous)")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # A parent parser lets the global flags appear either before OR after the
+    # subcommand (e.g. `mobilelinux flash rhodep --dry-run`).
+    common = argparse.ArgumentParser(add_help=False)
+    _add_global_flags(common)
+
     p = argparse.ArgumentParser(
         prog="mobilelinux",
         description="Automated device porting platform for mobile Linux.",
+        parents=[common],
     )
-    p.add_argument("--repo", help="path to the mobilelinux repository (default: autodetect)")
-    p.add_argument("--dry-run", action="store_true", help="print actions without executing destructive/build commands")
-    p.add_argument("-q", "--quiet", action="store_true", help="reduce output")
-    p.add_argument("-y", "--yes", action="store_true", help="assume yes to confirmations (dangerous)")
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
-    sub.add_parser("list-devices", help="list all registered devices")
+    def add(name, help):
+        return sub.add_parser(name, help=help, parents=[common])
 
-    sp = sub.add_parser("device-info", help="show details for a device")
+    add("list-devices", "list all registered devices")
+
+    sp = add("device-info", "show details for a device")
     sp.add_argument("device")
 
-    sp = sub.add_parser("check", help="compatibility/hardware-support report for a device")
+    sp = add("check", "compatibility/hardware-support report for a device")
     sp.add_argument("device")
 
-    sp = sub.add_parser("validate", help="validate device definitions against the schema")
+    sp = add("validate", "validate device definitions against the schema")
     sp.add_argument("device", nargs="?", help="a specific device (default: all)")
 
-    sp = sub.add_parser("detect", help="detect a connected device (usb/adb/fastboot)")
+    add("detect", "detect a connected device (usb/adb/fastboot)")
 
-    sp = sub.add_parser("build", help="build images for a device")
+    sp = add("build", "build images for a device")
     sp.add_argument("device")
     sp.add_argument("--distro", default=None, help="distribution backend (default from config)")
     sp.add_argument("--desktop", default=None, help="desktop environment")
     sp.add_argument("--profile", default=None, help="distro profile, e.g. 'security'")
 
-    sp = sub.add_parser("flash", help="install/flash a device using its declared strategy")
+    sp = add("flash", "install/flash a device using its declared strategy")
     sp.add_argument("device")
     sp.add_argument("--recovery", action="store_true", help="use the recovery/rescue flow")
 
-    sp = sub.add_parser("test", help="run the hardware test suite (mostly on-device)")
+    sp = add("test", "run the hardware test suite (mostly on-device)")
     sp.add_argument("device")
     sp.add_argument("--only", help="comma-separated subset of tests")
 
-    sp = sub.add_parser("release", help="produce a signed release + OTA metadata")
+    sp = add("release", "produce a signed release + OTA metadata")
     sp.add_argument("device")
     sp.add_argument("--version", required=True)
     sp.add_argument("--channel", default="stable")
 
-    sp = sub.add_parser("update", help="OTA update client (run on device)")
+    sp = add("update", "OTA update client (run on device)")
     sp.add_argument("--check", action="store_true")
     sp.add_argument("--download", action="store_true")
     sp.add_argument("--install", action="store_true")
@@ -68,9 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--status", action="store_true")
     sp.add_argument("--channel", default=None)
 
-    sub.add_parser("security-status", help="show version + security patch level + affected CVEs")
+    add("security-status", "show version + security patch level + affected CVEs")
 
-    sp = sub.add_parser("import", help="import a device definition from postmarketOS pmaports")
+    sp = add("import", "import a device definition from postmarketOS pmaports")
     sp.add_argument("source", help="pmaports path or device codename")
 
     return p
@@ -85,11 +103,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        allow_dangerous = getattr(args, "allow_dangerous", False)
         ctx = Context.create(
             repo_path=args.repo,
             dry_run=getattr(args, "dry_run", False),
             verbose=not getattr(args, "quiet", False),
             assume_yes=getattr(args, "yes", False),
+            execute=getattr(args, "execute", False) or allow_dangerous,
+            allow_dangerous=allow_dangerous,
         )
         return commands.dispatch(ctx, args)
     except MobileLinuxError as exc:

@@ -1,0 +1,9 @@
+// Re-assert the holds and the guard's own files after every apt transaction.
+//
+// The 50 hook refuses to REMOVE a held package. This one covers the other
+// half: something that changes the hold marks themselves, or deletes the
+// guard, rather than removing a package. Post-Invoke runs after dpkg is done,
+// so it cannot abort anything; it repairs and logs instead.
+//
+// || true so that a failure in the enforcer can never make an apt run fail.
+DPkg::Post-Invoke { "/usr/local/sbin/rhodep-holds-enforce --in-apt >/dev/null 2>&1 || true"; };

@@ -1,0 +1,17 @@
+[Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=10
+Description=Enable the Moto G82 speaker route before the audio server starts
+After=sound.target alsa-restore.service
+Wants=sound.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rhodep-audio-route.sh
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

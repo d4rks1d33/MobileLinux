@@ -1,0 +1,97 @@
+#!/bin/sh
+# NetworkManager tira el WiFi al DESPERTAR, no durante la suspension.
+#
+# do_sleep_wake() en nm-manager.c decide preguntandole al hardware si wake-on-lan
+# esta armado -- nm_platform_link_get_wake_on_lan(), no un archivo de config:
+#
+#   al suspender:  los dispositivos con WoWLAN armado se SALTEAN
+#                  ("Wake-on-LAN devices will be taken down post-suspend rather
+#                  than pre-"), asi que el enlace sobrevive el sueno entero.
+#   al despertar:  esos mismos se bajan "belatedly ... the only way to make sure
+#                  we re-check their connectivity" -> deauth y reconexion desde
+#                  cero, ~8 segundos.
+#
+# La segunda mitad es incondicional, no tiene opcion de configuracion, y sigue
+# igual en main. Medido: 1586 s de suspend con la asociacion viva, y el enlace
+# destruido 1 segundo despues del resume.
+#
+# Truco: como NM consulta el estado REAL del hardware, alcanza con que WoWLAN
+# aparezca desarmado en ese instante. systemd-sleep corre estos hooks de forma
+# sincronica y logind recien emite PrepareForSleep(false) cuando el proceso sale,
+# asi que 'post' SIEMPRE termina antes de que NM mire. No es una carrera:
+#
+#   22:37:25.518  systemd-sleep: System returned from sleep operation
+#   22:37:26.072  systemd-logind: Operation 'suspend' finished
+#   22:37:26.077  NetworkManager: sleep: wake requested     <- 5 ms despues
+#
+# El rearmado NO puede ir en 'pre': logind le avisa a NM antes de correr ningun
+# hook, asi que cuando 'pre' se ejecuta NM ya decidio. Por eso se rearma unos
+# segundos despues del resume, ya con NM tranquilo.
+#
+# Dos cosas que la primera version hizo mal y costaron un telefono inalcanzable:
+#
+#   1. El rearmado iba en 'setsid sh -c "sleep 10; ..." &'. setsid saca al hijo
+#      de la sesion y del TTY pero NO del cgroup, y systemd-suspend.service se
+#      desactivo 380 ms despues -- matando el cgroup entero con el hijo adentro.
+#      El rearmado nunca corrio y WoWLAN quedo desarmado de forma permanente.
+#      Por eso ahora va con systemd-run, que crea una unidad transitoria propia.
+#
+#   2. Diez segundos de ventana con WoWLAN desarmado, sin nada que impidiera una
+#      suspension nueva en el medio -- que habria dejado el telefono dormido, sin
+#      poder despertarlo por red y con NM bajando la interfaz. Ahora son 2 s: NM
+#      mira 5 ms despues de logind, los 10 no tenian ninguna razon de ser.
+#
+# Un inhibidor 'delay' alrededor del rearmado seria lo ideal para cerrar esa
+# ventana del todo, pero NO se puede pedir desde aca: logind lo rechaza mientras
+# la operacion de sueno sigue abierta --
+#   systemd-inhibit: Failed to inhibit: The operation inhibition has been
+#                    requested for is already running
+# y el hook corre justamente dentro de esa operacion. Pedirlo hacia fallar la
+# unidad entera en 38 ms y dejaba WoWLAN desarmado, que es peor que la carrera
+# que intentaba evitar. El respaldo real contra esa ventana es el temporizador
+# rhodep-wowlan-check, que reconcilia el estado en vez de depender del timing.
+#
+# Si algo de esto falla, el peor caso es el comportamiento de hoy: NM baja la
+# interfaz y reconecta. No deja el telefono sin red.
+
+DELAY=2
+
+phy_of() {
+	# El indice de phy NO es fijo: el dongle USB se lleva phy1/phy2 y cambia
+	# en cada reset. Resolverlo siempre desde wlan0.
+	iw dev wlan0 info 2>/dev/null | awk '/wiphy/ {print "phy" $2; exit}'
+}
+
+case "$1" in
+post)
+	PHY=$(phy_of)
+	[ -n "$PHY" ] || exit 0
+
+	# Solo actuar si de verdad estaba armado, para no reactivar WoWLAN en un
+	# telefono donde se decidio desactivarlo.
+	iw "$PHY" wowlan show 2>/dev/null | grep -qi "is enabled" || exit 0
+
+	# El desarmado va sincronico y aca: tiene que estar hecho antes de que NM
+	# mire, y este hook corre dentro de systemd-sleep, que logind espera.
+	iw "$PHY" wowlan disable 2>/dev/null
+	logger -t rhodep-wowlan "WoWLAN desarmado en $PHY para que NM no baje wlan0 al despertar; rearma en ${DELAY}s"
+
+	# Marca para que rhodep-wowlan-check no rearme durante la ventana, que
+	# arruinaria el proposito del hook.
+	touch /run/rhodep-wowlan.resuming
+
+	# --collect: la unidad se limpia sola. Unidad transitoria propia = cgroup
+	# propio = sobrevive al fin de systemd-suspend.service.
+	systemd-run --collect --quiet --unit=rhodep-wowlan-rearm \
+		/bin/sh -c "sleep $DELAY; \
+			rm -f /run/rhodep-wowlan.resuming; \
+			if iw $PHY wowlan enable magic-packet 2>/dev/null; then \
+				logger -t rhodep-wowlan 'WoWLAN rearmado en $PHY'; \
+			else \
+				logger -t rhodep-wowlan 'ERROR: no se pudo rearmar WoWLAN en $PHY'; \
+			fi" \
+		|| logger -t rhodep-wowlan "ERROR: systemd-run fallo, WoWLAN queda desarmado en $PHY"
+	;;
+esac
+
+exit 0

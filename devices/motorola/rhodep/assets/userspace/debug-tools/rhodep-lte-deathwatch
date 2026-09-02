@@ -1,0 +1,81 @@
+#!/bin/sh
+# Sample the modem's liveness into the kernel log, fast, so that whatever is
+# still true one tick before the SoC dies survives in console-ramoops.
+#
+# The LTE reset leaves nothing behind: no panic, no exception, no fatal from
+# the modem, just tens of seconds of silence and then a watchdog-flagged
+# power-on. Silence is not evidence on its own, because it is equally what a
+# healthy idle system produces. This makes the silence speak: if the counters
+# keep moving right up to the last line, the system was alive and something
+# outside it pulled the plug. If they stop early, whatever stopped them first
+# is the thing to chase.
+#
+# Lines are kept short on purpose. console-ramoops here holds about 13 KB, and
+# the tail is the only part that matters.
+#
+# usage: rhodep-lte-deathwatch [seconds]
+set -u
+
+SECS=${1:-90}
+KMSG=/dev/kmsg
+
+# /proc/interrupts puts the controller before the name, and there are stray
+# numbers after the counts (the hwirq), so sum only the eight cpu columns.
+irq() { awk -v pat="$1" '$0 ~ pat {s=0; for (i=2; i<=9; i++) s+=$i; print s+0; exit}' /proc/interrupts; }
+
+MODEM_RPROC=
+for d in /sys/class/remoteproc/remoteproc*; do
+	[ "$(cat "$d/name" 2>/dev/null)" = "modem" ] && MODEM_RPROC=$d && break
+done
+
+# The modem asks the AP over smp2p whether the IPA clock is running before it
+# touches IPA registers, and the AP answers on ipa-clock-enabled-valid and
+# ipa-clock-enabled. If that exchange goes wrong the modem reads a register on
+# a gated block, the bus transaction never completes and the system dies with
+# nothing to say -- which is the shape of this bug. On GSM the query never
+# fires at all, so watch it.
+IPA_PM=$(ls -d /sys/devices/platform/soc@0/*.ipa/power 2>/dev/null | head -1)
+
+# The modem's own GSI channel states, if the diagnostic patch that exports them
+# is in. One hex digit per channel: 1 allocated, 2 started, 3 stopped,
+# 4 stopping, 0xf error. This is the only piece of modem-side state the AP can
+# read, and the ten seconds it takes to die are spent somewhere in there.
+IPA_MGS=$(ls -d /sys/devices/platform/soc@0/*.ipa/modem_gsi_state 2>/dev/null | head -1)
+
+# The modem's crash reason out of SMEM, if the diagnostic patch that exports it
+# is in. The driver only reads this on a fatal interrupt, which never arrives
+# here, and after a reset the bootloader has already wiped SMEM. The only
+# window it can be caught in is while the machine is still running.
+CR=
+for d in /sys/devices/platform/soc@0/*.remoteproc; do
+	[ "$(cat "$d/remoteproc/remoteproc"*/name 2>/dev/null | head -1)" = "modem" ] || continue
+	[ -r "$d/crash_reason_text" ] && CR=$d/crash_reason_text && break
+done
+[ -n "$CR" ] || CR=$(ls /sys/devices/platform/soc@0/6080000.remoteproc/crash_reason_text 2>/dev/null)
+
+# The subsystem writes a placeholder into its SFR item at init and replaces it
+# only if it manages an orderly assert. Print the baseline once, then report
+# just the changes, so the line stays short and any real reason stands out.
+CR_BASE=$(cat "$CR" 2>/dev/null)
+
+echo "DW: start rproc=${MODEM_RPROC:-none} cr_base='$CR_BASE'" > $KMSG
+
+i=0
+end=$(( $(cut -d. -f1 /proc/uptime) + SECS ))
+while [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do
+	i=$((i + 1))
+	up=$(cut -d' ' -f1 /proc/uptime)
+	st=$(cat "$MODEM_RPROC/state" 2>/dev/null | cut -c1-3)
+	# modem smp2p lines, and the ipa/gsi pair
+	f=$(irq "smp2p-modem.*q6v5 fatal"); r=$(irq "smp2p-modem.*q6v5 ready")
+	h=$(irq "smp2p-modem.*q6v5 handover"); w=$(irq "339.*q6v5 wdog")
+	ipa=$(irq "Edge +ipa$"); gsi=$(irq "Level +gsi$")
+	cq=$(irq "ipa-clock-query"); sr=$(irq "ipa-setup-ready")
+	pm=$(cut -c1-3 "$IPA_PM/runtime_status" 2>/dev/null)
+	mgs=$(cat "$IPA_MGS" 2>/dev/null)
+	cr=$(cat "$CR" 2>/dev/null)
+	if [ "$cr" = "$CR_BASE" ]; then cr=init; fi
+	echo "DW $i t=$up $st f=$f r=$r h=$h w=$w ipa=$ipa gsi=$gsi cq=$cq pm=$pm mgs=$mgs cr=$cr" > $KMSG
+	sleep 0.25
+done
+echo "DW: end clean" > $KMSG

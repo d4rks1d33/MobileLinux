@@ -1,0 +1,90 @@
+#!/bin/sh
+# Give the Bluetooth controller its real address before bluetoothd starts.
+#
+# The QCA WCN3990 does not hold its own address: the bootloader passes it on
+# the kernel command line and something has to program it. Mainline's
+# hci_qca serdev driver reads it from `local-bd-address` in the device tree,
+# and this port's device tree does not describe the controller at all, so the
+# stack falls back to a random locally-administered address:
+#
+#	BD Address: 02:00:60:3B:D3:94        <- random, 02: = locally administered
+#
+# A new one is generated on every boot, which means every device the phone has
+# ever paired with sees a different phone after a reboot and the pairing is
+# dead. `androidboot.btmacaddr` on the command line has the real one:
+#
+#	BD Address: E4:26:D5:01:11:0F
+#
+# Doing it here rather than in the device tree keeps this a rootfs change, so
+# it needs no new boot image. Adding `local-bd-address` to the DT would be the
+# tidier fix and is worth doing next time the boot image is rebuilt anyway.
+set -u
+
+MAC=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^androidboot\.btmacaddr=//p' | head -1)
+
+case "$MAC" in
+	[0-9A-Fa-f][0-9A-Fa-f]:*:[0-9A-Fa-f][0-9A-Fa-f]) ;;
+	*) echo "rhodep-bt-address: no usable androidboot.btmacaddr on the command line"; exit 0 ;;
+esac
+
+current() { hciconfig hci0 2>/dev/null | sed -n 's/.*BD Address: \([0-9A-F:]*\).*/\1/p'; }
+
+# Whether bluetoothd can use the controller at all, which is a different
+# question from whether the address is right, and the more important one.
+listed() { btmgmt info 2>/dev/null | grep -q '^hci0:'; }
+
+# Whether the kernel considers the controller unconfigured, which is the only
+# state in which programming a public address is the right thing to do.
+unconfigured() { btmgmt --index 0 info 2>/dev/null | grep -qi 'unconfigured'; }
+
+# Do nothing to a controller that already works.
+#
+# This is the bug this script used to *be*. Set Public Address is meant for
+# controllers the kernel has marked unconfigured; issuing it to one that is
+# already configured moves it into the configuration-pending state, and if that
+# transition does not complete the adapter is dropped from both the configured
+# and the unconfigured controller lists in net/bluetooth/mgmt.c. The result was
+# an adapter that hciconfig showed as UP RUNNING with exactly the right BD
+# address, that this script declared success on -- "set E4:26:D5:01:11:0F after
+# 1 retries" -- and that bluetoothd could not see at all:
+#
+#	# btmgmt info
+#	Index list with 0 items
+#	# bluetoothctl show
+#	No default controller available
+#
+# Measured by disabling this service and rebooting: the controller comes back
+# as "Index list with 1 item", powered, and bluetoothctl drives it. The service
+# was the whole fault. So the first thing it does now is check whether there is
+# anything to fix, and leave a working controller alone.
+if listed; then
+	if [ "$(current)" = "$MAC" ]; then
+		echo "rhodep-bt-address: controller already usable on $MAC, nothing to do"
+	else
+		echo "rhodep-bt-address: controller usable on $(current), leaving it alone" \
+		     "(wanted $MAC, but a working adapter is worth more than the right address)"
+	fi
+	exit 0
+fi
+
+# Only an unconfigured controller gets programmed, and only while powered down.
+i=0
+while [ $i -lt 10 ]; do
+	if listed; then
+		echo "rhodep-bt-address: controller listed on $(current) after $i attempts"
+		exit 0
+	fi
+
+	if unconfigured; then
+		btmgmt --index 0 power off >/dev/null 2>&1
+		btmgmt --index 0 public-addr "$MAC" >/dev/null 2>&1
+		btmgmt --index 0 power on >/dev/null 2>&1
+	fi
+
+	i=$((i + 1))
+	sleep 2
+done
+
+echo "rhodep-bt-address: controller on $(current) is not listed by mgmt and not"
+echo "rhodep-bt-address: reported unconfigured either; leaving it untouched"
+exit 0

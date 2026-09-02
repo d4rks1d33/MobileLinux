@@ -1,0 +1,31 @@
+id: kasa
+version: 1
+device_type: smart_plug
+vendor: TP-Link
+family: kasa
+threshold: 60
+matchers:
+  - name: udp-9999-reply
+    type: udp_reply
+    port: 9999
+    body_regex: 'system'
+    confidence: 80
+    extract:
+      alias: '"alias":"([^"]+)"'
+      model: '"model":"([^"]+)"'
+      hw_ver: '"hw_ver":"([^"]+)"'
+      sw_ver: '"sw_ver":"([^"]+)"'
+      mac: '"mac":"([^"]+)"'
+  - name: port-9999-open
+    type: port
+    port: 9999
+    protocol: tcp
+    confidence: 20
+  - name: oui-tplink
+    type: mac_oui
+    values: ["50:C7:BF", "B0:BE:76", "1C:61:B4", "98:DA:C4",
+             "10:27:F5", "AC:84:C6", "70:4F:57"]
+    confidence: 15
+metadata:
+  playbook: kasa
+  known_cves: []

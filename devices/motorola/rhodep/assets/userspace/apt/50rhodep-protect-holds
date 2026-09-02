@@ -1,0 +1,11 @@
+// Refuse to remove or purge packages this port holds. See rhodep-apt-guard.
+//
+// A hold does not stop `apt purge`, so without this one command can take out
+// the audio stack, the modem transport, the WiFi firmware or the keyboard. The
+// hook runs before dpkg is handed anything and aborts the transaction, so
+// nothing has been removed by the time it refuses.
+DPkg::Pre-Install-Pkgs { "/usr/local/sbin/rhodep-apt-guard"; };
+
+// Version 2 of the protocol is what sends the package list, including which
+// entries are removals, rather than only the .deb paths being installed.
+DPkg::Tools::Options::/usr/local/sbin/rhodep-apt-guard::Version "2";

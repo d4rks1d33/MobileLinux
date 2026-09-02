@@ -1,0 +1,42 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: bq256xx: report device scope for the battery
+
+The driver registers a power supply of type POWER_SUPPLY_TYPE_BATTERY that
+only exposes the charge current and voltage limits, with no state of charge.
+UPower still treats it as a system battery: it reads no capacity, assumes 0%,
+and averages it with the real fuel gauge, so the composite battery shown in
+the UI reads half of the true value.
+
+Report POWER_SUPPLY_SCOPE_DEVICE, which is the standard way to tell userspace
+this is not the system battery. UPower then leaves it out of the system
+battery entirely. UPOWER_IGNORE via udev does not help here, because UPower
+builds the composite device from the sysfs "scope" attribute before honouring
+udev environment.
+
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -978,6 +978,16 @@
+ 		val->intval = bq->init_data.vbatreg_max;
+ 		break;
+ 
++	case POWER_SUPPLY_PROP_SCOPE:
++		/*
++		 * This power supply only carries the charge current and voltage
++		 * limits, not a state of charge. Report device scope so that
++		 * userspace (e.g. UPower) does not mistake it for the system
++		 * battery and average it with the real fuel gauge.
++		 */
++		val->intval = POWER_SUPPLY_SCOPE_DEVICE;
++		break;
++
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -1224,6 +1234,7 @@
+ static enum power_supply_property bq256xx_battery_props[] = {
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_SCOPE,
+ };
+ 
+ static int bq256xx_property_is_writeable(struct power_supply *psy,

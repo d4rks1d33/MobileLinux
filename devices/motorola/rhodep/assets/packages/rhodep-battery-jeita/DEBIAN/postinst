@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now rhodep-battery-jeita.service 2>/dev/null || true
+exit 0

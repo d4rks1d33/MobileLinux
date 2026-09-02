@@ -1,0 +1,22 @@
+[Unit]
+Description=pwnagotchi on rhodep (captures on the external TP-Link, wlan1)
+Documentation=https://github.com/jayofelony/pwnagotchi/wiki
+Wants=network.target
+# Requires, not just After: with only After= systemd will not start these,
+# and the agent then spins on a refused connection to bettercap's and pwngrid's
+# APIs. Requires pulls them in; the ordering keeps it after they are up.
+Requires=rhodep-pwn-bettercap.service rhodep-pwngrid-peer.service
+After=rhodep-pwn-bettercap.service rhodep-pwngrid-peer.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root
+# manual mode by default: listens and serves the web UI, never transmits.
+# Change "manual" to "auto" for the full loop.
+ExecStart=/usr/local/sbin/rhodep-pwn-launcher manual
+Restart=always
+RestartSec=30
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

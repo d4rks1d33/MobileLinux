@@ -1,0 +1,8 @@
+{
+  "name": "rhodep-claude-free-picker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@inquirer/prompts": "^7"
+  }
+}

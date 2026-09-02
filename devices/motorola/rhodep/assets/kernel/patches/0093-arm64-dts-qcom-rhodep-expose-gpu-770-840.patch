@@ -1,0 +1,88 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: expose the GPU's
+ remaining speed-bin steps (770 and 840 MHz)
+
+Patch 0007 stopped the GPU OPP table at NOM (650 MHz) and said so:
+
+	Only up to NOM (650 MHz) is exposed for now; the turbo bins
+	(770/840/900) can be added once the GPU has been confirmed stable.
+
+It has been stable for a long time, so add them -- but not the three that
+comment names, and not from the file it took them from.
+
+Two things were wrong in the original derivation. First, it says the values
+came from qcom,gpu-pwrlevels-0 in the vendor blair.dtsi, and blair does
+include holi-gpu.dtsi -- but it then does /delete-node/ on
+qcom,gpu-pwrlevel-bins and defines four bins of its own, so holi's tables
+(which top out at 875) never apply to this SoC at all.
+
+Second, and this is what decides the ceiling, the bin is a fuse, not a
+choice. blair declares bins 0, 190, 177 and one more; the first two go to
+900 MHz and bin 177 stops at 840. Read the fuse on the device -- qfprom is
+at 0x1b40000 and the gpu_speed_bin cell at offset 0x6015, so byte
+0x1b46015, which mainline does not expose because sm6375.dtsi has no qfprom
+node:
+
+	# python3 mmap of /dev/mem at 0x1b46000, byte 0x15
+	gpu_speed_bin = 177
+
+which selects qcom,gpu-pwrlevels-2: 840 (TURBO), 770 (NOM_L1), 650 (NOM),
+490, 390, 266. So this part gets 770 and 840, and 900 MHz stays out: it is
+listed only for bins 0 and 190 and would be running the GPU past its bin.
+
+The frequencies need nothing from the clock driver -- ftbl_gpu_cc_gx_gfx3d_clk_src
+in gpucc-sm6375.c already lists 770, 840 and 900. Only the OPPs were
+missing. The corners are translated from the vendor's RPMH levels to the
+rpmpd (SMD RPM) ones this SoC actually uses, NOM_L1 -> rpmpd_opp_nom_plus
+and TURBO -> rpmpd_opp_turbo, both already defined in sm6375.dtsi, and they
+land on VDDGX rather than VDDCX for the reason patch 0007 documents.
+
+Thermal needs no change: the cooling-maps added by patch 0021 use
+THERMAL_NO_LIMIT for both bounds, so they pick up the new states on their
+own instead of being pinned to the old top index.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -1409,10 +1409,21 @@
+ 		};
+ 
+ 		/*
+-		 * Frequencies and levels taken from qcom,gpu-pwrlevels-0 in the
+-		 * vendor blair.dtsi. Only up to NOM (650 MHz) is exposed for now;
+-		 * the turbo bins (770/840/900) can be added once the GPU has been
+-		 * confirmed stable.
++		 * Frequencies and levels for this part's speed bin, read from the
++		 * hardware rather than assumed: the fuse at qfprom 0x6015 reads
++		 * 177, which is qcom,gpu-pwrlevels-2 in the vendor blair.dtsi --
++		 * 840 (TURBO) down to 266 (LOW_SVS).
++		 *
++		 * 900 MHz (TURBO_L1) is deliberately absent. It exists only in
++		 * bins 0 and 190, and this part is neither, so exposing it would
++		 * run the GPU past what the silicon was binned for. Note that
++		 * blair replaces holi's tables wholesale (/delete-node/ on
++		 * qcom,gpu-pwrlevel-bins), so holi-gpu.dtsi is the wrong file to
++		 * read for this SoC.
++		 *
++		 * The corners are rpmpd (SMD RPM) levels, not the RPMH ones the
++		 * vendor writes, and they land on VDDGX -- see the comment on
++		 * power-domains above.
+ 		 */
+ 		gpu_opp_table: opp-table {
+ 			compatible = "operating-points-v2";
+@@ -1436,6 +1447,16 @@
+ 				opp-hz = /bits/ 64 <650000000>;
+ 				required-opps = <&rpmpd_opp_nom>;
+ 			};
++
++			opp-770000000 {
++				opp-hz = /bits/ 64 <770000000>;
++				required-opps = <&rpmpd_opp_nom_plus>;
++			};
++
++			opp-840000000 {
++				opp-hz = /bits/ 64 <840000000>;
++				required-opps = <&rpmpd_opp_turbo>;
++			};
+ 		};
+ 	};
+ 

@@ -1,0 +1,10 @@
+id: pwnagotchi
+kind: security-tool
+layer: distro
+summary: WPA handshake capture; pins monitor mode to external USB wlan1
+install: install.sh
+requires_root: true
+depends:
+  apt: [python3-scapy, python3-dbus, bettercap]
+  external: [pwngrid, "/opt/pwnagotchi (jayofelony fork)"]
+notes: services shipped disabled; need 'otg on' + USB WiFi adapter.

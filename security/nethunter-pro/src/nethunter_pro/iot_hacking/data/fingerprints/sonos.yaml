@@ -1,0 +1,24 @@
+id: sonos
+version: 1
+device_type: speaker
+vendor: Sonos
+family: sonos
+threshold: 60
+matchers:
+  - name: port-1400
+    type: port
+    port: 1400
+    confidence: 40
+  - name: ssdp-zoneplayer
+    type: ssdp
+    st: "urn:schemas-upnp-org:device:ZonePlayer:1"
+    server_regex: 'Sonos'
+    confidence: 60
+    extract:
+      server: '(Linux UPnP/[0-9.]+ Sonos[^)]+)'
+  - name: mdns-sonos
+    type: mdns
+    mdns_type: _sonos._tcp
+    confidence: 60
+metadata:
+  playbook: sonos

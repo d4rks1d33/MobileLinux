@@ -1,0 +1,58 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: enable charger I2C buses
+
+This device has no battery reporting at all: /sys/class/power_supply is
+empty, so userspace cannot tell whether it is charging or how much charge
+is left.
+
+Unlike most Qualcomm phones, rhodep does not use the PMIC charger block.
+Charging is done by discrete I2C chips, and the vendor tree declares
+several alternatives on two QUP buses (downstream naming in parentheses):
+
+  qupv3_se8_i2c  (QUP1 SE2, our i2c8)  sgm,sgm41542   @ 0x3b
+                                       ti,bq2589x-1   @ 0x6a
+                                       cellwise,cw2217 @ 0x64
+                                       sm,sm5602      @ 0x71
+  qupv3_se10_i2c (QUP1 SE4, our i2c10) ti,bq25970     @ 0x66
+
+All of them are marked "okay" downstream because a single vendor driver
+probes the bus and keeps whichever chip answers; Motorola shipped more
+than one hardware variant under the same DTS. So the device tree cannot
+tell us which charger and which fuel gauge this unit actually has, and
+picking the wrong compatible would either do nothing or poke registers on
+the wrong chip.
+
+Enable the two buses on their own first, with no children. That makes the
+hardware enumerable from userspace (i2cdetect) so the populated addresses
+can be identified before any charger or fuel gauge node is committed.
+
+Both QUP wrappers and both GPI DMA engines are already enabled, and
+sm6375.dtsi already carries the matching pinctrl states, whose pins agree
+with the vendor tree (gpio19/20 for i2c8, gpio4/5 for i2c10). Enabling an
+I2C controller with no children is harmless: without a driver bound to a
+child, nothing drives the bus.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -169,6 +169,21 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * Charger / fuel gauge buses. Left childless on purpose: see commit message.
++ * i2c8  = QUP1 SE2, pins gpio19/gpio20 (vendor qupv3_se8_i2c)
++ * i2c10 = QUP1 SE4, pins gpio4/gpio5   (vendor qupv3_se10_i2c)
++ */
++&i2c8 {
++	clock-frequency = <400000>;
++	status = "okay";
++};
++
++&i2c10 {
++	clock-frequency = <400000>;
++	status = "okay";
++};
++
+ &pmk8350_adc_tm {
+ 	status = "okay";
+ };

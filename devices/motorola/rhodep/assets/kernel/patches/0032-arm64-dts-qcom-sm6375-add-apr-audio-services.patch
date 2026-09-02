@@ -1,0 +1,124 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: add the APR audio services
+
+The ADSP glink edge had no apr node, so none of the LPASS audio stack
+could come up: no q6afe (and therefore no q6afe clock controller, which
+everything from the LPI pin controller to the codec macros depends on), no
+q6asm front ends and no q6adm routing.
+
+Add the standard APR v2 service set, mirroring sm6115 (bengal), which is
+the same LPASS generation as sm6375 (holi).
+
+The stream id for the audio buffers is taken from holi-audio.dtsi, which
+overrides the generic msm-audio-lpass.dtsi definition of msm_audio_ion for
+this SoC:
+
+	&msm_audio_ion {
+		iommus = <&apps_smmu 0x00A1 0x0>;
+		qcom,smmu-sid-mask = /bits/ 64 <0xf>;
+	};
+
+so the stream id is 0xa1 and the mask in the iommus cell is 0. The 0xf in
+"qcom,smmu-sid-mask" is not an SMMU stream-matching mask: downstream uses it
+only to compute the sid it places in bits 32 and up of the address handed to
+the DSP ("smmu_sid = iommuspec.args[0] & smmu_sid_mask" in msm_audio_ion.c),
+which comes out as 0x1 there and matches what SID_MASK_DEFAULT produces here.
+Putting it in the iommus cell instead would program the stream matching
+register to cover 0xa0-0xaf, which is not what the vendor asks for. The values carried over from other SoCs
+(0x1c1 on sm6115, 0x1001 on sm6350, 0x1801 on sm8250) are wrong here: the
+ADSP acknowledges the memory map command either way, because mapping is
+just bookkeeping on its side, but it then stalls on the first read of a
+buffer it cannot translate and never returns WRITE_DONE.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -12,6 +12,9 @@
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/mailbox/qcom-ipcc.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
++#include <dt-bindings/soc/qcom,apr.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+ #include <dt-bindings/thermal/thermal.h>
+ 
+ / {
+@@ -1643,6 +1646,79 @@
+ 
+ 				label = "lpass";
+ 				qcom,remote-pid = <2>;
++
++				apr {
++					compatible = "qcom,apr-v2";
++					qcom,glink-channels = "apr_audio_svc";
++					qcom,domain = <APR_DOMAIN_ADSP>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++
++					service@3 {
++						compatible = "qcom,q6core";
++						reg = <APR_SVC_ADSP_CORE>;
++						qcom,protection-domain = "avs/audio",
++									 "msm/adsp/audio_pd";
++					};
++
++					q6afe: service@4 {
++						compatible = "qcom,q6afe";
++						reg = <APR_SVC_AFE>;
++						qcom,protection-domain = "avs/audio",
++									 "msm/adsp/audio_pd";
++
++						q6afedai: dais {
++							compatible = "qcom,q6afe-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++						};
++
++						q6afecc: clock-controller {
++							compatible = "qcom,q6afe-clocks";
++							#clock-cells = <2>;
++						};
++					};
++
++					q6asm: service@7 {
++						compatible = "qcom,q6asm";
++						reg = <APR_SVC_ASM>;
++						qcom,protection-domain = "avs/audio",
++									 "msm/adsp/audio_pd";
++
++						q6asmdai: dais {
++							compatible = "qcom,q6asm-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++							iommus = <&apps_smmu 0xa1 0x0>;
++
++							dai@0 {
++								reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
++							};
++
++							dai@1 {
++								reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
++							};
++
++							dai@2 {
++								reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
++							};
++						};
++					};
++
++					q6adm: service@8 {
++						compatible = "qcom,q6adm";
++						reg = <APR_SVC_ADM>;
++						qcom,protection-domain = "avs/audio",
++									 "msm/adsp/audio_pd";
++
++						q6routing: routing {
++							compatible = "qcom,q6adm-routing";
++							#sound-dai-cells = <0>;
++						};
++					};
++				};
+ 			};
+ 		};
+ 

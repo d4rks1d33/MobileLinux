@@ -1,0 +1,11 @@
+[Unit]
+Description=keep a per-boot copy of pstore records
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-pstore.service
+ConditionDirectoryNotEmpty=/sys/fs/pstore
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-pstore-keep
+[Install]
+WantedBy=sysinit.target

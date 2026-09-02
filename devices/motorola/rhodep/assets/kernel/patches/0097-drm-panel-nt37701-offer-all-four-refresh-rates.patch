@@ -1,0 +1,325 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/panel: nt37701: offer all four rates and switch between
+ them
+
+Patch 0094 made the refresh rate selectable but it was still chosen once,
+at power on, from a module parameter: DRM was handed a single mode, so
+nothing could change it afterwards. No setting in the desktop, and no
+dropping back to 60 Hz when the battery is low, which is what a phone
+should do and what the stock firmware does. 120 Hz is not free.
+
+Offer all four -- 48, 60, 90 and 120 -- and pick the register value from
+the mode actually in use.
+
+drm_panel has no mode_set callback, so a panel cannot be told directly. Do
+what panel-novatek-nt35950.c does: keep the connector from get_modes() and
+read the mode back out of the CRTC state when the power on sequence runs.
+That sequence is what programs register 0x2f, and a rate change is always a
+full modeset here, because the four modes differ in pixel clock. So the
+sequence runs again on every switch and applies the new timing by itself.
+
+The matching deserves a note. These modes differ in *nothing* except the
+pixel clock -- same resolution, same porches, same everything else -- so
+the clock is the only thing that can identify one, and it has to be
+compared after the same clk_scale get_modes() handed it out with. Matching
+on timings would match all four.
+
+The parameter keeps working and changes meaning slightly: refresh=N now
+pins the panel to one rate, and the default of 0 offers all of them with
+120 preferred. Pinning is still worth having for bringing a new phone up,
+or for ruling the panel out when something else is suspect.
+
+What this does not do is switch seamlessly. Every change is a full modeset,
+so the display blanks briefly. The vendor sends a timing-switch command
+instead and does not drop the link; doing the same would mean tracking the
+transition rather than re-running the power on sequence, and is worth
+having once this is known to be solid.
+
+--- a/drivers/gpu/drm/panel/panel-novatek-nt37701.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt37701.c
+@@ -15,6 +15,8 @@
+ 
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+@@ -23,6 +25,8 @@
+ struct nt37701 {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi;
++	/* Kept from get_modes() so the timing in use can be looked up later. */
++	struct drm_connector *connector;
+ 	struct drm_dsc_config dsc;
+ 	struct regulator_bulk_data *supplies;
+ 	struct gpio_desc *reset_gpio;
+@@ -61,6 +65,65 @@
+ module_param(pps_first, bool, 0644);
+ MODULE_PARM_DESC(pps_first, "send PPS before the power on sequence (default 0)");
+ 
++static const struct drm_display_mode nt37701_modes[] = {
++	{ /* 1080x2400 @ 48Hz */
++		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 48 / 1000,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 32,
++		.hsync_end = 1080 + 32 + 16,
++		.htotal = 1080 + 32 + 16 + 32,
++		.vdisplay = 2400,
++		.vsync_start = 2400 + 12,
++		.vsync_end = 2400 + 12 + 4,
++		.vtotal = 2400 + 12 + 4 + 4,
++		.width_mm = 68,
++		.height_mm = 152,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{ /* 1080x2400 @ 60Hz */
++		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 60 / 1000,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 32,
++		.hsync_end = 1080 + 32 + 16,
++		.htotal = 1080 + 32 + 16 + 32,
++		.vdisplay = 2400,
++		.vsync_start = 2400 + 12,
++		.vsync_end = 2400 + 12 + 4,
++		.vtotal = 2400 + 12 + 4 + 4,
++		.width_mm = 68,
++		.height_mm = 152,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{ /* 1080x2400 @ 90Hz */
++		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 90 / 1000,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 32,
++		.hsync_end = 1080 + 32 + 16,
++		.htotal = 1080 + 32 + 16 + 32,
++		.vdisplay = 2400,
++		.vsync_start = 2400 + 12,
++		.vsync_end = 2400 + 12 + 4,
++		.vtotal = 2400 + 12 + 4 + 4,
++		.width_mm = 68,
++		.height_mm = 152,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{ /* 1080x2400 @ 120Hz */
++		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 120 / 1000,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 32,
++		.hsync_end = 1080 + 32 + 16,
++		.htotal = 1080 + 32 + 16 + 32,
++		.vdisplay = 2400,
++		.vsync_start = 2400 + 12,
++		.vsync_end = 2400 + 12 + 4,
++		.vtotal = 2400 + 12 + 4 + 4,
++		.width_mm = 68,
++		.height_mm = 152,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++};
++
+ /*
+  * The panel keeps four timings and register 0x2f picks between them. The values
+  * are the vendor's: every timing node in dsi-panel-mot-csot-nt37701-655 carries
+@@ -88,9 +151,10 @@
+ 	{ 120, 0x02, 3 },
+ };
+ 
+-static int refresh = 60;
++static int refresh;
+ module_param(refresh, int, 0444);
+-MODULE_PARM_DESC(refresh, "refresh rate in Hz: 48, 60, 90 or 120 (default 60)");
++MODULE_PARM_DESC(refresh,
++		 "pin the panel to one rate (48, 60, 90, 120); 0 offers all of them");
+ 
+ static const struct nt37701_timing *nt37701_timing(void)
+ {
+@@ -100,7 +164,46 @@
+ 		if (nt37701_timings[i].hz == refresh)
+ 			return &nt37701_timings[i];
+ 
+-	return &nt37701_timings[1];	/* unknown value: the stock 60 Hz */
++	return &nt37701_timings[1];	/* unset or unknown: the stock 60 Hz */
++}
++
++/*
++ * Which timing the display is actually running, read from the mode the CRTC has
++ * been given. drm_panel has no mode_set callback, so this is how a panel finds
++ * out -- the same approach panel-novatek-nt35950.c takes.
++ *
++ * A mode change here always means a full modeset, because the four modes differ
++ * in pixel clock, so the power on sequence runs again and picks the new timing
++ * up on its own.
++ *
++ * They differ in *nothing else*: same resolution, same porches. The clock is
++ * therefore the only thing that identifies a mode, and it has to be compared
++ * after the same clk_scale it was handed out with in get_modes().
++ */
++static const struct nt37701_timing *nt37701_current_timing(struct nt37701 *ctx)
++{
++	struct drm_connector *connector = ctx->connector;
++	struct drm_crtc_state *crtc_state;
++	int i;
++
++	if (!connector || !connector->state || !connector->state->crtc)
++		return nt37701_timing();
++
++	crtc_state = connector->state->crtc->state;
++	if (!crtc_state)
++		return nt37701_timing();
++
++	for (i = 0; i < ARRAY_SIZE(nt37701_timings); i++) {
++		int clock = nt37701_modes[nt37701_timings[i].mode].clock;
++
++		if (clk_scale != 100)
++			clock = mult_frac(clock, clk_scale, 100);
++
++		if (crtc_state->mode.clock == clock)
++			return &nt37701_timings[i];
++	}
++
++	return nt37701_timing();
+ }
+ 
+ /*
+@@ -214,7 +317,7 @@
+ 	 * array out of its arguments, so every byte must be a compile-time
+ 	 * constant and a value chosen at runtime does not compile.
+ 	 */
+-	timing_cmd[1] = nt37701_timing()->reg2f;
++	timing_cmd[1] = nt37701_current_timing(ctx)->reg2f;
+ 	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, timing_cmd, sizeof(timing_cmd));
+ 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 120);
+@@ -337,95 +440,55 @@
+ 	return 0;
+ }
+ 
+-static const struct drm_display_mode nt37701_modes[] = {
+-	{ /* 1080x2400 @ 48Hz */
+-		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 48 / 1000,
+-		.hdisplay = 1080,
+-		.hsync_start = 1080 + 32,
+-		.hsync_end = 1080 + 32 + 16,
+-		.htotal = 1080 + 32 + 16 + 32,
+-		.vdisplay = 2400,
+-		.vsync_start = 2400 + 12,
+-		.vsync_end = 2400 + 12 + 4,
+-		.vtotal = 2400 + 12 + 4 + 4,
+-		.width_mm = 68,
+-		.height_mm = 152,
+-		.type = DRM_MODE_TYPE_DRIVER,
+-	},
+-	{ /* 1080x2400 @ 60Hz */
+-		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 60 / 1000,
+-		.hdisplay = 1080,
+-		.hsync_start = 1080 + 32,
+-		.hsync_end = 1080 + 32 + 16,
+-		.htotal = 1080 + 32 + 16 + 32,
+-		.vdisplay = 2400,
+-		.vsync_start = 2400 + 12,
+-		.vsync_end = 2400 + 12 + 4,
+-		.vtotal = 2400 + 12 + 4 + 4,
+-		.width_mm = 68,
+-		.height_mm = 152,
+-		.type = DRM_MODE_TYPE_DRIVER,
+-	},
+-	{ /* 1080x2400 @ 90Hz */
+-		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 90 / 1000,
+-		.hdisplay = 1080,
+-		.hsync_start = 1080 + 32,
+-		.hsync_end = 1080 + 32 + 16,
+-		.htotal = 1080 + 32 + 16 + 32,
+-		.vdisplay = 2400,
+-		.vsync_start = 2400 + 12,
+-		.vsync_end = 2400 + 12 + 4,
+-		.vtotal = 2400 + 12 + 4 + 4,
+-		.width_mm = 68,
+-		.height_mm = 152,
+-		.type = DRM_MODE_TYPE_DRIVER,
+-	},
+-	{ /* 1080x2400 @ 120Hz */
+-		.clock = (1080 + 32 + 16 + 32) * (2400 + 12 + 4 + 4) * 120 / 1000,
+-		.hdisplay = 1080,
+-		.hsync_start = 1080 + 32,
+-		.hsync_end = 1080 + 32 + 16,
+-		.htotal = 1080 + 32 + 16 + 32,
+-		.vdisplay = 2400,
+-		.vsync_start = 2400 + 12,
+-		.vsync_end = 2400 + 12 + 4,
+-		.vtotal = 2400 + 12 + 4 + 4,
+-		.width_mm = 68,
+-		.height_mm = 152,
+-		.type = DRM_MODE_TYPE_DRIVER,
+-	},
+-};
+ 
+ static int nt37701_get_modes(struct drm_panel *panel,
+ 						       struct drm_connector *connector)
+ {
+-	const struct nt37701_timing *t = nt37701_timing();
+-	struct drm_display_mode *mode;
+-	int count = 0;
++	struct nt37701 *ctx = to_nt37701(panel);
++	int want = refresh ? refresh : 120;
++	int i, count = 0;
+ 
+ 	/*
+-	 * The power on sequence programs one timing into register 0x2f, so a
+-	 * single matching mode is exposed. Switching at runtime would mean
+-	 * sending the vendor's timing-switch command on a mode set, which this
+-	 * driver does not do yet.
++	 * Kept so nt37701_current_timing() can find out what is running. The
++	 * panel is told which timing to use by register 0x2f in the power on
++	 * sequence, and a rate change is a full modeset, so that sequence runs
++	 * again and applies it.
+ 	 *
+ 	 * The clock is scaled by clk_scale so the compressed frame transfer
+ 	 * finishes well before the next TE.
+ 	 */
+-	mode = drm_mode_duplicate(connector->dev, &nt37701_modes[t->mode]);
+-	if (!mode)
+-		return 0;
++	ctx->connector = connector;
+ 
+-	if (clk_scale != 100)
+-		mode->clock = mult_frac(mode->clock, clk_scale, 100);
++	for (i = 0; i < ARRAY_SIZE(nt37701_timings); i++) {
++		const struct nt37701_timing *t = &nt37701_timings[i];
++		struct drm_display_mode *mode;
++
++		/* refresh=N pins the panel to one rate, 0 offers all of them. */
++		if (refresh && t->hz != refresh)
++			continue;
++
++		mode = drm_mode_duplicate(connector->dev, &nt37701_modes[t->mode]);
++		if (!mode)
++			continue;
++
++		if (clk_scale != 100)
++			mode->clock = mult_frac(mode->clock, clk_scale, 100);
++
++		mode->type = DRM_MODE_TYPE_DRIVER;
++		if (t->hz == want)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++		count++;
++	}
+ 
+-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+-	drm_mode_set_name(mode);
+-	drm_mode_probed_add(connector, mode);
+-	count = 1;
++	if (!count)
++		return 0;
+ 
+-	connector->display_info.width_mm = nt37701_modes[t->mode].width_mm;
+-	connector->display_info.height_mm = nt37701_modes[t->mode].height_mm;
++	/* The panel is one piece of glass; every timing has the same size. */
++	connector->display_info.width_mm = nt37701_modes[0].width_mm;
++	connector->display_info.height_mm = nt37701_modes[0].height_mm;
+ 
+ 	return count;
+ }

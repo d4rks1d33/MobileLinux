@@ -1,0 +1,118 @@
+#!/bin/sh
+# Populate the modem's remote file system (RFS) from the stock partitions.
+#
+# The Qualcomm modem does not carry everything it needs inside modem.mbn. At
+# run time it fetches files from the application processor over QMI service
+# 4096 (TFTP), which tqftpserv answers. On Android those requests are resolved
+# against the vendor image, the fsg partition and /mnt/vendor/persist; on this
+# port nothing was there, so the modem got "file not found" for all of them and
+# never finished initialising. See HANDOFF-SESSION4.md session 14.
+#
+# Three sources, all read-only, all from partitions that are still on the
+# device:
+#
+#   modem_a  image/modem_pr/so/*.mbn   Hexagon shared objects the modem loads at
+#                                      run time. It asked for 205_0_0.mbn TWELVE
+#                                      times per boot and gave up; without it it
+#                                      stayed in DMS operating mode 'offline'
+#                                      and refused every mode transition.
+#   fsg_a    mcfg_sw/mbn_sw.dig, ...   carrier (MCFG) configuration set.
+#   persist  rfs/msm/mpss/*            per-device data written in the factory:
+#                                      RF calibration (cal_rfs), the Motorola
+#                                      datablock/simlock records, shob/dhob.
+#
+# The persist copy is deliberately a COPY, not a bind mount: the modem writes
+# to this tree (mcfg.tmp, ticf.bin, *_report.txt) and the stock persist
+# partition is left untouched.
+#
+# Idempotent, safe to run on every boot, does nothing once populated.
+set -e
+
+FW=/lib/firmware/qcom/sm6375/motorola/rhodep
+RW=/var/lib/tqftpserv
+MNT=/run/rhodep-rfs-populate
+
+log() { echo "rhodep-rfs-populate: $*"; }
+
+# Active slot, e.g. "_a". modemst1/modemst2/fsc/persist are not suffixed on this
+# device but modem/fsg are, so resolve both spellings.
+slot=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^androidboot\.slot_suffix=//p')
+
+part() {
+	for n in "$1$slot" "$1"; do
+		[ -e "/dev/disk/by-partlabel/$n" ] && { echo "/dev/disk/by-partlabel/$n"; return 0; }
+	done
+	return 1
+}
+
+mount_ro() {
+	mkdir -p "$MNT"
+	mount -o ro,nosuid,nodev,noexec "$1" "$MNT"
+}
+
+unmount() {
+	umount "$MNT" 2>/dev/null || true
+	rmdir "$MNT" 2>/dev/null || true
+}
+trap unmount EXIT
+
+# 1. Hexagon shared objects and anything else under image/modem_pr.
+if [ ! -d "$FW/modem_pr/so" ]; then
+	if dev=$(part modem); then
+		mount_ro "$dev"
+		if [ -d "$MNT/image/modem_pr" ]; then
+			mkdir -p "$FW"
+			cp -r "$MNT/image/modem_pr" "$FW/"
+			chmod -R a+rX "$FW/modem_pr"
+			log "installed modem_pr ($(ls "$FW/modem_pr/so" | wc -l) shared objects)"
+		else
+			log "WARNING: no image/modem_pr on $dev"
+		fi
+		unmount
+	else
+		log "WARNING: no modem partition found, modem_pr not installed"
+	fi
+fi
+
+# 2. Carrier configuration set from fsg. tqftpserv resolves
+#    /readonly/vendor/fsg/... under the remoteproc firmware directory, which is
+#    what the patched translate.c in this directory adds.
+if [ ! -e "$FW/fsg/mcfg_sw/mbn_sw.dig" ]; then
+	if dev=$(part fsg); then
+		mount_ro "$dev"
+		mkdir -p "$FW/fsg"
+		# lost+found is ext4 bookkeeping, not modem data.
+		(cd "$MNT" && find . -mindepth 1 -maxdepth 1 ! -name lost+found \
+			-exec cp -r {} "$FW/fsg/" \;)
+		chmod -R a+rX "$FW/fsg"
+		log "installed fsg ($(du -sh "$FW/fsg" | cut -f1))"
+		unmount
+	else
+		log "WARNING: no fsg partition found"
+	fi
+fi
+
+# 3. Per-device factory data from persist. Never overwrite: once the modem has
+#    started writing here, our copy is the live one.
+if [ ! -e "$RW/shob.bin" ]; then
+	if dev=$(part persist); then
+		mount_ro "$dev"
+		if [ -d "$MNT/rfs/msm/mpss" ]; then
+			mkdir -p "$RW"
+			cp -a "$MNT/rfs/msm/mpss/." "$RW/"
+			log "installed persist rfs/msm/mpss"
+		else
+			log "WARNING: no rfs/msm/mpss on $dev"
+		fi
+		unmount
+	else
+		log "WARNING: no persist partition found"
+	fi
+fi
+
+# The modem creates these itself, but tqftpserv's openat() does not create
+# intermediate directories, so a write request for ota_firewall/ruleset would
+# fail with ENOENT forever.
+mkdir -p "$RW/ota_firewall" "$RW/datablock" "$RW/mot_rfs"
+
+exit 0

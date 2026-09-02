@@ -1,0 +1,155 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: tear the setup down when the modem crashes
+
+When the modem crashes, ipa_modem_crashed() cleans up a great deal but never
+undoes ipa_setup(). ipa->setup_complete stays true, the QMI handles stay
+registered, and the command and exception endpoints and GSI stay set up, for a
+modem that is gone.
+
+It also masks the "setup ready" interrupt so the modem cannot call ipa_setup()
+while that cleanup runs:
+
+	/* Prevent the modem from triggering a call to ipa_setup() */
+	ipa_smp2p_irq_disable_setup(ipa);
+
+which sets smp2p->setup_disabled, and nothing ever clears it. Grep the tree:
+three mentions of that field, the declaration, the kerneldoc line, and that one
+assignment. ipa_smp2p_notify_reset(), which does run on
+QCOM_SSR_BEFORE_POWERUP, only clears the two power notification bits.
+
+So call ipa_teardown() at the end of ipa_modem_crashed(), and lift the mask on
+QCOM_SSR_BEFORE_POWERUP, which arrives before the modem boots and so cannot
+race the modem raising it. ipa_teardown() is no longer static for this.
+
+Measured on a Motorola Moto G82 5G (SM6375), crashing the modem through
+remoteproc's debugfs and watching whether the SoC survives the bring-up:
+
+	before   4 resets in 5 bring-ups
+	after    0 resets in 4 bring-ups
+
+The resets left nothing behind: no kernel message in the four seconds between
+"remote processor modem is now up" and the machine going down, an empty pstore,
+and bootreason=watchdog. They did not happen at all with ipa.ko unloaded.
+
+Two things this does not do, and one guess about why it works.
+
+It does not bring the data path back. rmnet_ipa0 is unregistered when the modem
+crashes and is still absent afterwards, because ipa_setup() never runs again:
+there is no "IPA driver setup completed successfully" in the log and the
+interrupt handler never fires. The modem does not re-raise setup ready after a
+restart, so arming the interrupt is not sufficient, and quite possibly inert.
+Restoring mobile data across a modem crash needs a different trigger and is
+not attempted here.
+
+Which means the teardown is almost certainly what stops the reset, since the
+other half of this patch has no observable effect. That is an inference from
+the interrupt handler never running, not something that has been tested by
+applying the two halves separately.
+
+Why an AP-side teardown should change what the modem does is not established.
+The reset arrived with the AP silent and nothing written anywhere, which is
+consistent with the modem escalating rather than the AP failing, but that is
+not proven either.
+--- a/drivers/net/ipa/ipa_smp2p.c
++++ b/drivers/net/ipa/ipa_smp2p.c
+@@ -322,6 +322,28 @@
+ 	kfree(smp2p);
+ }
+ 
++/* Re-arm the "setup ready" interrupt, so that a modem which has restarted can
++ * announce GSI ready and have it acted on. Without this the mask applied by
++ * ipa_smp2p_irq_disable_setup() on the modem's way down is never lifted, and
++ * IPA is finished until the next reboot.
++ */
++void ipa_smp2p_irq_enable_setup(struct ipa *ipa)
++{
++	struct ipa_smp2p *smp2p = ipa->smp2p;
++
++	if (!smp2p->setup_ready_irq)
++		return;
++
++	mutex_lock(&smp2p->mutex);
++
++	if (smp2p->setup_disabled) {
++		enable_irq(smp2p->setup_ready_irq);
++		smp2p->setup_disabled = false;
++	}
++
++	mutex_unlock(&smp2p->mutex);
++}
++
+ void ipa_smp2p_irq_disable_setup(struct ipa *ipa)
+ {
+ 	struct ipa_smp2p *smp2p = ipa->smp2p;
+--- a/drivers/net/ipa/ipa_smp2p.h
++++ b/drivers/net/ipa/ipa_smp2p.h
+@@ -38,6 +38,15 @@
+ void ipa_smp2p_irq_disable_setup(struct ipa *ipa);
+ 
+ /**
++ * ipa_smp2p_irq_enable_setup() - Re-enable the "setup ready" interrupt
++ * @ipa:	IPA pointer
++ *
++ * The inverse of ipa_smp2p_irq_disable_setup(), for the case where the modem
++ * has gone down and will come back and announce GSI ready again.
++ */
++void ipa_smp2p_irq_enable_setup(struct ipa *ipa);
++
++/**
+  * ipa_smp2p_notify_reset() - Reset modem notification state
+  * @ipa:	IPA pointer
+  *
+--- a/drivers/net/ipa/ipa_main.c
++++ b/drivers/net/ipa/ipa_main.c
+@@ -174,7 +174,7 @@
+  * ipa_teardown() - Inverse of ipa_setup()
+  * @ipa:	IPA pointer
+  */
+-static void ipa_teardown(struct ipa *ipa)
++void ipa_teardown(struct ipa *ipa)
+ {
+ 	struct ipa_endpoint *exception_endpoint;
+ 	struct ipa_endpoint *command_endpoint;
+--- a/drivers/net/ipa/ipa.h
++++ b/drivers/net/ipa/ipa.h
+@@ -164,4 +164,10 @@
+  */
+ int ipa_setup(struct ipa *ipa);
+ 
++/**
++ * ipa_teardown() - Inverse of ipa_setup()
++ * @ipa:	IPA pointer
++ */
++void ipa_teardown(struct ipa *ipa);
++
+ #endif /* _IPA_H_ */
+--- a/drivers/net/ipa/ipa_modem.c
++++ b/drivers/net/ipa/ipa_modem.c
+@@ -428,6 +428,15 @@
+ 	if (ret)
+ 		dev_err(dev, "error %d zeroing modem memory regions\n", ret);
+ 
++	/* Undo ipa_setup(), so that the modem's next announcement of GSI ready
++	 * is met with a clean setup rather than a second one layered on the
++	 * first. ipa_setup() is not idempotent: it would run gsi_setup() again,
++	 * enable endpoints that are already enabled and call ipa_qmi_setup() a
++	 * second time. This also clears ipa->setup_complete, which otherwise
++	 * stays true through a crash the driver has already cleaned up after.
++	 */
++	ipa_teardown(ipa);
++
+ out_power_put:
+ 	(void)pm_runtime_put_autosuspend(dev);
+ }
+@@ -444,6 +453,11 @@
+ 		dev_info(dev, "received modem starting event\n");
+ 		ipa_uc_power(ipa);
+ 		ipa_smp2p_notify_reset(ipa);
++		/* The modem is about to boot and will announce GSI ready. That
++		 * interrupt was masked on the way down and nothing else lifts
++		 * it, so lift it here, before the modem can raise it.
++		 */
++		ipa_smp2p_irq_enable_setup(ipa);
+ 		break;
+ 
+ 	case QCOM_SSR_AFTER_POWERUP:

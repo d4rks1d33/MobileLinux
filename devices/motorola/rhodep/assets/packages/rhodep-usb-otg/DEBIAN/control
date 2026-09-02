@@ -1,0 +1,10 @@
+Package: rhodep-usb-otg
+Version: 4
+Architecture: arm64
+Maintainer: rhodep port
+Depends: i2c-tools
+Description: USB-C charge/OTG control for Motorola rhodep (single port)
+ Default = charging (device mode) at boot. OTG on demand with 'otg on'.
+ In OTG (boost) the SGM41542 charger cannot sense an incoming charger
+ (reg0x08 VBUS_STAT=OTG), so OTG->charge is not automatic: use 'otg off'.
+ Commands: otg on (host+VBUS, for USB adapters) | otg off (charge) | otg status

@@ -1,0 +1,30 @@
+id: wemo
+version: 1
+device_type: smart_plug
+vendor: Belkin Wemo
+family: wemo
+threshold: 60
+matchers:
+  - name: ssdp-controllee
+    type: ssdp
+    st: "urn:Belkin:device:controllee:1"
+    confidence: 90
+  - name: ssdp-insight
+    type: ssdp
+    st: "urn:Belkin:device:insight:1"
+    confidence: 90
+  - name: ssdp-crockpot
+    type: ssdp
+    st: "urn:Belkin:device:crockpot:1"
+    confidence: 95
+  - name: port-49152
+    type: port
+    port: 49152
+    confidence: 30
+  - name: port-49153
+    type: port
+    port: 49153
+    confidence: 30
+metadata:
+  playbook: wemo
+  known_cves: ["CVE-2013-6948", "CVE-2018-6692", "CVE-2019-12780", "CVE-2019-17094"]

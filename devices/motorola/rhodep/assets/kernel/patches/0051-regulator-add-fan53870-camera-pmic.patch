@@ -1,0 +1,209 @@
+From: rhodep port <none@example.com>
+Date: Tue, 19 Aug 2026 02:40:00 -0300
+Subject: [PATCH] regulator: add FAN53870 camera PMIC driver
+
+
+---
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -430,6 +430,17 @@
+ 	  input voltage supply of 2.5V to 5.5V. The output voltage is
+ 	  programmed through an I2C interface.
+ 
++config REGULATOR_FAN53870
++	tristate "Fairchild FAN53870 Camera PMIC Regulator"
++	depends on I2C && OF
++	select REGMAP_I2C
++	help
++	  This driver supports the Fairchild (ON Semiconductor) FAN53870
++	  camera power management IC, a seven-channel LDO array controlled
++	  over I2C. It is register-compatible with the WL2868C and ET5907
++	  and is found on Qualcomm SM6375 boards, where it supplies the
++	  camera sensors.
++
+ config REGULATOR_FAN53880
+ 	tristate "Fairchild FAN53880 Regulator"
+ 	depends on I2C && OF
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -51,6 +51,7 @@
+ obj-$(CONFIG_REGULATOR_DBX500_PRCMU) += dbx500-prcmu.o
+ obj-$(CONFIG_REGULATOR_DB8500_PRCMU) += db8500-prcmu.o
+ obj-$(CONFIG_REGULATOR_FAN53555) += fan53555.o
++obj-$(CONFIG_REGULATOR_FAN53870) += fan53870.o
+ obj-$(CONFIG_REGULATOR_FAN53880) += fan53880.o
+ obj-$(CONFIG_REGULATOR_GPIO) += gpio-regulator.o
+ obj-$(CONFIG_REGULATOR_HI6421) += hi6421-regulator.o
+diff --git a/drivers/regulator/fan53870.c b/drivers/regulator/fan53870.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/regulator/fan53870.c
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * FAN53870 seven-channel camera PMIC.
++ *
++ * Register map and voltage tables taken from the downstream Motorola driver
++ * (drivers/regulator/wl2868c/wl2868c-regulator.c in the SM6375 vendor tree),
++ * which drives three pin-compatible parts and tells them apart by CHIP_REV:
++ *
++ *	0x33  WL2868C   at i2c 0x2f
++ *	0x01  FAN53870  at i2c 0x35
++ *	0x00  ET5907    at i2c 0x35
++ *
++ * Verified on a Motorola Moto G82 5G (motorola-rhodep): the part on that
++ * board answers at 0x35 with CHIP_REV 0x01, i.e. a FAN53870, even though the
++ * vendor device tree declares "semi,wl2868c" at 0x2f.
++ *
++ * The chip has an active-high enable pin which must be asserted before it
++ * will acknowledge anything on the bus.
++ */
++
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++#define FAN53870_CHIP_ID	0x00
++#define FAN53870_CHIP_REV	0x01
++#define FAN53870_CURRENT_LIMIT	0x02
++#define FAN53870_ENABLE		0x03
++#define FAN53870_LDO1VOUT	0x04
++#define FAN53870_LDO7VOUT	0x0a
++
++#define FAN53870_ID		0x01
++
++/*
++ * LDO1 and LDO2 are the low-voltage rails (sensor digital), LDO3 to LDO7 the
++ * high-voltage ones (analog and I/O). Both are 256 codes of 8 mV.
++ */
++#define FAN53870_NUM_VOLTAGES	256
++#define FAN53870_STEP_UV	8000
++#define FAN53870_LV_MIN_UV	800000
++#define FAN53870_HV_MIN_UV	1372000
++
++static const struct regulator_ops fan53870_ops = {
++	.list_voltage		= regulator_list_voltage_linear,
++	.map_voltage		= regulator_map_voltage_linear,
++	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
++	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
++	.enable			= regulator_enable_regmap,
++	.disable		= regulator_disable_regmap,
++	.is_enabled		= regulator_is_enabled_regmap,
++};
++
++#define FAN53870_LDO(_num, _min_uV)					\
++	{								\
++		.name		 = "LDO"#_num,				\
++		.of_match	 = of_match_ptr("LDO"#_num),		\
++		.regulators_node = of_match_ptr("regulators"),		\
++		.type		 = REGULATOR_VOLTAGE,			\
++		.owner		 = THIS_MODULE,				\
++		.min_uV		 = _min_uV,				\
++		.uV_step	 = FAN53870_STEP_UV,			\
++		.n_voltages	 = FAN53870_NUM_VOLTAGES,		\
++		.vsel_reg	 = FAN53870_LDO1VOUT + (_num) - 1,	\
++		.vsel_mask	 = 0xff,				\
++		.enable_reg	 = FAN53870_ENABLE,			\
++		.enable_mask	 = BIT((_num) - 1),			\
++		.enable_time	 = 150,					\
++		.ops		 = &fan53870_ops,			\
++	}
++
++static const struct regulator_desc fan53870_regulators[] = {
++	FAN53870_LDO(1, FAN53870_LV_MIN_UV),
++	FAN53870_LDO(2, FAN53870_LV_MIN_UV),
++	FAN53870_LDO(3, FAN53870_HV_MIN_UV),
++	FAN53870_LDO(4, FAN53870_HV_MIN_UV),
++	FAN53870_LDO(5, FAN53870_HV_MIN_UV),
++	FAN53870_LDO(6, FAN53870_HV_MIN_UV),
++	FAN53870_LDO(7, FAN53870_HV_MIN_UV),
++};
++
++static const struct regmap_config fan53870_regmap = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = FAN53870_LDO7VOUT,
++};
++
++static int fan53870_i2c_probe(struct i2c_client *i2c)
++{
++	struct regulator_config config = { };
++	struct gpio_desc *enable_gpio;
++	struct regulator_dev *rdev;
++	struct regmap *regmap;
++	unsigned int rev;
++	int i, ret;
++
++	/*
++	 * Assert the enable pin before the first transfer: the part does not
++	 * ACK its own address while it is held down, so probing would fail
++	 * with -ENXIO and look like the chip is absent.
++	 */
++	enable_gpio = devm_gpiod_get_optional(&i2c->dev, "enable",
++					      GPIOD_OUT_HIGH);
++	if (IS_ERR(enable_gpio))
++		return dev_err_probe(&i2c->dev, PTR_ERR(enable_gpio),
++				     "Failed to get enable GPIO\n");
++	if (enable_gpio)
++		usleep_range(1000, 2000);
++
++	regmap = devm_regmap_init_i2c(i2c, &fan53870_regmap);
++	if (IS_ERR(regmap))
++		return dev_err_probe(&i2c->dev, PTR_ERR(regmap),
++				     "Failed to create regmap\n");
++
++	ret = regmap_read(regmap, FAN53870_CHIP_REV, &rev);
++	if (ret < 0)
++		return dev_err_probe(&i2c->dev, ret,
++				     "Failed to read CHIP_REV\n");
++	if (rev != FAN53870_ID) {
++		dev_err(&i2c->dev,
++			"Unsupported CHIP_REV 0x%02x (WL2868C is 0x33, ET5907 is 0x00)\n",
++			rev);
++		return -ENODEV;
++	}
++
++	config.dev = &i2c->dev;
++
++	for (i = 0; i < ARRAY_SIZE(fan53870_regulators); i++) {
++		rdev = devm_regulator_register(&i2c->dev,
++					       &fan53870_regulators[i],
++					       &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(&i2c->dev, PTR_ERR(rdev),
++					     "Failed to register %s\n",
++					     fan53870_regulators[i].name);
++	}
++
++	dev_info(&i2c->dev, "FAN53870 camera PMIC, 7 LDOs\n");
++
++	return 0;
++}
++
++static const struct of_device_id fan53870_dt_ids[] = {
++	{ .compatible = "onnn,fan53870", },
++	{}
++};
++MODULE_DEVICE_TABLE(of, fan53870_dt_ids);
++
++static const struct i2c_device_id fan53870_i2c_id[] = {
++	{ "fan53870", },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, fan53870_i2c_id);
++
++static struct i2c_driver fan53870_regulator_driver = {
++	.driver = {
++		.name = "fan53870",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++		.of_match_table = fan53870_dt_ids,
++	},
++	.probe = fan53870_i2c_probe,
++	.id_table = fan53870_i2c_id,
++};
++module_i2c_driver(fan53870_regulator_driver);
++
++MODULE_DESCRIPTION("FAN53870 camera PMIC regulator driver");
++MODULE_LICENSE("GPL");

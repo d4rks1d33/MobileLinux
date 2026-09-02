@@ -1,0 +1,58 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 21:40:00 -0300
+Subject: [PATCH] arm64: dts: qcom: sm6375: add the APSS watchdog
+
+SM6375 has the usual KPSS watchdog and mainline never described it, so
+qcom-wdt has nothing to bind to: /sys/class/watchdog is empty and there
+is no /dev/watchdog, even with CONFIG_QCOM_WDT=y.
+
+Address and interrupt from the vendor tree, which puts it somewhere the
+siblings do not -- SM6115 and QCM2290 use 0x0f017000, holi uses
+0x0f410000:
+
+	wdog: qcom,wdt@f410000 {
+		compatible = "qcom,msm-watchdog";
+		reg = <0xf410000 0x1000>;
+		interrupts = <0 0 IRQ_TYPE_LEVEL_HIGH>,
+			     <0 1 IRQ_TYPE_LEVEL_HIGH>;
+		qcom,bark-time = <11000>;
+		qcom,pet-time = <9360>;
+	};
+
+The first interrupt is the bark, which is what qcom-wdt wants; the second
+is the bite and the driver has no use for it. Trigger type follows the
+mainline siblings rather than the vendor's LEVEL_HIGH, matching how
+sm6115.dtsi and agatti.dtsi describe the same signal.
+
+Beyond describing hardware that exists, this is wanted for a specific
+reason. The port has a reset that takes the whole SoC down a few seconds
+after the modem attaches to LTE, silently: no CPU exception, no
+backtrace, nothing from the softlockup detector, and a console recording
+that simply stops. The bootloader reports it as
+androidboot.bootreason=watchdog, and until now there was no way to see
+anything before it, because nothing on the AP side was watching.
+
+qcom-wdt supports the bark as a pretimeout, and match_data_kpss enables
+it. With a pretimeout set and the panic governor selected, a bite that
+would otherwise be silent is preceded by a panic with every CPU's
+backtrace -- which, since the ramoops console now survives a reset, is
+readable afterwards.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1803,6 +1803,13 @@
+ 			interrupt-controller;
+ 		};
+ 
++		watchdog@f410000 {
++			compatible = "qcom,apss-wdt-sm6375", "qcom,kpss-wdt";
++			reg = <0 0x0f410000 0 0x1000>;
++			clocks = <&sleep_clk>;
++			interrupts = <GIC_SPI 0 IRQ_TYPE_EDGE_RISING>;
++		};
++
+ 		timer@f420000 {
+ 			compatible = "arm,armv7-timer-mem";
+ 			reg = <0 0x0f420000 0 0x1000>;

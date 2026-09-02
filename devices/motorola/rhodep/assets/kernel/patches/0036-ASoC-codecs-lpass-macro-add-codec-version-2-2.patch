@@ -1,0 +1,100 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] ASoC: codecs: lpass-macro: add LPASS codec version 2.2
+
+The VA macro on SM6375 (holi) reports major 2, minor 2 in
+CDC_VA_TOP_CSR_CORE_ID_0/2, which the driver does not know about:
+
+	va_macro a730000.codec: VA Macro v2.2.0 is not supported
+	va_macro a730000.codec: probe with driver va_macro failed with error -95
+
+and since the VA macro is the fsgen clock provider for the RX and TX
+macros, nothing else in the LPASS probes either.
+
+Add the version in its ordinal place between 2.1 and 2.5, so that the
+comparisons against LPASS_CODEC_VERSION_2_5 in the WSA macro keep their
+meaning, and group it with the pre-2.5 branch everywhere the RX and WSA
+macros switch on the version. In the RX macro that branch selects the
+RXn register stride, the register defaults, the readable/writeable
+register tables and the set of controls and DAPM widgets; the register
+layout is what changed in 2.5, so 2.2 belongs with the older one. Without
+this the register tables fall through to "default: return false", every
+register becomes unwriteable and the card fails to instantiate:
+
+	rx_macro a600000.codec: ASoC error (-5): at snd_soc_component_update_bits() on a600000.codec for register: [0x000004b4]
+	snd-sm8250 sound: ASoC: failed to instantiate card -22
+
+--- a/sound/soc/codecs/lpass-macro-common.h	2026-08-11 23:12:52.628004000 +0000
++++ b/sound/soc/codecs/lpass-macro-common.h	2026-08-11 23:12:52.636004000 +0000
+@@ -25,6 +25,7 @@
+ 	LPASS_CODEC_VERSION_1_2,
+ 	LPASS_CODEC_VERSION_2_0,
+ 	LPASS_CODEC_VERSION_2_1,
++	LPASS_CODEC_VERSION_2_2,
+ 	LPASS_CODEC_VERSION_2_5,
+ 	LPASS_CODEC_VERSION_2_6,
+ 	LPASS_CODEC_VERSION_2_7,
+@@ -60,6 +61,8 @@
+ 		return "v2.0";
+ 	case LPASS_CODEC_VERSION_2_1:
+ 		return "v2.1";
++	case LPASS_CODEC_VERSION_2_2:
++		return "v2.2";
+ 	case LPASS_CODEC_VERSION_2_5:
+ 		return "v2.5";
+ 	case LPASS_CODEC_VERSION_2_6:
+--- a/sound/soc/codecs/lpass-va-macro.c	2026-08-11 23:12:52.628004000 +0000
++++ b/sound/soc/codecs/lpass-va-macro.c	2026-08-11 23:12:52.636004000 +0000
+@@ -1498,6 +1498,9 @@
+ 		case 0:
+ 			version = LPASS_CODEC_VERSION_2_0;
+ 			break;
++		case 2:
++			version = LPASS_CODEC_VERSION_2_2;
++			break;
+ 		case 5:
+ 			version = LPASS_CODEC_VERSION_2_5;
+ 			break;
+--- a/sound/soc/codecs/lpass-rx-macro.c	2026-08-11 23:22:44.330199010 +0000
++++ b/sound/soc/codecs/lpass-rx-macro.c	2026-08-11 23:48:18.790937012 +0000
+@@ -1607,6 +1607,7 @@
+ 	case LPASS_CODEC_VERSION_1_2:
+ 	case LPASS_CODEC_VERSION_2_0:
+ 	case LPASS_CODEC_VERSION_2_1:
++	case LPASS_CODEC_VERSION_2_2:
+ 		return rx_pre_2_5_is_rw_register(dev, reg);
+ 	case LPASS_CODEC_VERSION_2_5:
+ 	case LPASS_CODEC_VERSION_2_6:
+@@ -3639,6 +3640,7 @@
+ 	case LPASS_CODEC_VERSION_1_2:
+ 	case LPASS_CODEC_VERSION_2_0:
+ 	case LPASS_CODEC_VERSION_2_1:
++	case LPASS_CODEC_VERSION_2_2:
+ 		controls = rx_macro_def_snd_controls;
+ 		num_controls = ARRAY_SIZE(rx_macro_def_snd_controls);
+ 		widgets = rx_macro_def_dapm_widgets;
+@@ -3817,6 +3819,7 @@
+ 	case LPASS_CODEC_VERSION_1_2:
+ 	case LPASS_CODEC_VERSION_2_0:
+ 	case LPASS_CODEC_VERSION_2_1:
++	case LPASS_CODEC_VERSION_2_2:
+ 		rx->rxn_reg_stride = 0x80;
+ 		rx->rxn_reg_stride2 = 0xc;
+ 		def_count = ARRAY_SIZE(rx_defaults) + ARRAY_SIZE(rx_pre_2_5_defaults);
+--- a/sound/soc/codecs/lpass-wsa-macro.c	2026-08-11 23:43:58.494783003 +0000
++++ b/sound/soc/codecs/lpass-wsa-macro.c	2026-08-11 23:43:58.508783003 +0000
+@@ -2582,6 +2582,7 @@
+ 	case LPASS_CODEC_VERSION_1_2:
+ 	case LPASS_CODEC_VERSION_2_0:
+ 	case LPASS_CODEC_VERSION_2_1:
++	case LPASS_CODEC_VERSION_2_2:
+ 		widgets = wsa_macro_dapm_widgets_v2_1;
+ 		num_widgets = ARRAY_SIZE(wsa_macro_dapm_widgets_v2_1);
+ 		break;
+@@ -2723,6 +2724,7 @@
+ 	case LPASS_CODEC_VERSION_1_2:
+ 	case LPASS_CODEC_VERSION_2_0:
+ 	case LPASS_CODEC_VERSION_2_1:
++	case LPASS_CODEC_VERSION_2_2:
+ 		wsa->reg_layout = &wsa_codec_v2_1;
+ 		def_count = ARRAY_SIZE(wsa_defaults) + ARRAY_SIZE(wsa_defaults_v2_1);
+ 		reg_defaults = kmalloc_objs(*reg_defaults, def_count);

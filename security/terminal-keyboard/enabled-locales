@@ -1,0 +1,16 @@
+# Which keyboard languages the language key offers, most wanted first.
+#
+# plasmakeyboardrc ships with enabledLocales empty, and plasma-keyboard reads
+# that as "one language only":
+#
+#     if (PlasmaKeyboardSettings.enabledLocales.length === 0)
+#         VirtualKeyboardSettings.activeLocales = [locale];
+#
+# which leaves the language key greyed out and doing nothing when tapped.
+#
+# es_MX is the Latin American Spanish layout - Qt ships no es_AR - and it has ñ
+# as a real key, which the fallback layout does not: its n only offers ņńnň.
+#
+# Change this list if you want other languages; the enforcer only steps in when
+# the setting is empty, so your own choices are left alone.
+en_US,es_MX,es_ES

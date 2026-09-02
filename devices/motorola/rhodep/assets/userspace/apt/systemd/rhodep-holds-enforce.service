@@ -1,0 +1,11 @@
+[Unit]
+Description=Put back any apt hold or purge-guard file that has gone missing
+Documentation=file:/usr/share/doc/rhodep-apt/README
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-holds-enforce
+
+[Install]
+WantedBy=multi-user.target

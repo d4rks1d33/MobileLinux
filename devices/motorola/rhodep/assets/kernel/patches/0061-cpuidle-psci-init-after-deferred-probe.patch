@@ -1,0 +1,72 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 00:40:00 -0300
+Subject: [PATCH] cpuidle: psci: run the init after deferred probing has settled
+
+psci_idle_init() is a device_initcall, and device_initcall runs before
+late_initcall. deferred_probe_initcall() is a late_initcall. On any
+platform where the psci-cpuidle-domain driver defers on its first
+attempt, cpuidle is therefore lost for the entire boot.
+
+That is not hypothetical. On SM6375 (Motorola Moto G82 5G) the CPU
+cluster power domain's parent is the MPM node -- power-domain-cpu-cluster0
+has power-domains = <&mpm>, an ordinary #power-domain-cells = <0>
+provider that has not probed yet at core_initcall time:
+
+	[0.109751] CPUidle PSCI: failed to create CPU PM domains ret=-517
+	[0.373495] CPUidle PSCI: CPU 0 failed to PSCI idle
+	[0.373539] CPUidle PSCI: Failed to create psci-cpuidle device
+	[0.424671] CPUidle PSCI: Initialized CPU PM domain topology using OSI mode
+
+-517 is -EPROBE_DEFER and the deferral resolves correctly, 51 ms too
+late. In between, psci_idle_init() runs, psci_dt_cpu_init_topology() ->
+dt_idle_attach_cpu() -> dev_pm_domain_attach_by_name() returns
+-EPROBE_DEFER, and because the device is created with
+faux_device_create() -- which has no deferred-probe support -- nothing
+retries. The result is silent: every config option is enabled, the
+device tree is complete, and the CPUs simply never leave WFI. It failed
+on every boot examined on that device.
+
+Move the initcall to late_initcall_sync. deferred_probe_initcall()
+triggers and flushes the deferred queue twice before returning, so at
+7s the power domains are guaranteed to be present. This is an ordering
+guarantee from the initcall levels rather than a timing one, which is
+what the faux device cannot provide for itself. Registering cpuidle this
+late costs only plain WFI for the rest of boot.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/cpuidle/cpuidle-psci.c
++++ b/drivers/cpuidle/cpuidle-psci.c
+@@ -489,4 +489,31 @@
+ 
+ 	return 0;
+ }
+-device_initcall(psci_idle_init);
++/*
++ * late_initcall_sync, not device_initcall: this has to run after
++ * deferred_probe_initcall(), which is a late_initcall.
++ *
++ * psci_cpuidle_probe() attaches every CPU to its PSCI power domain, and on
++ * platforms where the CPU cluster domain has a parent that probes late the
++ * psci-cpuidle-domain driver is deferred on its first attempt. On SM6375 the
++ * cluster domain's parent is the MPM node, and the timestamps are unambiguous:
++ *
++ *	[0.109751] CPUidle PSCI: failed to create CPU PM domains ret=-517
++ *	[0.373495] CPUidle PSCI: CPU 0 failed to PSCI idle
++ *	[0.373539] CPUidle PSCI: Failed to create psci-cpuidle device
++ *	[0.424671] CPUidle PSCI: Initialized CPU PM domain topology using OSI mode
++ *
++ * The deferral resolves correctly 51 ms later; the problem is that
++ * device_initcall runs first, dev_pm_domain_attach_by_name() hands back
++ * -EPROBE_DEFER, and a faux device has no deferred-probe support, so nothing
++ * ever retries and cpuidle is lost for the whole boot. Deterministically: it
++ * failed on every boot examined.
++ *
++ * Running at late_initcall_sync puts this strictly after
++ * deferred_probe_initcall(), which triggers and flushes the deferred queue
++ * twice before returning, so the domains are guaranteed to exist by the time
++ * the CPUs are attached. That is an ordering guarantee from the initcall
++ * levels rather than a timing one. Registering cpuidle this late only means
++ * the CPUs use plain WFI for the remainder of boot.
++ */
++late_initcall_sync(psci_idle_init);

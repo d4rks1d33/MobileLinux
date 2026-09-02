@@ -1,0 +1,99 @@
+#!/bin/sh
+# Verify the glink reference accounting on the device, all three ways it can
+# go wrong. Run after flashing a kernel with kernel/patches/0080.
+#
+#   1. the crash      opening and reopening an endpoint used to freeze the
+#                     phone within three attempts
+#   2. the leak       the first version of the patch gave the rcids entry a
+#                     reference without ever releasing the endpoint's, so
+#                     channels accumulated. 500 cycles make that visible in
+#                     the slab counters if it is still happening
+#   3. the teardown   remoteproc recovery is where the underflow was first
+#                     seen, so tear the edge down on purpose and check that
+#                     the modem comes back
+#
+# Nothing here needs a SIM or a radio.
+
+set -e
+[ "$(id -u)" = 0 ] || { echo "needs root" >&2; exit 1; }
+N=${1:-500}
+ctrl=$(rhodep-modem-at -l | sed -n 's/.*control device: //p')
+[ -n "$ctrl" ] || { echo "no modem rpmsg control device" >&2; exit 1; }
+echo "control device $ctrl, $N cycles, uptime $(cut -d' ' -f1 /proc/uptime)"
+
+warn() { dmesg | grep -c "$1" || true; }
+w0=$(warn 'close ack on unknown channel')
+u0=$(warn 'refcount')
+o0=$(warn 'Unable to handle kernel')
+
+python3 - "$ctrl" "$N" <<'PY'
+import os, fcntl, struct, glob, sys, time
+CREATE = (1 << 30) | (40 << 16) | (0xB5 << 8) | 0x01
+DESTROY = (0xB5 << 8) | 0x02
+ctrl, n = sys.argv[1], int(sys.argv[2])
+
+def slab():
+    out = {}
+    for line in open("/proc/slabinfo"):
+        f = line.split()
+        if len(f) > 3 and f[0].startswith("kmalloc-"):
+            out[f[0]] = int(f[1])
+    return out
+
+for d in glob.glob("/dev/rpmsg[0-9]*"):
+    try:
+        f = os.open(d, os.O_RDWR); fcntl.ioctl(f, DESTROY); os.close(f)
+    except OSError:
+        pass
+time.sleep(0.5)
+
+before = set(glob.glob("/dev/rpmsg[0-9]*"))
+f = os.open(ctrl, os.O_RDWR)
+fcntl.ioctl(f, CREATE, struct.pack("32sII", b"DS", 0xFFFFFFFF, 0xFFFFFFFF))
+os.close(f)
+time.sleep(0.5)
+dev = sorted(set(glob.glob("/dev/rpmsg[0-9]*")) - before)[-1]
+
+s0 = slab()
+t0 = time.time()
+ok = bad = 0
+for i in range(n):
+    try:
+        g = os.open(dev, os.O_RDWR); os.close(g); ok += 1
+    except OSError:
+        bad += 1
+took = time.time() - t0
+time.sleep(2)
+s1 = slab()
+
+print("  %d cycles in %.1f s: %d opened, %d failed" % (n, took, ok, bad))
+grew = [(k, s1.get(k, 0) - v) for k, v in s0.items()
+        if s1.get(k, 0) - v >= ok * 0.5]
+if grew:
+    print("  slab growth of at least half a channel per cycle:")
+    for k, d in grew:
+        print("    %-14s %+d live objects  <- looks like a leak" % (k, d))
+else:
+    print("  no slab bucket grew by half a cycle's worth: no leak of that size")
+
+try:
+    g = os.open(dev, os.O_RDWR); fcntl.ioctl(g, DESTROY); os.close(g)
+except OSError:
+    pass
+PY
+
+echo "  uptime $(cut -d' ' -f1 /proc/uptime)"
+w1=$(warn 'close ack on unknown channel'); u1=$(warn 'refcount')
+o1=$(warn 'Unable to handle kernel')
+echo "  close-ack warnings ${w0} -> ${w1}, refcount ${u0} -> ${u1}, oops ${o0} -> ${o1}"
+
+echo "tearing the edge down, which is what a modem crash does:"
+echo 1 > /sys/kernel/debug/remoteproc/remoteproc0/crash || true
+sleep 12
+echo "  remoteproc: $(cat /sys/class/remoteproc/remoteproc0/state)"
+u2=$(warn 'refcount'); o2=$(warn 'Unable to handle kernel')
+echo "  refcount ${u1} -> ${u2}, oops ${o1} -> ${o2}"
+dmesg | grep -c 'remote processor modem is now up' | sed 's/^/  modem came up this many times: /'
+
+[ "$u2" = "$u0" ] && [ "$o2" = "$o0" ] && [ "$w1" = "$w0" ] \
+	&& echo "PASS" || { echo "FAIL: something new appeared above"; exit 1; }

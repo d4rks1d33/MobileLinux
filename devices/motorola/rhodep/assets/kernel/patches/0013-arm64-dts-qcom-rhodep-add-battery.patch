@@ -1,0 +1,54 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: add battery
+
+Add the CW2217 fuel gauge found at 0x64 on the charger I2C bus, so the
+device reports a battery to userspace.
+
+The design values come from the vendor tree: fcc_design = 5000 (mAh) in
+the CW2217 battery profile, and the 3400 mV / 4450 mV low and high voltage
+alarm points that downstream programs into the gauge.
+
+The two other chips on this bus, an SGM41542 charger at 0x3b and an
+SGM7220 Type-C controller at 0x47, are left out for now: neither has a
+driver, and the charger in particular must not be poked blindly.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -142,6 +142,18 @@
+ 		pinctrl-0 = <&panel_vci_default>;
+ 	};
+ 
++	/*
++	 * Design values from the vendor tree: fcc_design in the CW2217
++	 * battery profile, and the low/high voltage alarm points that
++	 * downstream programs into the gauge.
++	 */
++	battery: battery {
++		compatible = "simple-battery";
++		charge-full-design-microamp-hours = <5000000>;
++		voltage-min-design-microvolt = <3400000>;
++		voltage-max-design-microvolt = <4450000>;
++	};
++
+ 	touch_avdd: touch-avdd-regulator {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "touch_avdd";
+@@ -177,6 +189,18 @@
+ &i2c8 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
++
++	/*
++	 * Also on this bus, not yet supported: an SGM41542 charger at 0x3b
++	 * and an SGM7220 Type-C controller at 0x47.
++	 */
++	fuel-gauge@64 {
++		compatible = "cellwise,cw2217";
++		reg = <0x64>;
++		monitored-battery = <&battery>;
++		shunt-resistor-micro-ohms = <5000>;
++		cellwise,ui-full-soc = <97>;
++	};
+ };
+ 
+ &i2c10 {

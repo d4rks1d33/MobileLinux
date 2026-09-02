@@ -1,0 +1,53 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/msm/a6xx: use GMU wrapper funcs for the SM6375 A619
+
+The A619 in SM6375 is the "holi" variant, which has no real GMU: the
+vendor device tree describes it as "qcom,adreno-gpu-a619-holi" with a
+"gmu_wrapper" register range instead of a GMU, and there are no GMU PDC
+addresses for it.
+
+msm/adreno already knows about this GPU (adreno_is_a619_holi() gates five
+register level quirks), and it decides between a real GMU and the wrapper
+from the device tree:
+
+	adreno_gpu->gmu_is_wrapper =
+		of_device_is_compatible(node, "qcom,adreno-gmu-wrapper");
+	...
+	if (adreno_has_gmu_wrapper(adreno_gpu))
+		ret = a6xx_gmu_wrapper_init(a6xx_gpu, node);
+	else
+		ret = a6xx_gmu_init(a6xx_gpu, node);
+
+but the function table comes from the catalog and is never reconciled with
+that decision:
+
+	ret = adreno_gpu_init(dev, pdev, adreno_gpu, info->funcs, nr_rings);
+
+The SM6375 entry asks for &a6xx_gpu_funcs, whose .pm_resume is
+a6xx_gmu_pm_resume. So with a wrapper in the device tree the GPU is set up
+as a wrapper but then resumed as if it had a real GMU, and the SoC hangs
+hard on the first runtime resume, before a6xx_pm_resume() is ever reached.
+On this phone that means an unrecoverable boot loop.
+
+This went unnoticed because no upstream device tree enables the SM6375 GPU,
+so the entry could not be exercised.
+
+Point the entry at &a6xx_gmuwrapper_funcs, matching the A610 and A702
+wrapper entries, and drop the GMU firmware, which a wrapper never loads.
+
+--- a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+@@ -840,12 +840,11 @@
+ 		.revn = 619,
+ 		.fw = {
+ 			[ADRENO_FW_SQE] = "a630_sqe.fw",
+-			[ADRENO_FW_GMU] = "a619_gmu.bin",
+ 		},
+ 		.gmem = SZ_512K,
+ 		.quirks = ADRENO_QUIRK_4GB_VA,
+ 		.inactive_period = DRM_MSM_INACTIVE_PERIOD,
+-		.funcs = &a6xx_gpu_funcs,
++		.funcs = &a6xx_gmuwrapper_funcs,
+ 		.zapfw = "a615_zap.mdt",
+ 		.a6xx = &(const struct a6xx_info) {
+ 			.hwcg = a615_hwcg,

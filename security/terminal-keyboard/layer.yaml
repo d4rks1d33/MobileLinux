@@ -1,0 +1,8 @@
+id: terminal-keyboard
+kind: convenience
+layer: desktop
+desktop: [plasma]
+summary: adds Esc/Tab/Ctrl/Alt/arrows to the on-screen keyboard
+install: install.sh
+depends:
+  apt: [qml6-module-qtquick-virtualkeyboard]

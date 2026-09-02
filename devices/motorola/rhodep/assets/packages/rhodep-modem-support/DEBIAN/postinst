@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable readonly-firmware.mount rhodep-modem-fw.service ath10k-late.service 2>/dev/null || true
+systemctl enable rmtfs.service pd-mapper.service tqftpserv.service qrtr-ns.service 2>/dev/null || true
+
+# Freeze what is known to work and is easy to break from a distro upgrade.
+#
+# firmware-atheros is the important one: it ships the very same paths as
+# firmware-motorola-rhodep, /usr/lib/firmware/ath10k/WCN3990/hw1.0/board-2.bin
+# and firmware-5.bin plus the qca bluetooth files, so upgrading it replaces the
+# board file this device needs with the generic one and the internal WiFi and
+# bluetooth stop working.
+#
+# The rest is the modem transport (rmtfs, qrtr, pd-mapper, tqftpserv) and the
+# QMI/ModemManager stack, which are the pieces that took the longest to get
+# working and that nothing else on the system needs newer.
+#
+# To update any of them on purpose: apt-mark unhold <package>
+apt-mark hold 	firmware-atheros 	rmtfs tqftpserv protection-domain-mapper qrtr-tools libqrtr1 	modemmanager libmm-glib0 	libqmi-utils libqmi-glib5 libqmi-proxy 	2>/dev/null || true
+
+exit 0

@@ -1,0 +1,42 @@
+#!/bin/sh
+# Select the suspend mode that actually suspends on this SoC.
+#
+# The kernel offers two and defaults to the wrong one:
+#
+#	# cat /sys/power/mem_sleep
+#	s2idle [deep]
+#
+# `deep` does not work here. Asked to sleep for twenty seconds it comes back
+# after two, every time, with no error in the log and nothing recorded in
+# /sys/power/pm_wakeup_irq -- so it is not a wakeup, it is the suspend itself
+# returning:
+#
+#	modo deep:   asked 20 s, slept  2 s
+#	modo s2idle: asked 20 s, slept 22 s
+#
+# That matters far beyond battery life. With the screen off the phone was
+# entering and leaving suspend every couple of seconds, and every cycle
+# re-enumerates USB. Anything running off a USB adapter -- a WiFi dongle doing
+# a scan, say -- loses its interface and dies, and OTG has to be switched on
+# again by hand. Which is exactly what happened in the field: lock the screen,
+# come back, and the scan is gone.
+#
+# On s2idle, measured across a 25 s suspend: it slept 27 s, OTG stayed on with
+# the charger's boost register untouched (reg01=0x3a before and after), and a
+# background process kept running with a single 28-second gap in its heartbeat.
+#
+# Kernel command line `mem_sleep_default=s2idle` would do the same thing, but
+# that needs a new boot image; this needs no reflash.
+set -eu
+
+MODE=/sys/power/mem_sleep
+
+[ -w "$MODE" ] || { echo "rhodep-suspend-mode: $MODE not writable"; exit 0; }
+
+case "$(cat "$MODE")" in
+	*s2idle*) ;;
+	*) echo "rhodep-suspend-mode: this kernel offers no s2idle, leaving it alone"; exit 0 ;;
+esac
+
+echo s2idle > "$MODE"
+echo "rhodep-suspend-mode: $(cat "$MODE")"

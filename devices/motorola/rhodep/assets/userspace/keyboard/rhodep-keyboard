@@ -1,0 +1,51 @@
+#!/bin/sh
+# Show the on-screen keyboard in apps that never ask for it.
+#
+# Plasma only raises the keyboard when the focused window asks, through the
+# Wayland text-input protocol. Anything on XWayland cannot ask, and Electron
+# apps default to XWayland, so in VS Code -- or any X11 app -- there is a text
+# field, a cursor, and no way to type into it. KWin knows:
+#
+#	activeClientSupportsTextInput    false
+#
+# KWin also offers a way out. forceActivate raises the keyboard regardless of
+# what the focused window supports, and the keystrokes reach it as ordinary
+# input:
+#
+#	forceActivate  ->  visible: true, active: true
+#
+# Run with no argument to toggle, or `on` / `off`.
+set -eu
+
+DEST=org.kde.KWin
+OBJ=/VirtualKeyboard
+IFACE=org.kde.kwin.VirtualKeyboard
+
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+: "${DBUS_SESSION_BUS_ADDRESS:=unix:path=$XDG_RUNTIME_DIR/bus}"
+export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+
+get() {
+	dbus-send --session --print-reply --dest=$DEST $OBJ \
+		org.freedesktop.DBus.Properties.Get \
+		string:$IFACE string:"$1" 2>/dev/null |
+		tail -1 | sed 's/.*boolean //' | tr -d ' '
+}
+
+show() {
+	dbus-send --session --dest=$DEST $OBJ $IFACE.forceActivate >/dev/null 2>&1
+}
+
+hide() {
+	dbus-send --session --dest=$DEST $OBJ \
+		org.freedesktop.DBus.Properties.Set \
+		string:$IFACE string:active variant:boolean:false >/dev/null 2>&1
+}
+
+case "${1:-toggle}" in
+	on)  show ;;
+	off) hide ;;
+	*)
+		if [ "$(get visible)" = "true" ]; then hide; else show; fi
+		;;
+esac

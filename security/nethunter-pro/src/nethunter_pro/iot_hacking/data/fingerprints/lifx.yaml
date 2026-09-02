@@ -1,0 +1,18 @@
+id: lifx
+version: 1
+device_type: smart_bulb
+vendor: LIFX
+family: lifx
+threshold: 60
+matchers:
+  - name: udp-56700
+    type: udp_reply
+    port: 56700
+    body_regex: '.'   # any reply on 56700 is LIFX-ish
+    confidence: 70
+  - name: oui-lifx
+    type: mac_oui
+    values: ["D0:73:D5", "94:B7:33"]
+    confidence: 20
+metadata:
+  playbook: lifx

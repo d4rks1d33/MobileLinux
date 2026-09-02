@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+# /etc/profile.d and /etc/environment.d only cover login shells and systemd
+# user sessions respectively; Kali's root shell is zsh and interactive SSH is
+# not always a login shell, so the variable would not be set where hashcat
+# actually runs. /etc/environment is applied by PAM to every session, so add
+# it there too, idempotently and without disturbing the existing file.
+ENVF=/etc/environment
+if [ -f "$ENVF" ] && ! grep -q '^RUSTICL_ENABLE=' "$ENVF"; then
+    printf 'RUSTICL_ENABLE=freedreno\n' >> "$ENVF"
+fi
+
+# Pin the Mesa OpenCL runtime: rusticl on freedreno is young, and this is the
+# version the GPU was validated with (kernels run correctly under it). An
+# unattended upgrade could regress or change its behaviour, so hold it the same
+# way the other rhodep packages hold their validated dependencies.
+#
+# A hold set here is not enough on its own: rhodep-holds-enforce only puts back
+# holds that are in the canonical list, so mesa-opencl-icd is also in
+# userspace/apt/apt-holds.txt. That matters more than it looks -- the package is
+# marked auto-installed, so the moment the hold goes the next `apt autoremove`
+# takes the OpenCL driver with it and clinfo quietly reports zero platforms.
+apt-mark hold mesa-opencl-icd 2>/dev/null || true
+
+# RUSTICL_ENABLE lives in files that belong to this package, but /etc/environment
+# is edited in place above and belongs to base-files, so nothing would put our
+# line back. Register what we can with the port's file protection.
+PROTECT=/usr/local/sbin/rhodep-protect-files
+if [ -x "$PROTECT" ]; then
+    "$PROTECT" release /etc/profile.d/rhodep-rusticl.sh 2>/dev/null || true
+    "$PROTECT" register gpu-opencl 0644 \
+        /etc/profile.d/rhodep-rusticl.sh 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,49 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] regulator: fan53870: declare the input supply for the low LDOs
+
+LDO1 and LDO2 are the chip's low-voltage group and are fed from a
+separate input pin to LDO3-7. Nothing declared that input, so the
+regulator core had no supply to resolve and the rail feeding them looked
+unused to Linux even while it was powering the camera.
+
+Give those two descriptors a supply_name so a board can wire the pin up.
+LDO3-7 are left with none: their input is a real pin too, but no board
+this driver has seen names it, and inventing a property that no device
+tree sets would only make the core substitute a dummy regulator and warn
+about it seven times a boot.
+
+--- a/drivers/regulator/fan53870.c
++++ b/drivers/regulator/fan53870.c
+@@ -52,9 +52,10 @@
+ 	.is_enabled		= regulator_is_enabled_regmap,
+ };
+ 
+-#define FAN53870_LDO(_num, _min_uV)					\
++#define FAN53870_LDO(_num, _min_uV, _supply)				\
+ 	{								\
+ 		.name		 = "LDO"#_num,				\
++		.supply_name	 = _supply,				\
+ 		.of_match	 = of_match_ptr("LDO"#_num),		\
+ 		.regulators_node = of_match_ptr("regulators"),		\
+ 		.type		 = REGULATOR_VOLTAGE,			\
+@@ -71,13 +72,13 @@
+ 	}
+ 
+ static const struct regulator_desc fan53870_regulators[] = {
+-	FAN53870_LDO(1, FAN53870_LV_MIN_UV),
+-	FAN53870_LDO(2, FAN53870_LV_MIN_UV),
+-	FAN53870_LDO(3, FAN53870_HV_MIN_UV),
+-	FAN53870_LDO(4, FAN53870_HV_MIN_UV),
+-	FAN53870_LDO(5, FAN53870_HV_MIN_UV),
+-	FAN53870_LDO(6, FAN53870_HV_MIN_UV),
+-	FAN53870_LDO(7, FAN53870_HV_MIN_UV),
++	FAN53870_LDO(1, FAN53870_LV_MIN_UV, "vin1"),
++	FAN53870_LDO(2, FAN53870_LV_MIN_UV, "vin1"),
++	FAN53870_LDO(3, FAN53870_HV_MIN_UV, NULL),
++	FAN53870_LDO(4, FAN53870_HV_MIN_UV, NULL),
++	FAN53870_LDO(5, FAN53870_HV_MIN_UV, NULL),
++	FAN53870_LDO(6, FAN53870_HV_MIN_UV, NULL),
++	FAN53870_LDO(7, FAN53870_HV_MIN_UV, NULL),
+ };
+ 
+ static const struct regmap_config fan53870_regmap = {

@@ -1,0 +1,5 @@
+id: cleanup
+kind: convenience
+layer: generic
+summary: weekly disk cleanup + systemd journal cap
+install: install.sh

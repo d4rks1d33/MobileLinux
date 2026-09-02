@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+"""Hold the phone awake while work you left running is still working.
+
+The complaint this answers: start a capture, lock the screen, come back an hour
+later, find it stopped. On Android a background job takes a wakelock and the
+phone does not sleep underneath it. Here nothing takes one on your behalf.
+
+Android is not actually automatic about this -- an app declares itself with a
+foreground service and a notification, and anything that does not gets frozen.
+The aim here is the same result without having to declare anything: start your
+work as usual, lock the screen, and it keeps running.
+
+## How it decides what to hold for
+
+Two independent signals, because "anything that is running" would keep the phone
+awake for the OS's own background services and flatten the battery silently.
+
+  1. Anything you named in the config, for services that spend their time
+     waiting rather than computing.
+  2. Anything you started from a terminal.
+  3. Anything holding a live packet capture, wherever it runs.
+  4. Anything burning CPU.
+
+  A baseline of "services running at boot, anything new is yours" was tried and
+  removed: a service that starts late -- udisks2 here -- is then permanently
+  "new" and the phone never sleeps again, which is the flat-battery failure this
+  is supposed to prevent.
+
+While the screen is locked, the phone is held awake if either signal still shows
+work. When the last of it stops, the hold is dropped and the phone sleeps. The
+battery floor overrides everything: below it, work or no work, the hold goes.
+
+## What it deliberately does not do
+
+  * It does not hold while the screen is on. Nothing was going to suspend then.
+  * It does not count anything the system starts after boot on its own -- a
+    timer firing, a socket activating a service -- because that is not your work
+    and holding for it is how a phone never sleeps.
+  * `unit:` / `proc:` lines in the config still force-hold specific things, for
+    jobs that block rather than compute and that you want held regardless.
+"""
+
+import os
+import subprocess
+import sys
+import time
+
+CONF = os.environ.get("RHODEP_KEEP_AWAKE_CONF", "/etc/rhodep/keep-awake.conf")
+CLK = os.sysconf("SC_CLK_TCK")
+
+
+def load_conf():
+    cfg = {
+        "interval": 15.0,
+        "cpu_percent": 3.0,
+        "battery_floor": 20,
+        "only_when_locked": True,
+        "ignore": set(),
+        "force": [],
+    }
+    try:
+        with open(CONF) as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return cfg
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key, val = key.strip(), val.strip()
+        if key == "interval":
+            cfg["interval"] = float(val)
+        elif key == "cpu_percent":
+            cfg["cpu_percent"] = float(val)
+        elif key == "battery_floor":
+            cfg["battery_floor"] = int(val)
+        elif key == "only_when_locked":
+            cfg["only_when_locked"] = val.lower() not in ("0", "false", "no")
+        elif key == "ignore":
+            cfg["ignore"].add(val)
+        elif key in ("unit", "proc", "procf"):
+            cfg["force"].append((key, val))
+    return cfg
+
+
+def running_services():
+    """Set of .service units systemd currently reports as running."""
+    try:
+        out = subprocess.check_output(
+            ["systemctl", "list-units", "--type=service", "--state=running",
+             "--no-legend", "--plain"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    names = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0].endswith(".service"):
+            names.add(parts[0])
+    return names
+
+
+def screen_locked():
+    """True if any graphical session reports its screen locked.
+
+    If no session exposes the hint at all -- a headless boot, say -- treat it as
+    unlocked, so this never holds a phone that has no screen to lock.
+    """
+    try:
+        out = subprocess.check_output(
+            ["loginctl", "list-sessions", "--no-legend"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    for line in out.splitlines():
+        sid = line.split()[0] if line.split() else None
+        if not sid:
+            continue
+        try:
+            props = subprocess.check_output(
+                ["loginctl", "show-session", sid,
+                 "-p", "LockedHint", "-p", "Type"],
+                text=True, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        d = dict(l.split("=", 1) for l in props.splitlines() if "=" in l)
+        if d.get("Type") in ("wayland", "x11", "mir") and \
+                d.get("LockedHint") == "yes":
+            return True
+    return False
+
+
+def terminal_scopes():
+    """cgroup scopes of terminal login sessions only.
+
+    Deliberately not the graphical session. That one -- Type=wayland here -- is
+    full of long-lived non-shell processes (plasmashell, the compositor) that
+    would look like work forever and pin the phone awake permanently. Only tty
+    and pts sessions carry the terminal tools we care about.
+    """
+    try:
+        out = subprocess.check_output(
+            ["loginctl", "list-sessions", "--no-legend"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    scopes = []
+    for line in out.splitlines():
+        sid = line.split()[0] if line.split() else None
+        if not sid:
+            continue
+        try:
+            props = subprocess.check_output(
+                ["loginctl", "show-session", sid, "-p", "Type", "-p", "Scope"],
+                text=True, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        d = dict(l.split("=", 1) for l in props.splitlines() if "=" in l)
+        if d.get("Type") in ("tty", "pts") and d.get("Scope"):
+            scopes.append(d["Scope"])
+    return scopes
+
+
+def cpu_times():
+    """Per-pid (name, uid, ticks) for every process we can read."""
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % pid) as fh:
+                data = fh.read()
+            # comm can contain spaces and parentheses; split on the last ')'
+            close = data.rindex(")")
+            name = data[data.index("(") + 1:close]
+            fields = data[close + 2:].split()
+            ticks = int(fields[11]) + int(fields[12])  # utime + stime
+            uid = os.stat("/proc/%s" % pid).st_uid
+        except (OSError, ValueError, IndexError):
+            continue
+        out[pid] = (name, uid, ticks)
+    return out
+
+
+def busy(prev, now, cfg, elapsed):
+    """Names of processes that used more than the threshold since last poll."""
+    if elapsed <= 0:
+        return []
+    budget = cfg["cpu_percent"] / 100.0 * elapsed * CLK
+    hits = []
+    for pid, (name, uid, ticks) in now.items():
+        if name in cfg["ignore"]:
+            continue
+        # System daemons are the port's own furniture and are expected to tick
+        # over; it is the user's work we are protecting.
+        if uid < 1000 and uid != 0:
+            continue
+        old = prev.get(pid)
+        if old is None or old[0] != name:
+            continue
+        if ticks - old[2] > budget:
+            hits.append(name)
+    return hits
+
+
+def capture_work():
+    """Whoever has a packet capture open, wherever it lives.
+
+    A GUI left capturing -- Wireshark, say -- runs in the graphical session,
+    which session_work() deliberately skips: that session is full of long-lived
+    non-shell processes and counting them would pin the phone awake for ever.
+    An AF_PACKET socket is the thing itself rather than a guess about it, and
+    desktop furniture does not open one.
+
+    Costs one read when nothing is capturing, which is the normal case.
+
+    The network plumbing holds packet sockets open permanently -- NetworkManager
+    does, for DHCP and ARP -- so their presence alone means nothing. Measured:
+    without any capture running this returned "NetworkManager", which would have
+    held the phone awake for ever. Those are skipped by name; the list is short
+    and stable, and anything else can be added with `ignore:`.
+    """
+    infra = {"NetworkManager", "wpa_supplicant", "dhclient", "dhcpcd",
+             "avahi-daemon", "systemd-networkd", "connmand", "dnsmasq"}
+    try:
+        with open("/proc/net/packet") as fh:
+            lines = fh.read().splitlines()[1:]
+    except OSError:
+        return None
+    inodes = {ln.split()[-1] for ln in lines if ln.split()}
+    if not inodes:
+        return None
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        fddir = "/proc/%s/fd" % pid
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(os.path.join(fddir, fd))
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                try:
+                    comm = open("/proc/%s/comm" % pid).read().strip()
+                except OSError:
+                    continue
+                if comm in infra:
+                    break
+                return comm
+    return None
+
+
+def session_work():
+    """A non-shell process in a terminal login session.
+
+    Terminal tools -- wifite, tshark, run as root or not -- land in a tty/pts
+    session's cgroup. An idle shell prompt, sshd, tmux and this watcher do not
+    count, so an open terminal doing nothing does not hold the phone awake.
+    """
+    shells = {"bash", "zsh", "sh", "dash", "fish", "-bash", "-zsh",
+              "login", "systemd", "(sd-pam)", "sshd", "sshd-session",
+              "tmux", "tmux:", "screen", "SCREEN",
+              # sudo/su are plumbing: whatever they run is a separate process
+              # in the same scope and is detected on its own. Without this an
+              # idle `sudo -i` root prompt holds the phone awake for ever.
+              "sudo", "su"}
+    base = "/sys/fs/cgroup/user.slice"
+    if not os.path.isdir(base):
+        return None
+    for scope in terminal_scopes():
+        for root, dirs, files in os.walk(base):
+            if os.path.basename(root) != scope:
+                continue
+            try:
+                pids = open(os.path.join(root, "cgroup.procs")).read().split()
+            except OSError:
+                continue
+            for pid in pids:
+                try:
+                    comm = open("/proc/%s/comm" % pid).read().strip()
+                except OSError:
+                    continue
+                if comm in shells or comm.startswith("rhodep-keep"):
+                    continue
+                return comm
+    return None
+
+
+def forced(cfg):
+    for kind, name in cfg["force"]:
+        try:
+            if kind == "unit":
+                if subprocess.call(["systemctl", "is-active", "--quiet", name]) == 0:
+                    return name
+            elif kind == "proc":
+                if subprocess.call(["pgrep", "-x", name],
+                                   stdout=subprocess.DEVNULL) == 0:
+                    return name
+            elif kind == "procf":
+                if subprocess.call(["pgrep", "-f", name],
+                                   stdout=subprocess.DEVNULL) == 0:
+                    return name
+        except OSError:
+            continue
+    return None
+
+
+def battery():
+    for base in ("/sys/class/power_supply/battery",
+                 "/sys/class/power_supply/bq256xx-battery",
+                 "/sys/class/power_supply/cw2217-battery"):
+        try:
+            pct = int(open(base + "/capacity").read().strip())
+            try:
+                charging = open(base + "/status").read().strip() != "Discharging"
+            except OSError:
+                charging = False
+            return pct, charging
+        except OSError:
+            continue
+    return None, None
+
+
+class Hold:
+    def __init__(self):
+        self.proc = None
+
+    def take(self, why):
+        if self.proc is not None:
+            return
+        self.proc = subprocess.Popen(
+            ["systemd-inhibit", "--what=idle:sleep", "--mode=block",
+             "--who=rhodep-keep-awake", "--why=work is running",
+             "sleep", "infinity"])
+        say("holding the phone awake: %s" % why)
+
+    def drop(self, reason):
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+        self.proc = None
+        say("letting it sleep: %s" % reason)
+
+
+def say(msg):
+    sys.stdout.write("rhodep-keep-awake: %s\n" % msg)
+    sys.stdout.flush()
+
+
+def main():
+    if not subprocess.run(["sh", "-c", "command -v systemd-inhibit"],
+                          stdout=subprocess.DEVNULL).returncode == 0:
+        sys.exit("systemd-inhibit is not installed")
+
+    cfg = load_conf()
+
+    say("watching for work: listed units, terminal jobs, live captures, "
+        "and anything above %.1f%% CPU" % cfg["cpu_percent"])
+
+    prev = cpu_times()
+    last = time.time()
+    hold = Hold()
+
+    import signal
+    signal.signal(signal.SIGTERM, lambda *a: (hold.drop("stopping"), sys.exit(0)))
+    signal.signal(signal.SIGINT, lambda *a: (hold.drop("stopping"), sys.exit(0)))
+
+    while True:
+        time.sleep(cfg["interval"])
+        cfg = load_conf()
+
+        pct, charging = battery()
+        if pct is not None and not charging and pct <= cfg["battery_floor"]:
+            hold.drop("battery at %d%%, below the %d%% floor"
+                      % (pct, cfg["battery_floor"]))
+            continue
+
+        if cfg["only_when_locked"] and not screen_locked():
+            # Screen on: nothing was going to suspend. Drop any hold so it does
+            # not linger, and wait.
+            hold.drop("screen unlocked")
+            continue
+
+        why = forced(cfg)
+
+        if why is None:
+            w = session_work()
+            if w:
+                why = "%s in a terminal" % w
+
+        if why is None:
+            c = capture_work()
+            if c:
+                why = "%s is capturing" % c
+
+        if why is None:
+            now = cpu_times()
+            hits = busy(prev, now, cfg, time.time() - last)
+            prev, last = now, time.time()
+            if hits:
+                seen = sorted(set(hits))
+                why = "%s busy" % ", ".join(seen[:3])
+                if len(seen) > 3:
+                    why += " and %d more" % (len(seen) - 3)
+        else:
+            prev, last = cpu_times(), time.time()
+
+        if why:
+            hold.take(why)
+        else:
+            hold.drop("nothing you started is still running")
+
+
+if __name__ == "__main__":
+    main()

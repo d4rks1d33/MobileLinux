@@ -1,0 +1,59 @@
+From: rhodep port <none@example.com>
+Date: Mon, 24 Aug 2026 20:45:00 -0300
+Subject: [PATCH] DIAGNOSTIC: soc: qcom: qmi: report unhandled messages
+
+Not for source= beyond the investigation it belongs to.
+
+An LTE attach kills this SoC about ten seconds after the modem finishes
+programming its GSI channels. The interval is the same every time --
+9.7 s and 9.9 s across two runs measured from the last GSI interrupt --
+which is a timeout expiring rather than a race or a rail collapsing.
+
+Something asks and gives up. The obvious candidate is QMI, because
+mainline's IPA answers exactly two requests:
+
+	ipa_server_msg_handlers[] = {
+		IPA_QMI_INDICATION_REGISTER,
+		IPA_QMI_DRIVER_INIT_COMPLETE,
+	};
+
+Downstream's service implements a good deal more, including the filter
+rule installation a bearer needs. And when the modem asks for something
+that is not in that table, qmi_invoke_handler() does this:
+
+	if (!handler->fn)
+		return;
+
+It drops the message without a word. So the silence this investigation
+kept running into was not the absence of an event, it was a dropped
+message with no way to see it.
+
+Say something instead. This sits in the generic QMI layer rather than in
+IPA on purpose: it costs nothing when every message is handled, and if
+the modem is asking some other service for something it is not getting,
+that shows up too.
+
+Ratelimited, because a modem that is not getting an answer tends to ask
+again.
+---
+ drivers/soc/qcom/qmi_interface.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+--- a/drivers/soc/qcom/qmi_interface.c
++++ b/drivers/soc/qcom/qmi_interface.c
+@@ -403,8 +403,14 @@ static void qmi_invoke_handler(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
+ 			break;
+ 	}
+ 
+-	if (!handler->fn)
++	if (!handler->fn) {
++		pr_warn_ratelimited("qmi: no handler on local port %u for type=%u msg_id=0x%04x txn=%u len=%zu from node %u port %u\n",
++				    qmi->sq.sq_port, hdr->type,
++				    le16_to_cpu(hdr->msg_id),
++				    le16_to_cpu(hdr->txn_id), len,
++				    sq->sq_node, sq->sq_port);
+ 		return;
++	}
+ 
+ 	dest = kzalloc(handler->decoded_size, GFP_KERNEL);
+ 	if (!dest)

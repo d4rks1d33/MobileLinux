@@ -1,0 +1,42 @@
+From: rhodep port
+Subject: [PATCH] nfc: s3fwrn5: map the MIFARE Classic protocol value
+
+The part reports MIFARE Classic with 0x80, a value NCI leaves to vendors
+rather than assigning itself, so the core cannot map it and asks the driver
+through the get_rfprotocol op that exists for exactly this. Nothing answered
+it here, so a card was found, its identifier read correctly, and then thrown
+away for having "not the desired protocol".
+
+Observed with a MIFARE Classic 1K: sens_res 0x44, 7 byte identifier,
+sel_res 0x08, rf_protocol 0x80.
+
+--- a/drivers/nfc/s3fwrn5/core.c
++++ b/drivers/nfc/s3fwrn5/core.c
+@@ -225,11 +225,27 @@
+ 	return nci_core_init(info->ndev);
+ }
+ 
++/*
++ * MIFARE Classic is not one of the protocols NCI assigns a number to, so the
++ * part reports it with a value out of the range left to vendors and the core,
++ * unable to know what it means, asks the driver instead. Without this the
++ * target is found, read correctly down to its identifier, and then dropped
++ * for having "not the desired protocol".
++ */
++#define S3FWRN5_RF_PROTOCOL_MIFARE	0x80
++
++static __u32 s3fwrn5_nci_get_rfprotocol(struct nci_dev *ndev, __u8 rf_protocol)
++{
++	return rf_protocol == S3FWRN5_RF_PROTOCOL_MIFARE ?
++		NFC_PROTO_MIFARE_MASK : 0;
++}
++
+ static const struct nci_ops s3fwrn5_nci_ops = {
+ 	.open = s3fwrn5_nci_open,
+ 	.close = s3fwrn5_nci_close,
+ 	.send = s3fwrn5_nci_send,
+ 	.setup = s3fwrn5_nci_setup,
++	.get_rfprotocol = s3fwrn5_nci_get_rfprotocol,
+ 	.post_setup = s3fwrn5_nci_post_setup,
+ 	.prop_ops = s3fwrn5_nci_prop_ops,
+ 	.n_prop_ops = ARRAY_SIZE(s3fwrn5_nci_prop_ops),

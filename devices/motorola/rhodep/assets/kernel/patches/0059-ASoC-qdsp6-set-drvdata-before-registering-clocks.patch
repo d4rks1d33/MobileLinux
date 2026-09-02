@@ -1,0 +1,104 @@
+From: rhodep port <none@example.com>
+Date: Sat, 22 Aug 2026 21:40:00 -0300
+Subject: [PATCH] ASoC: qdsp6: q6dsp-lpass-clocks: publish drvdata before
+ registering the clocks
+
+q6dsp_clock_dev_probe() calls dev_set_drvdata() *after* the loop that
+registers every clock, but the clk ops resolve their container with
+dev_get_drvdata(clk->dev):
+
+	static int clk_q6dsp_prepare(struct clk_hw *hw)
+	{
+		struct q6dsp_clk *clk = to_q6dsp_clk(hw);
+		struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+
+		return cc->desc->lpass_set_clk(...);
+	}
+
+That is safe only as long as nothing prepares a clock while it is still
+being registered. The clock framework does exactly that when a clock of
+the same name was previously unregistered while still prepared: the
+orphan left behind is reparented onto the clock being registered, and
+__clk_set_parent_before() replays the child's prepare count onto the new
+parent from inside __clk_register().
+
+An ADSP subsystem restart produces precisely that state. The LPASS
+clocks go away with consumers still holding them:
+
+	clk_unregister: unregistering prepared clock: LPASS_HW_DCODEC
+	clk_unregister: unregistering prepared clock: LPASS_CLK_ID_TX_CORE_NPL_MCLK
+	clk_unregister: unregistering prepared clock: LPASS_CLK_ID_TX_CORE_MCLK
+
+and when the PD-restart notifier re-probes q6afe, the first
+devm_clk_hw_register() adopts one of those orphans and prepares it
+before drvdata has been set, on a Motorola Moto G82 5G (SM6375):
+
+	Unable to handle kernel NULL pointer dereference at virtual address 0000000000000348
+	pc : clk_q6dsp_prepare+0x24/0x3c [snd_q6dsp_common]
+	lr : clk_core_prepare+0xb8/0x128
+	Call trace:
+	 clk_q6dsp_prepare+0x24/0x3c [snd_q6dsp_common] (P)
+	 clk_core_prepare+0xb8/0x128
+	 clk_core_prepare_lock+0x74/0xfc
+	 __clk_set_parent_before+0x80/0x230
+	 clk_core_reparent_orphans_nolock+0x74/0xc4
+	 __clk_register+0x6dc/0xb0c
+	 devm_clk_hw_register+0x78/0xc0
+	 q6dsp_clock_dev_probe+0x104/0x184 [snd_q6dsp_common]
+	 q6afe_probe+0x7c/0x94 [q6afe]
+	 apr_device_probe+0x20/0x3c [apr]
+	 ...
+	 of_register_apr_devices+0x244/0x2a4 [apr]
+	 apr_pd_status+0x2c/0x4c [apr]
+	 pdr_notifier_work+0xa0/0x1fc [pdr_interface]
+
+0x348 is offsetof(struct q6dsp_cc, desc) (8 + 104 * 8), i.e. cc is NULL.
+
+The oops is worse than a lost audio path, because __clk_register() runs
+under the global clk prepare_lock. The worker dies holding it, nothing
+ever releases it, and every subsequent clk_prepare_enable() in the system
+blocks forever. On this device the visible symptom is that the display
+never comes back after a suspend/resume that restarted the ADSP: the DSI
+and DPU clocks can no longer be enabled, while anything that does not
+touch the clock framework keeps running normally.
+
+Set the drvdata before registering anything. It is the container the ops
+already expect, it is fully initialised at that point, and nothing else
+uses this device's drvdata.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+ sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
+--- a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
++++ b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
+@@ -146,6 +146,18 @@
+ 	cc->dev = dev;
+ 	q6dsp_clks = desc->clks;
+ 
++	/*
++	 * The clk ops below resolve their container through the device's
++	 * drvdata, and the clock framework can invoke .prepare() from inside
++	 * devm_clk_hw_register(): if a clock of the same name was previously
++	 * unregistered while still prepared -- which is exactly what an ADSP
++	 * subsystem restart does to the LPASS clocks -- the orphan left behind
++	 * is reparented onto the clock being registered and its prepare count
++	 * is replayed there and then. Publish the drvdata before registering
++	 * anything, or that first .prepare() dereferences a NULL q6dsp_cc.
++	 */
++	dev_set_drvdata(dev, cc);
++
+ 	for (i = 0; i < desc->num_clks; i++) {
+ 		unsigned int id = q6dsp_clks[i].clk_id;
+ 		struct clk_init_data init = {
+@@ -178,8 +190,6 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	dev_set_drvdata(dev, cc);
+-
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(q6dsp_clock_dev_probe);

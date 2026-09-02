@@ -1,0 +1,25 @@
+id: printer
+version: 1
+device_type: printer
+vendor: Generic
+family: printer
+threshold: 60
+matchers:
+  - name: port-9100
+    type: port
+    port: 9100
+    confidence: 55
+  - name: port-631-ipp
+    type: port
+    port: 631
+    confidence: 30
+  - name: mdns-ipp
+    type: mdns
+    mdns_type: _ipp._tcp
+    confidence: 50
+  - name: mdns-printer
+    type: mdns
+    mdns_type: _printer._tcp
+    confidence: 40
+metadata:
+  playbook: printer

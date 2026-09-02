@@ -1,0 +1,70 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] rpmsg: glink: make the channel open timeout adjustable
+
+qcom_glink_create_local() waits five seconds for the remote to acknowledge a
+channel opened from this side. That is generous for any channel the remote has
+already brought up, and it is what every glink user has relied on.
+
+It is not enough when the remote has to create the channel on demand. On a
+Motorola Moto G82 5G (SM6375), asking the modem for its diagnostic channels --
+DIAG_CNTL, DIAG, DIAG_DATA -- makes it begin a glink channel migration, and the
+open never completes within five seconds. Twenty-one seconds after we have
+given up and closed the channel out from under it, the modem takes a fatal
+error:
+
+	qcom_q6v5_pas 6080000.remoteproc: fatal error received:
+	  glink_channel_migration.c:602:Assertion status == GLINK_STATUS_SUCCESS failed
+	remoteproc remoteproc0: crash detected in modem: type fatal error
+
+A channel name the modem has never heard of does not do this: it times out
+quietly and the modem carries on. So the migration is real work the modem is
+doing on our behalf, and the timeout may well be cutting it off partway.
+
+Make the wait a module parameter so that question can be answered without
+rebuilding, and leave the default at the five seconds it has always been. The
+parameter is writable at runtime, since the interesting experiment is to raise
+it, ask again, and see whether the modem finishes.
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -26,6 +26,25 @@
+ #define CREATE_TRACE_POINTS
+ #include "qcom_glink_trace.h"
+ 
++/*
++ * How long qcom_glink_create_local() waits for the remote to acknowledge a
++ * channel we opened. Five seconds is what this driver has always used, and it
++ * is plenty for every channel a Qualcomm modem opens itself. It is not enough
++ * for a channel the modem has to bring up on demand: asking for DIAG_CNTL or
++ * DIAG makes the modem start a channel migration, and the assertion it takes
++ * afterwards
++ *
++ *   glink_channel_migration.c:602: Assertion status == GLINK_STATUS_SUCCESS
++ *
++ * arrives about twenty-one seconds after we have already given up and closed
++ * the channel underneath it. So make the wait adjustable, to find out whether
++ * the modem would have finished if anyone had waited.
++ */
++static unsigned int open_timeout_ms = 5000;
++module_param(open_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(open_timeout_ms,
++		 "milliseconds to wait for the remote to acknowledge a locally opened channel");
++
+ #define GLINK_NAME_SIZE		32
+ #define GLINK_VERSION_1		1
+ 
+@@ -1257,11 +1276,13 @@
+ 	if (ret)
+ 		goto release_channel;
+ 
+-	ret = wait_for_completion_timeout(&channel->open_ack, 5 * HZ);
++	ret = wait_for_completion_timeout(&channel->open_ack,
++					  msecs_to_jiffies(open_timeout_ms));
+ 	if (!ret)
+ 		goto err_timeout;
+ 
+-	ret = wait_for_completion_timeout(&channel->open_req, 5 * HZ);
++	ret = wait_for_completion_timeout(&channel->open_req,
++					  msecs_to_jiffies(open_timeout_ms));
+ 	if (!ret)
+ 		goto err_timeout;
+ 

@@ -1,0 +1,16 @@
+id: miio
+device_type: vacuum
+vendor: Xiaomi
+family: miio
+requires: {}
+actions:
+  - id: handshake
+    label: "miIO handshake (leaks device_id + timestamp)"
+    category: recon
+    dangerous: false
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 54321
+          payload_hex: "21310020ffffffffffffffffffffffff00000000000000000000000000000000"
+          save_as: handshake

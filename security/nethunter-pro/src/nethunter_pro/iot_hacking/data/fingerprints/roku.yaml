@@ -1,0 +1,25 @@
+id: roku
+version: 1
+device_type: streamer
+vendor: Roku
+family: roku
+threshold: 60
+matchers:
+  - name: ssdp-roku-ecp
+    type: ssdp
+    st: "roku:ecp"
+    confidence: 80
+  - name: port-8060
+    type: port
+    port: 8060
+    confidence: 30
+  - name: device-info
+    type: http_body
+    path: /query/device-info
+    regex: '<vendor-name>Roku'
+    confidence: 60
+    extract:
+      model: '<model-name>([^<]+)</model-name>'
+      serial: '<serial-number>([^<]+)</serial-number>'
+metadata:
+  playbook: roku

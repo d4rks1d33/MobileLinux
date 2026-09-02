@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Root-side runner for the Bluetooth LE Spam engine.
+
+Invoked by the NetHunter Pro GUI via the DBus helper. The GUI cannot open a
+raw HCI user channel itself (needs CAP_NET_RAW/root) so it launches this
+script with a config JSON on argv, and the script:
+
+  1. calls radio.prepare_radio() so bluetoothd is out of the way,
+  2. runs the SpamEngine to cycle the picked packets on the chosen
+     controller,
+  3. streams state / error / packet events to stdout as newline-delimited
+     JSON so the GUI can render them live,
+  4. restores the radio on exit (SIGTERM, SIGINT, or engine finishing).
+
+The config JSON on argv looks like:
+
+    {"packet_ids": ["fastpair-airpods-pro", ...],
+     "interval_ms": 100,        // radio advertising interval
+     "payload_change_ms": 200,  // how often the host swaps payloads
+     "mode": "Sequential",
+     "tx_power": "High",
+     "dev_id": 0}
+
+Packet ids match ``Packet.title`` from :mod:`payloads` -- that's what the
+GUI sees when it builds the list, so the wire format is just the human
+title. Titles are unique across categories.
+"""
+from __future__ import annotations
+
+import json
+import signal
+import sys
+import threading
+from pathlib import Path
+
+# Make the vendored blespam package importable. The runner is installed at
+# /usr/libexec/nethunter-pro-blespam and the module lives inside the app's
+# python package, so we resolve the site-packages path at runtime rather
+# than hard-coding a version-suffixed dist-packages directory.
+for candidate in (
+    "/usr/local/lib/python3.14/dist-packages",
+    "/usr/local/lib/python3.13/dist-packages",
+    "/usr/local/lib/python3.12/dist-packages",
+    "/usr/local/lib/python3.11/dist-packages",
+):
+    if Path(candidate).is_dir():
+        sys.path.insert(0, candidate)
+
+from nethunter_pro.vendor.blespam import payloads, radio  # noqa: E402
+from nethunter_pro.vendor.blespam.engine import (  # noqa: E402
+    DEFAULT_TX_POWER,
+    MODE_SEQUENTIAL,
+    SpamEngine,
+)
+
+
+def emit(kind: str, **fields) -> None:
+    """Emit a single JSON event on stdout and flush.
+
+    The GUI reads line by line; using a fixed schema (``event`` field with
+    ``state`` | ``packet`` | ``error`` | ``ready``) keeps the parser tiny.
+    """
+    payload = {"event": kind, **fields}
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        emit("error", message="usage: blespam-runner <config-json>")
+        return 2
+
+    try:
+        cfg = json.loads(sys.argv[1])
+    except ValueError as exc:
+        emit("error", message="bad config json: " + str(exc))
+        return 2
+
+    dev_id = int(cfg.get("dev_id", 0))
+    packet_ids = set(cfg.get("packet_ids") or [])
+    interval_ms = int(cfg.get("interval_ms", 100))
+    # Old configs (from the pre-self-heal engine) didn't have a separate
+    # payload_change knob -- they used the advertising interval as the
+    # host loop rate too, which is exactly what wedges the QCA chip.
+    # Take the field if it's there, otherwise pick a sane default that
+    # is decoupled from the advertising interval.
+    payload_change_ms = int(cfg.get("payload_change_ms", 200))
+    mode = cfg.get("mode", MODE_SEQUENTIAL)
+    tx_power = cfg.get("tx_power", DEFAULT_TX_POWER)
+
+    if not packet_ids:
+        emit("error", message="no packets selected")
+        return 2
+
+    # Build the packet set once, filter by the GUI's picks. Keeping the
+    # order from build_categories() so Sequential mode has a stable cycle.
+    picked = []
+    for _cat, packets in payloads.build_categories():
+        for pkt in packets:
+            if pkt.title in packet_ids:
+                picked.append(pkt)
+    if not picked:
+        emit("error", message="no matching packets in payload catalogue")
+        return 2
+
+    emit("ready", count=len(picked))
+
+    # radio.prepare_radio() takes ~4-6 s on the internal QCA controller
+    # (rfkill dance + settle + bluetoothd mask + hci down). Do it now so
+    # any errors come out before the engine reports "advertising".
+    try:
+        radio.prepare_radio(dev_id)
+    except Exception as exc:  # noqa: BLE001
+        emit("error", message="radio prepare failed: " + str(exc))
+        return 1
+
+    done = threading.Event()
+
+    def on_state(state: str) -> None:
+        emit("state", state=state)
+        if state == "stopped":
+            done.set()
+
+    def on_error(message: str) -> None:
+        emit("error", message=message)
+
+    def on_packet(title: str, adv: bytes) -> None:
+        emit("packet", title=title, hex=adv.hex(" ").upper())
+
+    def on_recovery(kind: str, reason: str) -> None:
+        # Emitted from the engine's self-heal loop -- the GUI shows
+        # these as amber log lines so the user can see the chip is
+        # complaining without the run appearing to have died.
+        emit("recovery", kind=kind, reason=reason)
+
+    engine = SpamEngine(on_state=on_state, on_error=on_error,
+                        on_packet=on_packet, on_recovery=on_recovery)
+
+    def stop(_sig=None, _frame=None) -> None:
+        engine.stop()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    engine.start(picked, interval_ms=interval_ms,
+                 payload_change_ms=payload_change_ms, mode=mode,
+                 tx_power=tx_power, dev_id=dev_id)
+
+    # Block here -- the engine drives its own thread. done is set from
+    # on_state("stopped") which fires after the engine's finally clause,
+    # so we know the radio is closed by then.
+    done.wait()
+
+    # Give the radio back to the system before exiting.
+    try:
+        radio.restore_radio(dev_id)
+    except Exception as exc:  # noqa: BLE001
+        emit("error", message="radio restore failed: " + str(exc))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

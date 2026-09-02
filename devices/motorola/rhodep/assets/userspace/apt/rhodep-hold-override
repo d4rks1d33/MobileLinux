@@ -1,0 +1,113 @@
+#!/bin/sh
+# The authorised way to release one of this port's apt holds.
+#
+# The holds are put back automatically by rhodep-holds-enforce, so a plain
+# `apt-mark unhold` does not stick: it survives until the next apt transaction,
+# boot or timer tick, and it is logged as an ALERT while it lasts. That is on
+# purpose. Removing one of these holds is a decision, not a step in a script,
+# and it should leave a record of who decided and why.
+#
+# This tool is that record. It writes the package into the exceptions file with
+# a reason and a timestamp, which is what makes the enforcer leave it alone.
+#
+#	rhodep-hold-override release <package> "<reason>"
+#	rhodep-hold-override restore <package>
+#	rhodep-hold-override status
+#
+# It refuses to run non-interactively without --yes, so an unattended script or
+# an agent cannot release a hold as a side effect of doing something else.
+set -eu
+
+CANON=/usr/local/share/rhodep/apt-holds.txt
+EXCEPT=/etc/rhodep/apt-holds-exceptions
+
+usage() {
+	cat <<EOF
+usage: rhodep-hold-override release <package> "<reason>" [--yes]
+       rhodep-hold-override restore <package>
+       rhodep-hold-override status
+
+  release   stop protecting <package>: unhold it and tell the enforcer not to
+            put the hold back. Requires a reason, which is recorded.
+  restore   protect it again: drop the exception and re-apply the hold.
+  status    show which holds are currently released, and why.
+
+Why each package is held: /usr/share/doc/rhodep-apt/apply-holds.sh or
+userspace/apt/apply-holds.sh in the port repo.
+EOF
+}
+
+[ "$(id -u)" = 0 ] || { echo "must be run as root" >&2; exit 1; }
+install -d -m 0755 "$(dirname "$EXCEPT")"
+[ -e "$EXCEPT" ] || : > "$EXCEPT"
+
+cmd=${1:-}; shift 2>/dev/null || true
+
+case "$cmd" in
+release)
+	pkg=${1:-}; reason=${2:-}; yes=${3:-}
+	[ -n "$pkg" ] || { usage; exit 1; }
+	if ! grep -qx "$pkg" "$CANON" 2>/dev/null; then
+		echo "'$pkg' is not one of this port's protected holds; plain apt-mark is enough." >&2
+		exit 1
+	fi
+	[ -n "$reason" ] || { echo "a reason is required, it goes in the record" >&2; exit 1; }
+
+	if [ "$yes" != "--yes" ]; then
+		if [ ! -t 0 ]; then
+			echo "refusing to release a hold non-interactively; pass --yes if you really mean it" >&2
+			exit 1
+		fi
+		cat <<EOF
+
+You are about to stop protecting: $pkg
+
+This package is held because losing or changing it breaks something that is
+hard to notice and harder to put back. Read why before continuing:
+  grep -A3 "$pkg" /usr/share/doc/rhodep-apt/apply-holds.sh
+
+EOF
+		printf "Type the package name to confirm: "
+		read -r confirm
+		[ "$confirm" = "$pkg" ] || { echo "not confirmed, nothing changed"; exit 1; }
+	fi
+
+	grep -qx "$pkg" "$EXCEPT" || printf '%s\n' "$pkg" >> "$EXCEPT"
+	printf '# %s released %s: %s\n' "$(date -Is)" "$pkg" "$reason" >> "$EXCEPT.log"
+	apt-mark unhold "$pkg" >/dev/null 2>&1 || true
+	# Also drop dpkg's Protected flag, otherwise the package still cannot be
+	# removed and "released" would be a lie.
+	[ -x /usr/local/sbin/rhodep-dpkg-protect ] && \
+		/usr/local/sbin/rhodep-dpkg-protect clear "$pkg" >/dev/null 2>&1 || true
+	logger -t rhodep-hold-override -p daemon.warning -- "hold RELEASED for $pkg: $reason" 2>/dev/null || true
+	echo "released: $pkg  ($reason)"
+	echo "put it back with: rhodep-hold-override restore $pkg"
+	;;
+restore)
+	pkg=${1:-}
+	[ -n "$pkg" ] || { usage; exit 1; }
+	if [ -s "$EXCEPT" ]; then
+		grep -vx "$pkg" "$EXCEPT" > "$EXCEPT.tmp" 2>/dev/null || : > "$EXCEPT.tmp"
+		mv "$EXCEPT.tmp" "$EXCEPT"
+	fi
+	apt-mark hold "$pkg" >/dev/null 2>&1 || true
+	[ -x /usr/local/sbin/rhodep-dpkg-protect ] && \
+		/usr/local/sbin/rhodep-dpkg-protect apply >/dev/null 2>&1 || true
+	printf '# %s restored %s\n' "$(date -Is)" "$pkg" >> "$EXCEPT.log"
+	logger -t rhodep-hold-override -p daemon.notice -- "hold restored for $pkg" 2>/dev/null || true
+	echo "restored: $pkg"
+	;;
+status)
+	if [ -s "$EXCEPT" ]; then
+		echo "holds currently released:"
+		sed 's/^/  /' "$EXCEPT"
+		echo
+		echo "history:"
+		[ -r "$EXCEPT.log" ] && sed 's/^/  /' "$EXCEPT.log" || echo "  (none)"
+	else
+		echo "no holds released; all $(grep -cv '^#' "$CANON" 2>/dev/null || echo '?') are protected"
+	fi
+	;;
+*)
+	usage; exit 1 ;;
+esac

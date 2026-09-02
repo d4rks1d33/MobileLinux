@@ -1,0 +1,951 @@
+From: d4rks1d3 <teogorqui1@hotmail.es>
+Date: Mon, 3 Aug 2026 00:00:00 +0000
+Subject: [PATCH] arm64: dts: qcom: sm6375: add Motorola Moto G82 5G
+
+Add support for the Motorola Moto G82 5G (codename "rhodep", XT2225-1),
+based on SM6375. Derived from the Sony Xperia 10 IV device tree and the
+downstream Motorola "blair" device tree.
+
+Working: UFS storage, USB peripheral (gadget/networking), volume and power
+keys, microSD, Goodix GT9916 touchscreen, WiFi (with vendor firmware) and
+the framebuffer set up by the bootloader.
+
+Two device specific notes:
+
+- The memory node is populated explicitly. Motorola's ABL does not patch it
+  when booting a mainline device tree and a zero sized node makes the kernel
+  reset before reaching userspace.
+
+- The UFS ICE region is deliberately not mapped. The SM6115 address that is
+  otherwise shared with this SoC points at a different block on SM6375 and
+  touching it hangs the CPU.
+
+The MDSS/DPU/DSI nodes are included, but the panel (Novatek NT37701, DSC
+command mode) still shows corruption, so the bootloader framebuffer is kept
+enabled by default.
+
+Signed-off-by: d4rks1d3 <teogorqui1@hotmail.es>
+---
+diff --git a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+new file mode 100644
+index 0000000..82a0ef9
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -0,0 +1,907 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Copyright (c) 2026, postmarketOS contributors
++ *
++ * Motorola Moto G82 5G (rhodep)
++ * Based on sm6375-sony-xperia-murray-pdx225.dts by Konrad Dybcio
++ * and the downstream Motorola "blair" device tree.
++ */
++
++/dts-v1/;
++
++/* PMK8350 is configured to use SID6 instead of 0 */
++#define PMK8350_SID 6
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/power/qcom-rpmpd.h>
++#include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
++#include <dt-bindings/clock/qcom,sm6375-dispcc.h>
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++#include "sm6375.dtsi"
++#include "pm6125.dtsi"
++#include "pmk8350.dtsi"
++#include "pmr735a.dtsi"
++
++/* PM6125 PON is used and we can't have duplicate labels */
++/delete-node/ &pmk8350_pon;
++
++/ {
++	model = "Motorola Moto G82 5G";
++	compatible = "motorola,rhodep", "qcom,sm6375";
++	chassis-type = "handset";
++
++	qcom,msm-id = <507 0x10000>;
++	qcom,board-id = <0x4d 0xb200>;
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		/* The panel is command mode, so the bootloader framebuffer stops
++		 * being refreshed. Keep it disabled in favour of the real DSI. */
++		/*
++		 * The bootloader leaves a framebuffer configured. It stops being
++		 * refreshed after the first DPMS cycle because the panel is in
++		 * command mode, but it is still the most useful default until the
++		 * DSI output produces a clean image.
++		 */
++		framebuffer: framebuffer@85200000 {
++			compatible = "simple-framebuffer";
++			reg = <0 0x85200000 0 0xc00000>;
++
++			width = <1080>;
++			height = <2400>;
++			stride = <(1080 * 4)>;
++			format = "a8r8g8b8";
++			/*
++			 * That's (going to be) a lot of clocks, but it's necessary due
++			 * to unused clk cleanup & no panel driver yet
++			 */
++			clocks = <&gcc GCC_DISP_AHB_CLK>,
++				 <&gcc GCC_DISP_HF_AXI_CLK>,
++				 <&gcc GCC_DISP_THROTTLE_CORE_CLK>,
++				 <&gcc GCC_DISP_GPLL0_DIV_CLK_SRC>;
++		};
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++		label = "gpio-keys";
++
++		pinctrl-0 = <&vol_up_n>;
++		pinctrl-names = "default";
++
++		key-volume-up {
++			label = "Volume Up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pmr735a_gpios 1 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++			linux,can-disable;
++			wakeup-source;
++		};
++	};
++
++	/*
++	 * Motorola's ABL does not populate the memory node when booting a
++	 * mainline device tree, and a zero-sized node makes the kernel reset
++	 * immediately. Declare the RAM explicitly; the reserved-memory nodes
++	 * below carve out the firmware regions.
++	 */
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x0 0x80000000>;
++	};
++
++	reserved-memory {
++		cont_splash_mem: memory@85200000 {
++			reg = <0 0x85200000 0 0xc00000>;
++			no-map;
++		};
++	};
++
++	panel_vci: panel-vci-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "panel_vci";
++		regulator-min-microvolt = <3000000>;
++		regulator-max-microvolt = <3000000>;
++		regulator-enable-ramp-delay = <233>;
++		gpio = <&tlmm 46 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		pinctrl-names = "default";
++		pinctrl-0 = <&panel_vci_default>;
++	};
++
++	touch_avdd: touch-avdd-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "touch_avdd";
++		gpio = <&tlmm 92 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&ts_avdd_default>;
++		enable-active-high;
++	};
++
++	vph_pwr: vph-pwr-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vph_pwr";
++		regulator-min-microvolt = <3700000>;
++		regulator-max-microvolt = <3700000>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	vibrator {
++		compatible = "gpio-vibrator";
++		enable-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
++		vcc-supply = <&vph_pwr>;
++	};
++};
++
++&gpi_dma0 {
++	status = "okay";
++};
++
++&gpi_dma1 {
++	status = "okay";
++};
++
++&pmk8350_adc_tm {
++	status = "okay";
++};
++
++&pmk8350_rtc {
++	status = "okay";
++};
++
++&pmr735a_gpios {
++	vol_up_n: vol-up-n-state {
++		pins = "gpio1";
++		function = "normal";
++		power-source = <1>;
++		bias-pull-up;
++		input-enable;
++	};
++};
++
++&pon_pwrkey {
++	status = "okay";
++};
++
++&pon_resin {
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&qupv3_id_1 {
++	status = "okay";
++};
++
++&remoteproc_adsp {
++	firmware-name = "qcom/sm6375/motorola/rhodep/adsp.mbn";
++	status = "okay";
++};
++
++&remoteproc_cdsp {
++	firmware-name = "qcom/sm6375/motorola/rhodep/cdsp.mbn";
++	status = "okay";
++};
++
++&remoteproc_mss {
++	firmware-name = "qcom/sm6375/motorola/rhodep/modem.mbn";
++	status = "okay";
++};
++
++&rpm_requests {
++	regulators-0 {
++		compatible = "qcom,rpm-pm6125-regulators";
++
++		pm6125_s5: s5 {
++			regulator-min-microvolt = <382000>;
++			regulator-max-microvolt = <1120000>;
++		};
++
++		pm6125_s6: s6 {
++			regulator-min-microvolt = <320000>;
++			regulator-max-microvolt = <1374000>;
++		};
++
++		pm6125_s7: s7 {
++			regulator-min-microvolt = <1574000>;
++			regulator-max-microvolt = <2040000>;
++		};
++
++		/*
++		 * S8 is VDD_GFX
++		 * L1 is VDD_LPI_CX
++		 */
++
++		pm6125_l2: l2 {
++			regulator-min-microvolt = <1170000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l3: l3 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1300000>;
++		};
++
++		pm6125_l4: l4 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1300000>;
++		};
++
++		pm6125_l5: l5 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-allow-set-load;
++		};
++
++		pm6125_l6: l6 {
++			regulator-min-microvolt = <1080000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l7: l7 {
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <880000>;
++		};
++
++		pm6125_l8: l8 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l9: l9 {
++			regulator-min-microvolt = <1504000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pm6125_l10: l10 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		pm6125_l11: l11 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		pm6125_l12: l12 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pm6125_l13: l13 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		pm6125_l14: l14 {
++			regulator-min-microvolt = <1700000>;
++			regulator-max-microvolt = <1900000>;
++		};
++
++		pm6125_l15: l15 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <3544000>;
++		};
++
++		pm6125_l16: l16 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		/* L17 is VDD_LPI_MX */
++
++		pm6125_l18: l18 {
++			regulator-min-microvolt = <830000>;
++			regulator-max-microvolt = <920000>;
++		};
++
++		pm6125_l19: l19 {
++			regulator-min-microvolt = <1624000>;
++			regulator-max-microvolt = <3304000>;
++		};
++
++		pm6125_l20: l20 {
++			regulator-min-microvolt = <1624000>;
++			regulator-max-microvolt = <3304000>;
++		};
++
++		pm6125_l21: l21 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++		};
++
++		pm6125_l22: l22 {
++			regulator-min-microvolt = <2704000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-allow-set-load;
++		};
++
++		pm6125_l23: l23 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++		};
++
++		pm6125_l24: l24 {
++			regulator-min-microvolt = <2704000>;
++			regulator-max-microvolt = <3544000>;
++		};
++	};
++
++	regulators-1 {
++		compatible = "qcom,rpm-pmr735a-regulators";
++
++		/*
++		 * S1 is VDD_MX
++		 * S2 is VDD_CX
++		 */
++
++		pmr735a_l1: l1 {
++			regulator-min-microvolt = <570000>;
++			regulator-max-microvolt = <650000>;
++		};
++
++		pmr735a_l2: l2 {
++			regulator-min-microvolt = <640000>;
++			regulator-max-microvolt = <640000>;
++		};
++
++		pmr735a_l3: l3 {
++			regulator-min-microvolt = <1000000>;
++			regulator-max-microvolt = <1200000>;
++		};
++
++		pmr735a_l4: l4 {
++			regulator-min-microvolt = <1504000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pmr735a_l5: l5 {
++			regulator-min-microvolt = <751000>;
++			regulator-max-microvolt = <824000>;
++		};
++
++		pmr735a_l6: l6 {
++			regulator-min-microvolt = <504000>;
++			regulator-max-microvolt = <868000>;
++		};
++
++		pmr735a_l7: l7 {
++			regulator-min-microvolt = <2700000>;
++			regulator-max-microvolt = <3544000>;
++		};
++	};
++};
++
++&sdc2_off_state {
++	sd-cd-pins {
++		pins = "gpio94";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++};
++
++&sdc2_on_state {
++	sd-cd-pins {
++		pins = "gpio94";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};
++
++&sdhc_2 {
++	status = "okay";
++
++	vmmc-supply = <&pm6125_l22>;
++	vqmmc-supply = <&pm6125_l5>;
++
++	cd-gpios = <&tlmm 94 GPIO_ACTIVE_HIGH>;
++};
++
++&spi0 {
++	status = "okay";
++
++	touchscreen@0 {
++		compatible = "goodix,gt9916";
++		reg = <0>;
++
++		interrupt-parent = <&tlmm>;
++		interrupts = <22 IRQ_TYPE_EDGE_FALLING>;
++
++		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
++
++		avdd-supply = <&touch_avdd>;
++		vddio-supply = <&pm6125_l13>;
++
++		spi-max-frequency = <9600000>;
++
++		touchscreen-size-x = <1080>;
++		touchscreen-size-y = <2400>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&ts_int_default>;
++	};
++};
++
++&soc {
++	ufs_mem_hc: ufshc@4804000 {
++		compatible = "qcom,sm6115-ufshc", "qcom,ufshc", "jedec,ufs-2.0";
++		reg = <0x0 0x04804000 0x0 0x3000>;
++		interrupts = <GIC_SPI 356 IRQ_TYPE_LEVEL_HIGH>;
++		phys = <&ufs_mem_phy>;
++		phy-names = "ufsphy";
++		lanes-per-direction = <1>;
++		#reset-cells = <1>;
++		resets = <&gcc GCC_UFS_PHY_BCR>;
++		reset-names = "rst";
++
++		power-domains = <&gcc UFS_PHY_GDSC>;
++		iommus = <&apps_smmu 0x60 0x0>;
++
++		clocks = <&gcc GCC_UFS_PHY_AXI_CLK>,
++			 <&gcc GCC_SYS_NOC_UFS_PHY_AXI_CLK>,
++			 <&gcc GCC_UFS_PHY_AHB_CLK>,
++			 <&gcc GCC_UFS_PHY_UNIPRO_CORE_CLK>,
++			 <&rpmcc RPM_SMD_XO_CLK_SRC>,
++			 <&gcc GCC_UFS_PHY_TX_SYMBOL_0_CLK>,
++			 <&gcc GCC_UFS_PHY_RX_SYMBOL_0_CLK>,
++			 <&gcc GCC_UFS_PHY_ICE_CORE_CLK>;
++		clock-names = "core_clk",
++			      "bus_aggr_clk",
++			      "iface_clk",
++			      "core_clk_unipro",
++			      "ref_clk",
++			      "tx_lane0_sync_clk",
++			      "rx_lane0_sync_clk",
++			      "ice_core_clk";
++
++		vcc-supply = <&pm6125_l24>;
++		vcc-max-microamp = <800000>;
++		vccq2-supply = <&pm6125_l11>;
++		vccq2-max-microamp = <800000>;
++
++		freq-table-hz = <50000000 200000000>,
++				<0 0>,
++				<0 0>,
++				<37500000 150000000>,
++				<0 0>,
++				<0 0>,
++				<0 0>,
++				<75000000 300000000>;
++
++		status = "okay";
++	};
++
++	ufs_mem_phy: phy@4807000 {
++		compatible = "qcom,sc7280-qmp-ufs-phy";
++		reg = <0x0 0x04807000 0x0 0x1000>;
++
++		clocks = <&rpmcc RPM_SMD_XO_CLK_SRC>,
++			 <&gcc GCC_UFS_PHY_PHY_AUX_CLK>,
++			 <&gcc GCC_UFS_MEM_CLKREF_CLK>;
++		clock-names = "ref",
++			      "ref_aux",
++			      "qref";
++
++		vdda-phy-supply = <&pm6125_l7>;
++		vdda-pll-supply = <&pm6125_l4>;
++
++		power-domains = <&gcc UFS_PHY_GDSC>;
++
++		resets = <&ufs_mem_hc 0>;
++		reset-names = "ufsphy";
++
++		#phy-cells = <0>;
++
++		status = "okay";
++	};
++};
++
++&tlmm {
++	gpio-reserved-ranges = <13 4>;
++
++	panel_vci_default: panel-vci-default-state {
++		pins = "gpio46";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	mdp_vsync_active: mdp-vsync-active-state {
++		pins = "gpio23";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
++	ts_int_default: ts-int-default-state {
++		pins = "gpio22";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-pull-up;
++	};
++
++	ts_avdd_default: ts-avdd-default-state {
++		pins = "gpio92";
++		function = "gpio";
++		drive-strength = <8>;
++		output-low;
++	};
++};
++
++&usb_1 {
++	status = "okay";
++};
++
++&usb_1_dwc3 {
++	dr_mode = "peripheral";
++};
++
++&usb_1_hsphy {
++	vdda-pll-supply = <&pm6125_l7>;
++	vdda18-supply = <&pm6125_l10>;
++	vdda33-supply = <&pmr735a_l7>;
++	status = "okay";
++};
++
++&wifi {
++	vdd-0.8-cx-mx-supply = <&pmr735a_l2>;
++	vdd-1.8-xo-supply = <&pm6125_l16>;
++	vdd-1.3-rfa-supply = <&pm6125_l2>;
++	vdd-3.3-ch0-supply = <&pm6125_l23>;
++	vdd-3.3-ch1-supply = <&pm6125_l21>;
++	status = "okay";
++};
++
++&xo_board_clk {
++	clock-frequency = <19200000>;
++};
++
++&soc {
++	mdss: display-subsystem@5e00000 {
++		compatible = "qcom,sm6375-mdss";
++		reg = <0x0 0x05e00000 0x0 0x1000>;
++		reg-names = "mdss";
++
++		power-domains = <&dispcc MDSS_GDSC>;
++
++		clocks = <&gcc GCC_DISP_AHB_CLK>,
++			 <&dispcc DISP_CC_MDSS_AHB_CLK>,
++			 <&dispcc DISP_CC_MDSS_MDP_CLK>;
++		clock-names = "iface", "ahb", "core";
++
++		resets = <&dispcc DISP_CC_MDSS_CORE_BCR>;
++
++		interrupts = <GIC_SPI 186 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-controller;
++		#interrupt-cells = <1>;
++
++		iommus = <&apps_smmu 0x820 0x2>;
++
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		status = "okay";
++
++		mdss_mdp: display-controller@5e01000 {
++			compatible = "qcom,sm6375-dpu";
++			reg = <0x0 0x05e01000 0x0 0x8f000>,
++			      <0x0 0x05eb0000 0x0 0x2008>;
++			reg-names = "mdp", "vbif";
++
++			clocks = <&gcc GCC_DISP_HF_AXI_CLK>,
++				 <&dispcc DISP_CC_MDSS_AHB_CLK>,
++				 <&dispcc DISP_CC_MDSS_MDP_CLK>,
++				 <&dispcc DISP_CC_MDSS_MDP_LUT_CLK>,
++				 <&dispcc DISP_CC_MDSS_ROT_CLK>,
++				 <&dispcc DISP_CC_MDSS_VSYNC_CLK>,
++				 <&gcc GCC_DISP_THROTTLE_CORE_CLK>;
++			clock-names = "bus",
++				      "iface",
++				      "core",
++				      "lut",
++				      "rot",
++				      "vsync",
++				      "throttle";
++
++			assigned-clocks = <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
++			assigned-clock-rates = <19200000>;
++
++			operating-points-v2 = <&mdp_opp_table>;
++			power-domains = <&rpmpd SM6375_VDDCX>;
++
++			interrupt-parent = <&mdss>;
++			interrupts = <0>;
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++					dpu_intf1_out: endpoint {
++						remote-endpoint = <&mdss_dsi0_in>;
++					};
++				};
++			};
++
++			/* Rates supported by disp_cc_mdss_mdp_clk_src (dispcc-sm6375) */
++			mdp_opp_table: opp-table {
++				compatible = "operating-points-v2";
++
++				opp-200000000 {
++					opp-hz = /bits/ 64 <200000000>;
++					required-opps = <&rpmpd_opp_low_svs>;
++				};
++
++				opp-300000000 {
++					opp-hz = /bits/ 64 <300000000>;
++					required-opps = <&rpmpd_opp_svs>;
++				};
++
++				opp-373500000 {
++					opp-hz = /bits/ 64 <373500000>;
++					required-opps = <&rpmpd_opp_svs_plus>;
++				};
++
++				opp-470000000 {
++					opp-hz = /bits/ 64 <470000000>;
++					required-opps = <&rpmpd_opp_nom>;
++				};
++
++				opp-560000000 {
++					opp-hz = /bits/ 64 <560000000>;
++					required-opps = <&rpmpd_opp_turbo>;
++				};
++			};
++		};
++
++		mdss_dsi0: dsi@5e94000 {
++			compatible = "qcom,sm6375-dsi-ctrl", "qcom,mdss-dsi-ctrl";
++			reg = <0x0 0x05e94000 0x0 0x400>;
++			reg-names = "dsi_ctrl";
++
++			interrupt-parent = <&mdss>;
++			interrupts = <4>;
++
++			clocks = <&dispcc DISP_CC_MDSS_BYTE0_CLK>,
++				 <&dispcc DISP_CC_MDSS_BYTE0_INTF_CLK>,
++				 <&dispcc DISP_CC_MDSS_PCLK0_CLK>,
++				 <&dispcc DISP_CC_MDSS_ESC0_CLK>,
++				 <&dispcc DISP_CC_MDSS_AHB_CLK>,
++				 <&gcc GCC_DISP_HF_AXI_CLK>;
++			clock-names = "byte",
++				      "byte_intf",
++				      "pixel",
++				      "core",
++				      "iface",
++				      "bus";
++
++			assigned-clocks = <&dispcc DISP_CC_MDSS_BYTE0_CLK_SRC>,
++					  <&dispcc DISP_CC_MDSS_PCLK0_CLK_SRC>;
++			assigned-clock-parents = <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
++						 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
++
++			operating-points-v2 = <&dsi_opp_table>;
++			power-domains = <&rpmpd SM6375_VDDMX>;
++
++			vdda-supply = <&pm6125_l4>;
++			refgen-supply = <&refgen>;
++
++			phys = <&mdss_dsi0_phy>;
++
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			status = "okay";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++					mdss_dsi0_in: endpoint {
++						remote-endpoint = <&dpu_intf1_out>;
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++					mdss_dsi0_out: endpoint {
++						remote-endpoint = <&panel_in>;
++						data-lanes = <0 1 2 3>;
++						qcom,te-source = "mdp_vsync_p";
++					};
++				};
++			};
++
++			dsi_opp_table: opp-table {
++				compatible = "operating-points-v2";
++
++				opp-19200000 {
++					opp-hz = /bits/ 64 <19200000>;
++					required-opps = <&rpmpd_opp_min_svs>;
++				};
++
++				opp-164000000 {
++					opp-hz = /bits/ 64 <164000000>;
++					required-opps = <&rpmpd_opp_low_svs>;
++				};
++
++				opp-187500000 {
++					opp-hz = /bits/ 64 <187500000>;
++					required-opps = <&rpmpd_opp_svs>;
++				};
++			};
++
++			panel@0 {
++				/* CSOT NT37701 1080x2400 DSC command mode */
++				compatible = "motorola,rhodep-nt37701";
++				reg = <0>;
++
++				/* The panel reset line is on the PMR735A PMIC, gpio2 */
++				reset-gpios = <&pmr735a_gpios 2 GPIO_ACTIVE_LOW>;
++
++				vddio-supply = <&pm6125_l13>;
++				dvdd-supply = <&pm6125_l3>;
++				vci-supply = <&panel_vci>;
++
++				pinctrl-names = "default";
++				pinctrl-0 = <&mdp_vsync_active>;
++
++				port {
++					panel_in: endpoint {
++						remote-endpoint = <&mdss_dsi0_out>;
++					};
++				};
++			};
++		};
++
++		mdss_dsi0_phy: phy@5e94400 {
++			compatible = "qcom,sm6375-dsi-phy-7nm";
++			reg = <0x0 0x05e94400 0x0 0x200>,
++			      <0x0 0x05e94600 0x0 0x280>,
++			      <0x0 0x05e94900 0x0 0x27c>;
++			reg-names = "dsi_phy",
++				    "dsi_phy_lane",
++				    "dsi_pll";
++
++			#clock-cells = <1>;
++			#phy-cells = <0>;
++
++			clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
++				 <&rpmcc RPM_SMD_XO_CLK_SRC>;
++			clock-names = "iface", "ref";
++
++			power-domains = <&rpmpd SM6375_VDDMX>;
++			required-opps = <&rpmpd_opp_nom>;
++
++			status = "okay";
++		};
++	};
++
++	dispcc: clock-controller@5f00000 {
++		compatible = "qcom,sm6375-dispcc";
++		reg = <0x0 0x05f00000 0x0 0x20000>;
++
++		clocks = <&rpmcc RPM_SMD_XO_CLK_SRC>,
++			 <&gcc GCC_DISP_GPLL0_CLK_SRC>,
++			 <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
++			 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
++
++		#clock-cells = <1>;
++		#reset-cells = <1>;
++		#power-domain-cells = <1>;
++	};
++
++	gpu: gpu@5900000 {
++		compatible = "qcom,adreno-619.0", "qcom,adreno";
++		reg = <0x0 0x05900000 0x0 0x40000>,
++		      <0x0 0x0599e000 0x0 0x1000>;
++		reg-names = "kgsl_3d0_reg_memory",
++			    "cx_mem";
++
++		interrupts = <GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>;
++
++		iommus = <&adreno_smmu 0>;
++		operating-points-v2 = <&gpu_opp_table>;
++		qcom,gmu = <&gmu>;
++		#cooling-cells = <2>;
++
++		/*
++		 * TODO: the correct GMU PDC addresses for SM6375 are unknown
++		 * (the SM6350 ones hang the SoC). Enable once they are known.
++		 */
++		status = "disabled";
++
++		zap-shader {
++			memory-region = <&pil_gpu_micro_code_mem>;
++			firmware-name = "qcom/sm6375/motorola/rhodep/a615_zap.mdt";
++		};
++
++		gpu_opp_table: opp-table {
++			compatible = "operating-points-v2";
++
++			opp-940000000 {
++				opp-hz = /bits/ 64 <940000000>;
++				opp-level = <RPM_SMD_LEVEL_TURBO>;
++			};
++
++			opp-840000000 {
++				opp-hz = /bits/ 64 <840000000>;
++				opp-level = <RPM_SMD_LEVEL_NOM_PLUS>;
++			};
++
++			opp-740000000 {
++				opp-hz = /bits/ 64 <740000000>;
++				opp-level = <RPM_SMD_LEVEL_NOM>;
++			};
++
++			opp-580000000 {
++				opp-hz = /bits/ 64 <580000000>;
++				opp-level = <RPM_SMD_LEVEL_SVS_PLUS>;
++			};
++
++			opp-435000000 {
++				opp-hz = /bits/ 64 <435000000>;
++				opp-level = <RPM_SMD_LEVEL_SVS>;
++			};
++
++			opp-320000000 {
++				opp-hz = /bits/ 64 <320000000>;
++				opp-level = <RPM_SMD_LEVEL_LOW_SVS>;
++			};
++		};
++	};
++
++	gmu: gmu@596a000 {
++		compatible = "qcom,adreno-gmu-619.0", "qcom,adreno-gmu";
++		reg = <0x0 0x0596a000 0x0 0x31000>,
++		      <0x0 0x0b290000 0x0 0x10000>,
++		      <0x0 0x0b490000 0x0 0x10000>;
++		reg-names = "gmu",
++			    "gmu_pdc",
++			    "gmu_pdc_seq";
++
++		interrupts = <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "hfi", "gmu";
++
++		clocks = <&gpucc GPU_CC_AHB_CLK>,
++			 <&gpucc GPU_CC_CX_GMU_CLK>,
++			 <&gpucc GPU_CC_CXO_CLK>,
++			 <&gcc GCC_GPU_MEMNOC_GFX_CLK>,
++			 <&gcc GCC_GPU_SNOC_DVM_GFX_CLK>;
++		clock-names = "ahb", "gmu", "cxo", "axi", "memnoc";
++
++		power-domains = <&gpucc GPU_CX_GDSC>,
++				<&gpucc GPU_GX_GDSC>;
++		power-domain-names = "cx", "gx";
++
++		iommus = <&adreno_smmu 5>;
++
++		operating-points-v2 = <&gmu_opp_table>;
++
++		status = "disabled";
++
++		gmu_opp_table: opp-table {
++			compatible = "operating-points-v2";
++
++			opp-200000000 {
++				opp-hz = /bits/ 64 <200000000>;
++				opp-level = <RPM_SMD_LEVEL_LOW_SVS>;
++			};
++		};
++	};
++};
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -343,6 +343,7 @@
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-laurel-sprout.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-willow.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6350-sony-xperia-lena-pdx213.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= sm6375-motorola-rhodep.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6375-sony-xperia-murray-pdx225.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-curtana.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-joyeuse.dtb

@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+systemctl disable --now usb-otg-host.service usb-otg-keepalive.timer usb-otg-auto.service 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable otg-default-charge.service 2>/dev/null || true
+/usr/local/sbin/otg off 2>/dev/null || true
+exit 0

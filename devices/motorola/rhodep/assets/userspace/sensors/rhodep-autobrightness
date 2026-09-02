@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""rhodep: ambient-light brightness for sessions that have no consumer for it.
+
+The ambient light sensor works and reports correct lux; what is missing is
+something to read it. PowerDevil 6.7, which drives brightness under Plasma
+Mobile, contains no reference to net.hadess.SensorProxy at all -- so the
+"automatic brightness" switch in that shell is not reading any sensor.
+
+Phosh and gsd-power DO consume it, so under those sessions this must stay off:
+two things driving the same backlight fight each other.
+
+Brightness goes through PowerDevil's own D-Bus interface rather than straight to
+/sys/class/backlight, so that PowerDevil stays the owner of the backlight and
+its slider in the shell follows along.
+
+Smoothing is split between the two parties that can each do half of it well:
+
+  1. here, the lux is low-pass filtered, fast when it rises and slow when it
+     falls, so a hand passing over the phone does not swing the screen;
+  2. the visual ramp is PowerDevil's. It already animates a brightness change
+     over about 200 ms -- measured: one setBrightnessSilent from 1300 to 9000
+     swept the panel 458 -> 594 -> 927 -> 1342 -> 1843 -> 2430 -> 3163.
+
+Doing our own ramp on top of that was a mistake worth recording: it restarted
+PowerDevil's animation ten times a second, and on this panel -- an AMOLED in DSI
+command mode, where brightness is a DCS command rather than a PWM duty cycle --
+that many brightness commands collide with frame transmission and draw visible
+lines across the screen while the level is moving.
+
+  --min / --max      percentage bounds                  (default 5 / 100)
+  --max-lux          lux that corresponds to --max      (default 3000)
+  --gamma            curve shape, higher = dimmer indoors   (default 2.5)
+  --tau-up/--tau-down    lux filter time constants, seconds (0.35 / 5.0)
+  --interval             seconds between commands           (0.3)
+  --deadband             ignore target moves under this     (6 %)
+  --max-step             largest change per command         (10 %)
+  --deadband         ignore target moves smaller than this (2 %)
+  --yield-seconds    back off this long after a manual change (45)
+  --backend          auto | powerdevil | sysfs
+  --dry-run          print what it would do
+"""
+
+import argparse
+import glob
+import json
+import math
+import os
+import sys
+
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib          # noqa: E402
+
+SENSOR_NAME = "net.hadess.SensorProxy"
+SENSOR_PATH = "/net/hadess/SensorProxy"
+
+PD_NAME = "org.kde.Solid.PowerManagement"
+PD_PATH = "/org/kde/Solid/PowerManagement/Actions/BrightnessControl"
+PD_IFACE = "org.kde.Solid.PowerManagement.Actions.BrightnessControl"
+
+# Ramp granularity. This is also how often the shell's brightness slider gets
+# told to move, so it is a UI decision as much as a smoothness one: at 25 Hz the
+# slider stutters and whips across its whole width, which looks worse than the
+# screen change it is describing. 10 Hz is smooth to the eye and calm on screen.
+# How often the filter is re-evaluated and, at most, how often PowerDevil is
+# told to move. Every command it gets is a DCS write to the panel, so this is
+# deliberately low: the smoothness comes from PowerDevil's own animation, not
+# from us sending many small steps.
+DEFAULT_INTERVAL = 0.25
+
+# Where Plasma keeps the per-output "Adjust automatically" switch. PowerDevil
+# has no ambient-light support at all on this release, so that switch in the
+# Settings app is wired to a feature that does not exist -- which means this
+# daemon, the thing that *is* moving the brightness, was overriding a user who
+# had explicitly asked for manual control and had every reason to think they had
+# got it. Reading the switch is what makes the toggle honest.
+KWIN_OUTPUT_CONFIG = "~/.config/kwinoutputconfig.json"
+
+
+class DesktopAutoSetting:
+    """Is 'automatic brightness' switched on for the internal panel?
+
+    Returns True, False, or None when it cannot be determined. Cached on the
+    file's mtime, because evaluate() runs several times a second and this must
+    not turn into a re-parse per tick.
+    """
+
+    def __init__(self, path=KWIN_OUTPUT_CONFIG):
+        self.path = os.path.expanduser(path)
+        self._mtime = None
+        self._value = None
+
+    def get(self):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            return None                     # no file: cannot tell
+        if mtime != self._mtime:
+            self._mtime = mtime
+            self._value = self._parse()
+        return self._value
+
+    def _parse(self):
+        try:
+            with open(self.path) as fh:
+                doc = json.load(fh)
+        except Exception:
+            return None
+        # The file is a list of setups; each has a "data" list of outputs. Any
+        # entry for the internal DSI panel will do, and they agree in practice.
+        for setup in doc if isinstance(doc, list) else []:
+            for out in setup.get("data", []) if isinstance(setup, dict) else []:
+                if not isinstance(out, dict):
+                    continue
+                if "automaticBrightness" not in out:
+                    continue
+                name = str(out.get("connectorName", ""))
+                if name.startswith("DSI") or len(setup.get("data", [])) == 1:
+                    return bool(out["automaticBrightness"])
+        return None
+
+
+class PowerDevilBackend:
+    """Preferred: keeps PowerDevil the owner of the backlight."""
+    name = "powerdevil"
+
+    def __init__(self):
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.proxy = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            PD_NAME, PD_PATH, PD_IFACE, None)
+        self.max = self.call("brightnessMax")
+        self.min = 0
+        try:
+            self.min = self.call("knownSafeBrightnessMin") or 0
+        except Exception:
+            pass
+        if not self.max:
+            raise RuntimeError("PowerDevil reports no backlight")
+
+    def call(self, method, *args):
+        var = GLib.Variant("(i)", args) if args else None
+        r = self.proxy.call_sync(method, var, Gio.DBusCallFlags.NONE, -1, None)
+        return r.unpack()[0] if r and r.n_children() else None
+
+    def get(self):
+        return self.call("brightness")
+
+    def set(self, raw):
+        # Silent: no on-screen popup for an automatic change. The slider still
+        # updates, which is the whole point of going through PowerDevil.
+        self.proxy.call_sync("setBrightnessSilent", GLib.Variant("(i)", (raw,)),
+                             Gio.DBusCallFlags.NONE, -1, None)
+
+    def subscribe(self, cb):
+        def on_sig(_p, _sender, signal, params):
+            if signal == "brightnessChanged":
+                cb(params.unpack()[0])
+        self.proxy.connect("g-signal", on_sig)
+
+
+class SysfsBackend:
+    """Fallback for a session with no PowerDevil. Needs write access."""
+    name = "sysfs"
+
+    def __init__(self):
+        self.dir = None
+        for d in sorted(glob.glob("/sys/class/backlight/*")):
+            if os.path.exists(os.path.join(d, "brightness")):
+                self.dir = d
+                break
+        if not self.dir:
+            raise RuntimeError("no backlight under /sys/class/backlight")
+        with open(os.path.join(self.dir, "max_brightness")) as f:
+            self.max = int(f.read().strip())
+        self.min = 0
+
+    def get(self):
+        try:
+            with open(os.path.join(self.dir, "brightness")) as f:
+                return int(f.read().strip())
+        except OSError:
+            return None
+
+    def set(self, raw):
+        with open(os.path.join(self.dir, "brightness"), "w") as f:
+            f.write("%d\n" % raw)
+
+    def subscribe(self, cb):
+        pass            # nothing to subscribe to; compared on each tick instead
+
+
+class AutoBrightness:
+    def __init__(self, args, backend):
+        self.a = args
+        self.be = backend
+        self.raw_lux = None         # newest reading
+        self.lux = None             # filtered
+        self.cur = None             # percent, what we last asked for
+        self.last_raw = None        # what we last wrote
+        self.yield_until = 0.0
+        self.prev_obs = None        # for spotting a settled external change
+        self.ext_hits = 0
+        self.moving = False
+        self.desktop = DesktopAutoSetting()
+        self.idle_logged = False
+        self.sensor = None       # set in run()
+        self.claimed = False
+        self.tick_id = None
+        self.t_last = self.now()
+        print("backend %s, range %d..%d" % (backend.name, backend.min, backend.max),
+              flush=True)
+
+    # ------------------------------------------------------------- utilities
+    @staticmethod
+    def now():
+        return GLib.get_monotonic_time() / 1e6
+
+    def pct_to_raw(self, pct):
+        lo = max(self.be.min, 1)
+        raw = round(self.be.max * pct / 100.0)
+        return int(min(self.be.max, max(lo, raw)))
+
+    def raw_to_pct(self, raw):
+        return 100.0 * raw / self.be.max
+
+    def lux_to_pct(self, lux):
+        a = self.a
+        frac = min(1.0, max(0.0, lux) / a.max_lux) ** (1.0 / a.gamma)
+        return a.min + (a.max - a.min) * frac
+
+    # ------------------------------------------------------------ the filter
+    def feed(self, raw_lux):
+        self.raw_lux = raw_lux
+
+    def evaluate(self):
+        """Advance the filter and, if the target has really moved, act once."""
+        # The desktop's own switch wins. Checked here rather than at startup so
+        # that toggling it in Settings takes effect without restarting anything.
+        if not self.a.ignore_desktop_setting and self.desktop.get() is False:
+            # Forget where we were: when it is switched back on we should start
+            # from whatever the user left, not from a stale target.
+            self.cur = None
+            self.last_raw = None
+            self.prev_obs = None
+            self.moving = False
+            self.raw_lux = None
+            if not self.idle_logged:
+                self.set_claim(False)
+                print("automatic brightness is off in the desktop settings; "
+                      "released the light sensor and idling", flush=True)
+                self.idle_logged = True
+                # Nothing to do until the switch moves, so stop waking up 3
+                # times a second to find that out.
+                return self.retime(self.a.idle_interval)
+            return True
+        if self.idle_logged:
+            print("automatic brightness switched back on, resuming", flush=True)
+            self.idle_logged = False
+            self.set_claim(True)
+            return self.retime(self.a.interval)
+
+        if self.raw_lux is None:
+            return True
+        t = self.now()
+        dt = max(0.0, t - self.t_last)
+        self.t_last = t
+
+        if self.lux is None:
+            self.lux = self.raw_lux
+        else:
+            # Time-based EWMA, so irregular sensor updates still behave. Rising
+            # light is followed quickly, falling light slowly.
+            tau = self.a.tau_up if self.raw_lux > self.lux else self.a.tau_down
+            alpha = 1.0 - math.exp(-dt / tau) if tau > 0 else 1.0
+            self.lux += alpha * (self.raw_lux - self.lux)
+
+        self.check_external()
+        if self.now() < self.yield_until:
+            return True
+
+        want = self.lux_to_pct(self.lux)
+        if self.cur is None:
+            self.cur = want
+            self.apply(want)
+            return True
+
+        gap = want - self.cur
+        if abs(gap) < self.a.deadband and not self.moving:
+            return True
+        # Below the deadband we are close enough; stop rather than creep.
+        if abs(gap) < 1.0:
+            self.moving = False
+            print("settled at %.0f%% (%.1f lux)" % (self.cur, self.lux), flush=True)
+            return True
+
+        # Cap how far a single command may move the panel. Every command makes
+        # PowerDevil animate, and the artefact this avoids scales with the size
+        # of that animation -- see the panel note in the README.
+        step = max(-self.a.max_step, min(self.a.max_step, gap))
+        self.moving = True
+        self.cur += step
+        self.apply(self.cur)
+        return True
+
+    def apply(self, pct):
+        raw = self.pct_to_raw(pct)
+        if raw == self.last_raw:
+            return
+        if self.a.dry_run:
+            self.last_raw = raw
+            return
+        try:
+            self.be.set(raw)
+        except Exception as e:
+            print("  cannot set brightness: %s" % e, flush=True)
+            return
+        self.last_raw = raw
+        self.ext_hits = 0
+        self.prev_obs = None
+
+    # ------------------------------------------- holding the sensor or not
+    # Claiming the ambient light sensor is not free: iio-sensor-proxy asks the
+    # ADSP's sensor core for a stream, and the samples come back over glink as
+    # interrupts on the application processor -- measured at ~7/s of glink+ipcc
+    # traffic that drops to ~0.6/s the moment this daemon lets go. Holding that
+    # open while the desktop has automatic brightness switched off is pure
+    # waste, so the claim follows the switch.
+    def set_claim(self, want):
+        if self.sensor is None or want == self.claimed:
+            return
+        try:
+            self.sensor.call_sync("ClaimLight" if want else "ReleaseLight",
+                                  None, Gio.DBusCallFlags.NONE, -1, None)
+        except Exception as e:
+            print("  cannot %s the light sensor: %s"
+                  % ("claim" if want else "release", e), flush=True)
+            return
+        self.claimed = want
+
+    def retime(self, seconds):
+        """Swap the mainloop tick. Returns False so the caller's source ends."""
+        self.tick_id = GLib.timeout_add(int(seconds * 1000), self.evaluate)
+        return False
+
+    # ------------------------------------------------- manual override
+    def check_external(self):
+        """Has someone else set the brightness?
+
+        Not answerable from the brightnessChanged signal: PowerDevil animates,
+        and emits the signal for every step on the way, so any fixed "ignore
+        our own writes for N seconds" window is either too short (a big jump
+        takes longer than the window and the tail looks like the user) or so
+        long it misses real changes. Instead: a value that has stopped moving
+        and is not the one we asked for is someone else's.
+        """
+        cur = self.be.get()
+        if cur is None:
+            return
+        tol = max(2, self.be.max // 100)
+        if self.last_raw is not None and abs(cur - self.last_raw) <= tol:
+            self.ext_hits = 0               # settled on what we asked for
+        elif self.prev_obs is not None and abs(cur - self.prev_obs) <= tol:
+            self.ext_hits += 1              # settled somewhere else
+        else:
+            self.ext_hits = 0               # still animating
+        self.prev_obs = cur
+
+        if self.ext_hits >= 2:
+            print("brightness set elsewhere (%d, we asked %s), backing off %ds"
+                  % (cur, self.last_raw, self.a.yield_seconds), flush=True)
+            self.yield_until = self.now() + self.a.yield_seconds
+            self.last_raw = cur
+            self.cur = self.raw_to_pct(cur)
+            self.ext_hits = 0
+
+    # -------------------------------------------------------------- main
+    def run(self):
+        cur_raw = self.be.get()
+        self.cur = self.raw_to_pct(cur_raw) if cur_raw else 50.0
+        self.last_raw = cur_raw
+        print("starting from %.0f%%" % self.cur, flush=True)
+
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        sensor = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            SENSOR_NAME, SENSOR_PATH, SENSOR_NAME, None)
+
+        has = sensor.get_cached_property("HasAmbientLight")
+        if not has or not has.get_boolean():
+            sys.exit("SensorProxy reports no ambient light sensor")
+
+        # The claim has to be held by a live connection; dropping it stops the
+        # updates, which is why this cannot be a shell loop around busctl. It is
+        # also polkit-gated on an active seat session, so this must run inside
+        # the session and not from an ssh shell.
+        self.sensor = sensor
+        sensor.call_sync("ClaimLight", None, Gio.DBusCallFlags.NONE, -1, None)
+        self.claimed = True
+
+        def on_props(_p, changed, _inv):
+            if "LightLevel" in changed.keys():
+                self.feed(changed["LightLevel"])
+        sensor.connect("g-properties-changed", on_props)
+
+        lvl = sensor.get_cached_property("LightLevel")
+        if lvl:
+            self.feed(lvl.get_double())
+
+        # The sensor is on-change, so it can go quiet for a long time with the
+        # light steady. Running the filter on our own clock keeps it converging
+        # regardless of when readings arrive.
+        self.tick_id = GLib.timeout_add(int(self.a.interval * 1000), self.evaluate)
+        GLib.MainLoop().run()
+
+
+def pick_backend(which):
+    if which in ("auto", "powerdevil"):
+        try:
+            return PowerDevilBackend()
+        except Exception as e:
+            if which == "powerdevil":
+                sys.exit("PowerDevil backend unavailable: %s" % e)
+            print("PowerDevil unavailable (%s), falling back to sysfs" % e,
+                  flush=True)
+    return SysfsBackend()
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--min", type=float, default=5)
+    p.add_argument("--max", type=float, default=100)
+    p.add_argument("--max-lux", type=float, default=3000)
+    p.add_argument("--gamma", type=float, default=2.5)
+    p.add_argument("--tau-up", type=float, default=0.35)
+    p.add_argument("--tau-down", type=float, default=5.0)
+    p.add_argument("--interval", type=float, default=0.3)
+    p.add_argument("--deadband", type=float, default=6.0)
+    p.add_argument("--max-step", type=float, default=10.0)
+    p.add_argument("--yield-seconds", type=int, default=45)
+    p.add_argument("--backend", choices=["auto", "powerdevil", "sysfs"],
+                   default="auto")
+    p.add_argument("--idle-interval", type=float, default=5.0,
+                   help="how often to re-check the desktop switch while "
+                        "automatic brightness is off (default 5 s)")
+    p.add_argument("--ignore-desktop-setting", action="store_true",
+                   help="drive the brightness even if the desktop has "
+                        "automatic brightness switched off")
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args()
+    AutoBrightness(args, pick_backend(args.backend)).run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,41 @@
+#!/bin/sh
+set -e
+# /etc/profile.d and /etc/environment.d only cover login shells and systemd
+# user sessions respectively; Kali's root shell is zsh and interactive SSH is
+# not always a login shell, so the variable would not be set where a Vulkan
+# tool actually runs. /etc/environment is applied by PAM to every session, so
+# add it there too, idempotently and without disturbing the existing file.
+#
+# Only pin the path if the ICD manifest exists: if a Mesa rename ever moves it,
+# a stale absolute path in /etc/environment would report zero devices for the
+# whole system, which is worse than falling back to the loader's own discovery.
+ICD=/usr/share/vulkan/icd.d/freedreno_icd.json
+ENVF=/etc/environment
+if [ -f "$ICD" ] && [ -f "$ENVF" ] && ! grep -q '^VK_DRIVER_FILES=' "$ENVF"; then
+    printf 'VK_DRIVER_FILES=%s\n' "$ICD" >> "$ENVF"
+    printf 'VK_ICD_FILENAMES=%s\n' "$ICD" >> "$ENVF"
+fi
+
+# Pin the Mesa Vulkan runtime: Turnip on the A619 is young, and this is the
+# version the GPU was validated with. An unattended upgrade could regress it
+# under the compositor, so hold it the same way the other rhodep packages hold
+# their validated dependencies.
+#
+# A hold set here is not enough on its own: rhodep-holds-enforce only puts back
+# holds that are in the canonical list, so mesa-vulkan-drivers is also in
+# userspace/apt/apt-holds.txt. That matters more than it looks -- the package is
+# marked auto-installed, so the moment the hold goes the next `apt autoremove`
+# takes the Vulkan driver with it and vulkaninfo quietly reports zero devices.
+apt-mark hold mesa-vulkan-drivers 2>/dev/null || true
+
+# The env vars live in files that belong to this package, but /etc/environment
+# is edited in place above and belongs to base-files, so nothing would put our
+# lines back. Register what we can with the port's file protection.
+PROTECT=/usr/local/sbin/rhodep-protect-files
+if [ -x "$PROTECT" ]; then
+    "$PROTECT" release /etc/profile.d/rhodep-turnip.sh 2>/dev/null || true
+    "$PROTECT" register gpu-vulkan 0644 \
+        /etc/profile.d/rhodep-turnip.sh 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,26 @@
+--- a/translate.c
++++ b/translate.c
+@@ -25,6 +25,14 @@
+ #define READONLY_MODEM_PATH	READONLY_FW_BASE "modem_pr"
+ #define READONLY_VENDOR_PATH		"/readonly/vendor/firmware/"
+ #define READONLY_VENDOR_MNT_PATH	"/readonly/vendor/firmware_mnt/image/"
++/*
++ * rhodep: catch-all for the rest of /readonly/vendor/. The SM6375 modem asks
++ * for /readonly/vendor/fsg/mcfg_{sw,hw}/mbn_{sw,hw}.dig, which on Android is a
++ * symlink into the fsg partition (see the AOSP target package
++ * rfs_msm_mpss_readonly_vendor_fsg_symlink). Map it under the remoteproc
++ * firmware directory, so <fw>/fsg/... serves the fsg partition contents.
++ */
++#define READONLY_VENDOR_BASE		"/readonly/vendor/"
+ 
+ #ifndef ANDROID
+ #define FIRMWARE_BASE	"/lib/firmware/"
+@@ -228,6 +236,8 @@
+ 		return translate_readonly(path + strlen(READONLY_VENDOR_MNT_PATH));
+ 	else if (!strncmp(path, READONLY_VENDOR_PATH, strlen(READONLY_VENDOR_PATH)))
+ 		return translate_readonly(path + strlen(READONLY_VENDOR_PATH));
++	else if (!strncmp(path, READONLY_VENDOR_BASE, strlen(READONLY_VENDOR_BASE)))
++		return translate_readonly(path + strlen(READONLY_VENDOR_BASE));
+ 
+ 	fprintf(stderr, "invalid path %s, rejecting\n", path);
+ 	errno = ENOENT;

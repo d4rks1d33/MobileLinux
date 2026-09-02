@@ -1,0 +1,53 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] ASoC: q6asm-dai: keep the DSP buffer address inside 32 bits
+
+q6asm-dai hands the DSP the buffer address with the low four bits of the
+SMMU stream id in bits 32 and up:
+
+	pdata->sid = args.args[0] & SID_MASK_DEFAULT;
+	prtd->phys = substream->dma_buffer.addr | (pdata->sid << 32);
+
+which only works if the mapping itself fits in 32 bits. With a 64 bit DMA
+mask the iommu allocates from the top of the address space instead
+(0x1_fff80000 was observed on SM6375), bit 32 is already set, and the
+address the DSP receives is the two things overlapping rather than either
+of them.
+
+Downstream avoids this by confining the audio iova pool to a low window
+("qcom,iommu-dma-addr-pool = <0x10000000 0x10000000>" on
+qcom,msm-audio-ion). Asking for a 32 bit DMA mask achieves the same thing.
+
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 17:59:35.043296011 +0000
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 17:59:35.069296011 +0000
+@@ -1309,11 +1309,29 @@
+ 		return -ENOMEM;
+ 
+ 	rc = of_parse_phandle_with_fixed_args(node, "iommus", 1, 0, &args);
+-	if (rc < 0)
++	if (rc < 0) {
+ 		pdata->sid = -1;
+-	else
++	} else {
+ 		pdata->sid = args.args[0] & SID_MASK_DEFAULT;
+ 
++		/*
++		 * The address handed to the DSP is the buffer address with the
++		 * stream id in bits 32 and up (see prtd->phys below), so the
++		 * mapping itself has to fit in 32 bits or the two overlap and
++		 * the DSP is given an address that does not exist. Downstream
++		 * gets this by confining the audio iova pool to a low window
++		 * ("qcom,iommu-dma-addr-pool = <0x10000000 0x10000000>" on
++		 * qcom,msm-audio-ion); here it is enough to ask for a 32 bit
++		 * DMA mask, otherwise the iommu allocates from the top of the
++		 * 64 bit space (0x1_fff80000 was observed) and bit 32 is
++		 * already taken.
++		 */
++		rc = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++		if (rc)
++			return dev_err_probe(dev, rc,
++					     "cannot set 32 bit DMA mask\n");
++	}
++
+ 	dev_set_drvdata(dev, pdata);
+ 
+ 	rc = of_q6asm_parse_dai_data(dev, pdata);

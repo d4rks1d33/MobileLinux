@@ -1,0 +1,14 @@
+id: airplay
+device_type: speaker
+vendor: Apple / AirPlay
+family: airplay
+requires: {}
+actions:
+  - id: probe
+    label: "AirPlay probe (server info)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:7000/server-info"
+          save_as: info

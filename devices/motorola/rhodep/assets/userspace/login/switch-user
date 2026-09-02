@@ -1,0 +1,8 @@
+#!/bin/sh
+# Ask GDM for a greeter on another VT without touching the running session.
+# Allowed for ordinary users: /usr/share/dbus-1/system.d/gdm.conf explicitly
+# allows CreateTransientDisplay in the default policy context.
+exec gdbus call --system \
+  --dest org.gnome.DisplayManager \
+  --object-path /org/gnome/DisplayManager/LocalDisplayFactory \
+  --method org.gnome.DisplayManager.LocalDisplayFactory.CreateTransientDisplay

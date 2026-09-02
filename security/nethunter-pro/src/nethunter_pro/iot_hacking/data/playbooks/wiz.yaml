@@ -1,0 +1,61 @@
+id: wiz
+device_type: smart_bulb
+vendor: Signify (WiZ)
+family: wiz
+requires: {}
+actions:
+  - id: get-info
+    label: "Get bulb info + state"
+    category: recon
+    dangerous: false
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"getSystemConfig","params":{}}'
+          save_as: sysinfo
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"getPilot","params":{}}'
+          save_as: pilot
+
+  - id: turn-on
+    label: "Turn ON"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"setPilot","params":{"state":true}}'
+
+  - id: turn-off
+    label: "Turn OFF"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"setPilot","params":{"state":false}}'
+
+  - id: color-red
+    label: "Set color RED, max brightness"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"setPilot","params":{"state":true,"r":255,"g":0,"b":0,"dimming":100}}'
+
+  - id: party-mode
+    label: "Party scene (rainbow)"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 38899
+          payload: '{"method":"setPilot","params":{"state":true,"sceneId":4}}'

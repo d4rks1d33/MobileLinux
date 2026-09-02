@@ -1,0 +1,102 @@
+From: rhodep port <none@example.com>
+Date: Tue, 19 Aug 2026 02:50:00 -0300
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: add the camera PMIC
+
+Add the camera power management IC and the i2c bus it sits on, the first
+piece of camera support on this device.
+
+The vendor tree puts it on qupv3_se7_i2c (i2c@4c84000, mainline's i2c7),
+which mainline leaves disabled and without a pinctrl state. The pins come
+from the vendor pinctrl (blair-pinctrl.dtsi: qupv3_se7_i2c_active, gpio27
+and gpio28, function qup11_f1) and mainline's pinctrl-sm6375 already
+defines that function for exactly those pins.
+
+The part is NOT the "semi,wl2868c" at 0x2f that the vendor DT declares.
+Probed on the device, it answers at 0x35 with CHIP_REV 0x01, which the
+vendor's own driver decodes as a FAN53870 -- it tries 0x2f first and
+retries at 0x35 for precisely this reason, since Motorola shipped three
+pin-compatible parts under one node.
+
+It also has an active-high enable pin on TLMM 33 and does not ACK its
+address at all while that is low, which is why i2cdetect finds nothing on
+a freshly booted phone.
+
+The three LDOs named here are the ones the vendor sensor node uses for the
+main camera (cam_vdig/cam_vana/cam_vio from ldo1/ldo4/ldo7); the voltages
+are the vendor's rounded to the chip's 8 mV step. The remaining four LDOs
+are left for whoever adds the other three sensors.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -455,6 +455,49 @@
+ 	};
+ };
+ 
++/*
++ * Camera PMIC. The vendor device tree declares a "semi,wl2868c" at 0x2f
++ * (rhodep-wl2868c.dtsi), but the part actually fitted answers at 0x35 with
++ * CHIP_REV 0x01, which its own driver decodes as a FAN53870. The vendor
++ * driver probes 0x2f first and retries at 0x35 for exactly this reason.
++ *
++ * The chip does not ACK until its enable pin is asserted, hence the GPIO.
++ */
++&i2c7 {
++	clock-frequency = <400000>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&qup_i2c7_default>;
++	status = "okay";
++
++	cam_pmic: regulator@35 {
++		compatible = "onnn,fan53870";
++		reg = <0x35>;
++		enable-gpios = <&tlmm 33 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_pmic_en_default>;
++
++		regulators {
++			cam_vdig: LDO1 {
++				regulator-name = "cam_vdig";
++				regulator-min-microvolt = <1056000>;
++				regulator-max-microvolt = <1056000>;
++			};
++
++			cam_vana: LDO4 {
++				regulator-name = "cam_vana";
++				regulator-min-microvolt = <2804000>;
++				regulator-max-microvolt = <2804000>;
++			};
++
++			cam_vio: LDO7 {
++				regulator-name = "cam_vio";
++				regulator-min-microvolt = <1804000>;
++				regulator-max-microvolt = <1804000>;
++			};
++		};
++	};
++};
++
+ &i2c8 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+@@ -1489,3 +1532,19 @@
+ 		qcom,sd-lines = <0>;
+ 	};
+ };
++
++&tlmm {
++	cam_pmic_en_default: cam-pmic-en-default-state {
++		pins = "gpio33";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
++	qup_i2c7_default: qup-i2c7-default-state {
++		pins = "gpio27", "gpio28";
++		function = "qup11_f1";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};

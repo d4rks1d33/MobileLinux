@@ -1,0 +1,91 @@
+From: rhodep port <none@example.com>
+Date: Sat, 22 Aug 2026 23:55:00 -0300
+Subject: [PATCH] remoteproc: qcom_q6v5: rate limit the repeated handover
+ message
+
+q6v5_handover_interrupt() is already right to ignore a handover it has
+already seen: there is nothing left to do. What it should not do is say
+so on every single one, because at least one remote signals it
+continuously rather than once.
+
+On SM6375 (Motorola Moto G82 5G) the ADSP re-asserts its handover smp2p
+bit roughly 4.2 times a second, from ~30 ms after it boots until it goes
+down, on every boot:
+
+	qcom_q6v5_pas a400000.remoteproc: Handover signaled, but it already happened
+
+26355 of them in one 1h44 boot. The interrupt is registered
+IRQF_TRIGGER_RISING, so each is a genuine 0->1 edge and the driver is
+seeing exactly what the remote is doing; smp2p and the handover logic
+are both behaving. The damage is entirely to the log: at that rate the
+kernel ring buffer wraps about every six minutes, so dmesg contains
+nothing older than that and every message from boot is long gone. On a
+device with no serial console that is the difference between being able
+to diagnose a driver and not.
+
+Give the message a per-remote ratelimit_state of one message per minute.
+__ratelimit() still emits "N callbacks suppressed" on each release, so
+the rate remains visible and nothing is hidden -- what goes away is the
+flood. Per remote rather than file-static so that one chatty remote
+cannot mask another's message.
+
+This is a mitigation and not a fix: why that remote keeps re-signalling
+is unknown and unaffected by this patch.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/remoteproc/qcom_q6v5.c
++++ b/drivers/remoteproc/qcom_q6v5.c
+@@ -165,7 +165,24 @@
+ 	struct qcom_q6v5 *q6v5 = data;
+ 
+ 	if (q6v5->handover_issued) {
+-		dev_err(q6v5->dev, "Handover signaled, but it already happened\n");
++		/*
++		 * Rate limited because at least one remote does this
++		 * continuously rather than once. On SM6375 the ADSP re-asserts
++		 * its handover bit about 4 times a second, for as long as it is
++		 * up: 26355 of these in a single 1h44 boot, which wraps the
++		 * kernel ring buffer roughly every six minutes and takes every
++		 * earlier message with it. Ignoring the interrupt is already
++		 * correct -- the handover has happened and there is nothing
++		 * left to do -- so the only harm was the log volume.
++		 *
++		 * __ratelimit() still reports "N callbacks suppressed" on each
++		 * release, so the rate stays visible and nothing is hidden;
++		 * what goes away is dmesg being useless for anything older than
++		 * a few minutes. Why the remote keeps re-signalling is a
++		 * separate and still open question.
++		 */
++		if (__ratelimit(&q6v5->handover_ratelimit))
++			dev_err(q6v5->dev, "Handover signaled, but it already happened\n");
+ 		return IRQ_HANDLED;
+ 	}
+ 
+@@ -351,6 +368,8 @@
+ 		return dev_err_probe(&pdev->dev, PTR_ERR(q6v5->path),
+ 				     "failed to acquire interconnect path\n");
+ 
++	ratelimit_state_init(&q6v5->handover_ratelimit, 60 * HZ, 1);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(qcom_q6v5_init);
+--- a/drivers/remoteproc/qcom_q6v5.h
++++ b/drivers/remoteproc/qcom_q6v5.h
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/completion.h>
++#include <linux/ratelimit.h>
+ #include <linux/soc/qcom/qcom_aoss.h>
+ 
+ struct icc_path;
+@@ -30,6 +31,7 @@
+ 	int stop_irq;
+ 
+ 	bool handover_issued;
++	struct ratelimit_state handover_ratelimit;
+ 
+ 	struct completion start_done;
+ 	struct completion stop_done;

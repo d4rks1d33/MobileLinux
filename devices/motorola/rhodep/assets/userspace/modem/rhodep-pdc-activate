@@ -1,0 +1,43 @@
+#!/bin/bash
+# Re-activate the carrier configuration at boot.
+#
+# Why this exists: it should not be needed. The modem shipped with
+# PERSONAL_ARG active and it survived reboots on its own. Deactivating it once,
+# as an experiment to see whether the carrier config could bisect the LTE
+# attach, cleared that persistent selection, and `qmicli --pdc-activate-config`
+# only activates for the running session -- after a reboot all 25 configs are
+# Inactive again and the modem will not register on LTE at all.
+#
+# libqmi exposes no way to set the *selected* config, only to activate one, so
+# until someone sends QMI_PDC_SET_SELECTED_CONFIG by hand this unit stands in
+# for it.
+set -u
+ID="${1:-A0:07:69:A2:BA:DC:D5:EA:25:2E:4C:74:1B:25:D2:2A:99:1F:20:EE}"
+LOG=/dev/kmsg
+
+log() { echo "rhodep-pdc: $*" > "$LOG" 2>/dev/null; echo "rhodep-pdc: $*"; }
+
+# Wait for the modem's PDC service (36) to be on the bus.
+for i in $(seq 1 60); do
+    if qrtr-lookup 2>/dev/null | awk '{print $1}' | grep -qx 36; then break; fi
+    sleep 2
+done
+
+if ! qrtr-lookup 2>/dev/null | awk '{print $1}' | grep -qx 36; then
+    log "PDC service never appeared, giving up"
+    exit 0
+fi
+
+active=$(qmicli -d qrtr://0 --pdc-list-configs=software 2>/dev/null |
+         grep -c "Status:      Active")
+if [ "$active" -ge 1 ]; then
+    log "a config is already active, nothing to do"
+    exit 0
+fi
+
+log "no active config, activating $ID"
+qmicli -d qrtr://0 --pdc-activate-config=software,"$ID" 2>&1 | tail -1
+sleep 3
+active=$(qmicli -d qrtr://0 --pdc-list-configs=software 2>/dev/null |
+         grep -c "Status:      Active")
+log "active configs now: $active"

@@ -1,0 +1,86 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 23:10:00 -0300
+Subject: [PATCH] DIAGNOSTIC: net: ipa: trace the QMI handshake
+
+Not for source= beyond the investigation it belongs to.
+
+The whole driver has three dev_dbg callsites, none of them in ipa_qmi.c,
+so there is no way to see how far the AP and the modem get before the SoC
+resets. That reset happens when the modem registers on the network with
+ipa loaded, and the modem programming its own pipes is on the far side of
+this handshake.
+
+Print each step: INDICATION_REGISTER and DRIVER_INIT_COMPLETE arriving
+from the modem, the readiness check with the flags it turns on, the AP's
+INIT_DRIVER request with the addresses it hands over, and the point where
+both sides are ready and the modem netdev starts.
+
+The addresses matter because they are what the modem writes through.
+skip_uc_load is printed with them: ipa_qmi_init_driver() derives it from
+ipa->uc_loaded, and that flag is left false whenever the microcontroller
+reports INIT_COMPLETED while uc_powered is false -- which is what happens
+if ipa is loaded after the modem is already up.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/net/ipa/ipa_qmi.c
++++ b/drivers/net/ipa/ipa_qmi.c
+@@ -125,6 +125,10 @@
+ 	int ret;
+ 
+ 	/* We aren't ready until the modem and microcontroller are */
++	pr_info("ipa-qmi: ready check: modem=%d uc=%d indication_requested=%d sent=%d initial_boot=%d\n",
++		ipa_qmi->modem_ready, ipa_qmi->uc_ready,
++		ipa_qmi->indication_requested, ipa_qmi->indication_sent,
++		ipa_qmi->initial_boot);
+ 	if (!ipa_qmi->modem_ready || !ipa_qmi->uc_ready)
+ 		return;
+ 
+@@ -142,6 +146,7 @@
+ 
+ 	/* We're ready.  Start up normal operation */
+ 	ipa = container_of(ipa_qmi, struct ipa, qmi);
++	pr_info("ipa-qmi: both sides ready, starting modem netdev\n");
+ 	ret = ipa_modem_start(ipa);
+ 	if (ret)
+ 		dev_err(ipa->dev, "error %d starting modem\n", ret);
+@@ -185,6 +190,8 @@
+ 	ipa_qmi = container_of(qmi, struct ipa_qmi, server_handle);
+ 	ipa = container_of(ipa_qmi, struct ipa, qmi);
+ 
++	pr_info("ipa-qmi: <- INDICATION_REGISTER from modem\n");
++
+ 	rsp.rsp.result = QMI_RESULT_SUCCESS_V01;
+ 	rsp.rsp.error = QMI_ERR_NONE_V01;
+ 
+@@ -214,6 +221,8 @@
+ 	ipa_qmi = container_of(qmi, struct ipa_qmi, server_handle);
+ 	ipa = container_of(ipa_qmi, struct ipa, qmi);
+ 
++	pr_info("ipa-qmi: <- DRIVER_INIT_COMPLETE from modem\n");
++
+ 	rsp.rsp.result = QMI_RESULT_SUCCESS_V01;
+ 	rsp.rsp.error = QMI_ERR_NONE_V01;
+ 
+@@ -249,6 +258,7 @@
+ };
+ 
+ /* Handle an INIT_DRIVER response message from the modem. */
++/* DIAGNOSTIC */
+ static void ipa_client_init_driver(struct qmi_handle *qmi,
+ 				   struct sockaddr_qrtr *sq,
+ 				   struct qmi_txn *txn, const void *decoded)
+@@ -331,6 +341,13 @@
+ 	req.ctrl_comm_dest_end_pt =
+ 		ipa->name_map[IPA_ENDPOINT_AP_MODEM_RX]->endpoint_id;
+ 
++	pr_info("ipa-qmi: -> INIT_DRIVER hdr=[%#x..%#x] v4rt=%#x v6rt=%#x v4flt=%#x v6flt=%#x modem=[%#x +%#x] ctrl_ep=%u skip_uc=%u\n",
++		req.hdr_tbl_info.start, req.hdr_tbl_info.end,
++		req.v4_route_tbl_info.start, req.v6_route_tbl_info.start,
++		req.v4_filter_tbl_start, req.v6_filter_tbl_start,
++		req.modem_mem_info.start, req.modem_mem_info.size,
++		req.ctrl_comm_dest_end_pt, req.skip_uc_load);
++
+ 	/* skip_uc_load_valid and skip_uc_load are set above */
+ 
+ 	mem = ipa_mem_find(ipa, IPA_MEM_MODEM_PROC_CTX);

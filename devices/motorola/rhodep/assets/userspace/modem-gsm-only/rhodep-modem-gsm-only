@@ -1,0 +1,43 @@
+#!/bin/sh
+# Pin the modem to GSM before ModemManager can touch it.
+#
+# On this device an LTE attach resets the whole SoC within seconds, silently.
+# GSM does not: the modem registers, attaches, carries data and receives SMS,
+# and the phone stays up. The mode preference lives in the modem's own NV and
+# survives reboots on its own, but nothing stops ModemManager or a settings UI
+# from putting it back to LTE, and that brings the reset with it.
+#
+# This is the guard. It is deliberately not clever: read the preference, and if
+# it is not already gsm, set it.
+#
+# The cost is real and worth stating: no LTE, so data is GPRS. See
+# docs/watchdog-ipa-lte-wip/ for why, and remove this the day LTE is fixed.
+set -u
+
+DEV=qrtr://0
+
+want_gsm() {
+	timeout 15 qmicli -d "$DEV" --nas-get-system-selection-preference 2>/dev/null |
+		grep -i "mode preference" | grep -qi "'gsm'"
+}
+
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+	if timeout 15 qmicli -d "$DEV" --dms-get-operating-mode >/dev/null 2>&1; then
+		break
+	fi
+	sleep 3
+done
+
+if want_gsm; then
+	echo "modem already pinned to gsm"
+	exit 0
+fi
+
+timeout 20 qmicli -d "$DEV" --nas-set-system-selection-preference="gsm" >/dev/null 2>&1
+
+if want_gsm; then
+	echo "modem pinned to gsm"
+else
+	echo "could not pin the modem to gsm" >&2
+	exit 1
+fi

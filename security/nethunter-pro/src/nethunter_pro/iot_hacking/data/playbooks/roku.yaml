@@ -1,0 +1,57 @@
+id: roku
+device_type: streamer
+vendor: Roku
+family: roku
+requires:
+  port: 8060
+actions:
+  - id: device-info
+    label: "Query device info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8060/query/device-info"
+          save_as: info
+      - extract:
+          from: $info
+          fields:
+            model: '<model-name>([^<]+)</model-name>'
+            serial: '<serial-number>([^<]+)</serial-number>'
+            wifi_ssid: '<network-name>([^<]+)</network-name>'
+            software: '<software-version>([^<]+)</software-version>'
+
+  - id: query-apps
+    label: "List installed apps"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8060/query/apps"
+
+  - id: launch-netflix
+    label: "Launch Netflix"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8060/launch/12"
+          method: POST
+
+  - id: launch-youtube
+    label: "Launch YouTube"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8060/launch/837"
+          method: POST
+
+  - id: power-off
+    label: "Power off (Roku TVs only)"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8060/keypress/PowerOff"
+          method: POST

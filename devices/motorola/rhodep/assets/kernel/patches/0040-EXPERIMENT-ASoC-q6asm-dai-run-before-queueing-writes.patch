@@ -1,0 +1,78 @@
+From: postmarketOS rhodep port
+Subject: [EXPERIMENT] ASoC: q6asm-dai: tell the DSP to run before queueing writes
+
+On this target the ADSP acknowledges every command it is given, including
+the AFE port start and the stream open, and then never returns a single
+WRITE_DONE. Tracing what actually goes out over APR shows the writes
+leaving before the session is ever told to run:
+
+	ASM_STREAM_CMD_OPEN_WRITE_V3
+	ASM_DATA_CMD_MEDIA_FMT_UPDATE_V2
+	ASM_DATA_CMD_WRITE_V2  token 0
+	ASM_DATA_CMD_WRITE_V2  token 1
+	ASM_DATA_CMD_WRITE_V2  token 2
+	ASM_DATA_CMD_WRITE_V2  token 3
+	ASM_SESSION_CMD_RUN_V2
+
+That ordering is not a bug by itself, it is what the current code does
+everywhere: prepare() sets the state to RUNNING, the application fills the
+buffer, snd_pcm_ack() hands the periods over, and only then does ALSA
+trigger the stream. It works on other Qualcomm targets, so their firmware
+evidently accepts buffers while the session is stopped. This one may not,
+and if it discards them there is nothing left to consume once RUN finally
+arrives, which matches the observed behaviour exactly, including the fact
+that how long the DSP survives scales with how much audio was queued.
+
+So gate the queueing on RUN having been sent. The buffers the application
+already wrote cannot simply be dropped, it will not write again until a
+period completes, so they are queued from the trigger right after RUN.
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 22:33:49.662620009 +0000
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 22:33:49.669620009 +0000
+@@ -64,6 +64,7 @@
+ 	unsigned int pcm_size;
+ 	unsigned int pcm_count;
+ 	unsigned int periods;
++	bool run_sent;
+ 	uint64_t bytes_sent;
+ 	uint64_t bytes_received;
+ 	uint64_t copied_total;
+@@ -307,6 +308,8 @@
+ 	else
+ 		prtd->state = Q6ASM_STREAM_RUNNING;
+ 
++	prtd->run_sent = false;
++
+ 	return ret;
+ 
+ routing_err:
+@@ -323,7 +326,8 @@
+ 	struct q6asm_dai_rtd *prtd = runtime->private_data;
+ 	int i, ret = 0, avail_periods;
+ 
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && prtd->state == Q6ASM_STREAM_RUNNING) {
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
++	    prtd->state == Q6ASM_STREAM_RUNNING && prtd->run_sent) {
+ 		avail_periods = (runtime->control->appl_ptr - prtd->queue_ptr)/runtime->period_size;
+ 		ASM_DIAG("ack: appl=%lu queue=%lu period=%lu avail=%d pcm_count=%u",
+ 			 (unsigned long)runtime->control->appl_ptr,
+@@ -360,8 +364,20 @@
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+ 		ret = q6asm_run_nowait(prtd->audio_client, prtd->stream_id,
+ 				       0, 0, 0);
++		if (ret < 0)
++			break;
++
++		/* Buffers may only be handed over now, and whatever the
++		 * application already wrote has to be queued here: it will not
++		 * write again until a period completes.
++		 */
++		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++			prtd->run_sent = true;
++			ret = q6asm_dai_ack(component, substream);
++		}
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_STOP:
++		prtd->run_sent = false;
+ 		ret = q6asm_cmd_nowait(prtd->audio_client, prtd->stream_id,
+ 				       CMD_EOS);
+ 		break;

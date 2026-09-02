@@ -1,0 +1,167 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] rpmsg: glink: give the rcid entry and the endpoint a
+ reference each
+
+qcom_glink_alloc_channel() takes one reference, and which object owns it
+depends on how the channel came into being. There are three cases, and the
+driver treats the third one as if it were the second.
+
+  channel opened by the remote (qcom_glink_rx_open with create_device)
+      the allocation reference belongs to the rcids entry, as that function's
+      own error path states: "Release the reference, iff we took it". The
+      lcids entry gets its own from the kref_get in send_open_req. Two
+      references, two idr entries, and rx_close and rx_close_ack put one each.
+      Balanced.
+
+  the rpmsg_chrdev channel (qcom_glink_create_chrdev)
+      the allocation reference belongs to the rpmsg_device, and
+      qcom_glink_device_release puts it. The channel is in neither idr.
+      Balanced.
+
+  channel opened from this side (qcom_glink_create_local, which is what
+  rpmsg_create_ept and therefore rpmsg_char's RPMSG_CREATE_EPT_IOCTL reach)
+      the allocation reference belongs to the endpoint. There is no
+      rpmsg_device, so nothing releases it. The lcids entry gets the
+      send_open_req reference, and when the remote answers, rx_open finds the
+      channel already in lcids and adds it to rcids without taking anything.
+      Two references and two idr entries, but one of those references is the
+      endpoint's.
+
+That last case only reaches zero by having rx_close() put back a reference the
+rcids entry never took, spending the endpoint's. It survives the ordinary
+close, where the endpoint is being destroyed anyway, and comes apart whenever
+the endpoint outlives the channel.
+
+qcom_glink_native_remove() puts one reference per lcids entry and one per
+rcids entry, which for such a channel is both of them, so the channel is freed
+while rpmsg_char still holds a pointer to its endpoint:
+
+	refcount_t: underflow; use-after-free.
+	WARNING: lib/refcount.c:28 at refcount_warn_saturate+0xd8/0x13c
+	Workqueue: rproc_recovery_wq rproc_crash_handler_work
+	Call trace:
+	 refcount_warn_saturate+0xd8/0x13c (P)
+	 qcom_glink_native_remove+0x160/0x268
+	 qcom_glink_smem_unregister+0x28/0x934 [qcom_glink_smem]
+	 glink_subdev_stop+0x1c/0x30 [qcom_common]
+	 rproc_stop+0xb4/0x144
+	 rproc_boot_recovery / rproc_trigger_recovery / rproc_crash_handler_work
+
+and the ordinary close path reaches the same end without any of remoteproc
+being involved, which is easier to see. Freeing the channel leaves the pointer
+in the rcids idr, and the next qcom_glink_create_ept() walks that idr
+comparing names:
+
+	[  191.909585] close ack on unknown channel
+	[  885.474811] rpmsg rpmsg0: failed to open DS
+	[  925.532523] Unable to handle kernel paging request at
+	                        virtual address 0000000000010000
+	[  925.534463] Internal error: Oops: 0000000096000006 [#1] SMP
+	               pc : __pi_strcmp+0x24/0x140
+	               lr : qcom_glink_create_ept+0x74/0x2dc
+	               x0 : 0000000000010000   x3 : 0000000000005344
+	Call trace:
+	 __pi_strcmp+0x24/0x140 (P)
+	 rpmsg_create_ept+0x48/0x78
+	 rpmsg_eptdev_open+0x9c/0x124 [rpmsg_char]
+	 chrdev_open+0x16c/0x200
+	 do_dentry_open / vfs_open / path_openat / do_sys_openat2
+	 __arm64_sys_openat+0x70/0x9c
+
+x3 holds 0x5344, the "DS" being looked for; x0 is what is left of the name it
+was compared against. Root is needed to open the character device, but nothing
+beyond that: two open() calls on /dev/rpmsgN are enough.
+
+Give the rcids entry its own reference, and release the endpoint's when the
+endpoint is destroyed, so that every reference has exactly one owner:
+
+  local channel   alloc 1 endpoint, send_open_req 1 lcids, rx_open 1 rcids
+                  destroy_ept -1, rx_close_ack -1, rx_close -1 -> 0
+
+  remote channel  unchanged at 2, and destroy_ept must not put, because there
+                  the allocation reference belongs to the rcids entry rather
+                  than to the endpoint. channel->rpdev cannot be used to tell
+                  them apart, since qcom_glink_remove_rpmsg_device() has
+                  already cleared it by that point and does so for both, hence
+                  the explicit flag.
+
+Teardown works out because qcom_glink_native_remove() destroys the child
+rpmsg devices, and with them the endpoints, before it walks the idrs: the
+endpoint's reference goes first, then one per idr entry, reaching zero with
+nothing left pointing at the channel.
+
+Tested on a Motorola Moto G82 5G (SM6375) running v7.2-rc5. Before, opening an
+endpoint on the modem's DS channel and reopening it froze the machine within
+three attempts. After, 200 open/close cycles complete in 1.3 s with no warning
+and no Oops.
+
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -168,6 +168,17 @@
+ 
+ 	struct kref refcount;
+ 
++	/*
++	 * Set for channels created by qcom_glink_create_local(), i.e. those
++	 * opened from this side through rpmsg_create_ept(). Such a channel has
++	 * no rpmsg_device backing it, so the reference taken by
++	 * qcom_glink_alloc_channel() belongs to the endpoint and has to be
++	 * released when the endpoint is destroyed. For a channel opened by the
++	 * remote that same reference belongs to the rcids entry, and for the
++	 * rpmsg_chrdev channel it belongs to the rpmsg_device.
++	 */
++	bool local_ept;
++
+ 	spinlock_t recv_lock;
+ 
+ 	char *name;
+@@ -1267,6 +1278,8 @@
+ 
+ 	qcom_glink_send_open_ack(glink, channel);
+ 
++	channel->local_ept = true;
++
+ 	return channel;
+ 
+ err_timeout:
+@@ -1422,6 +1435,12 @@
+ 	qcom_glink_remove_rpmsg_device(glink, channel);
+ 
+ 	qcom_glink_send_close_req(glink, channel);
++
++	if (channel->local_ept) {
++		channel->local_ept = false;
++		/* Release qcom_glink_create_local()'s reference */
++		kref_put(&channel->refcount, qcom_glink_channel_release);
++	}
+ }
+ 
+ static int qcom_glink_request_intent(struct qcom_glink *glink,
+@@ -1659,6 +1678,15 @@
+ 	trace_qcom_glink_cmd_open_rx(glink->label, name, channel->lcid, rcid);
+ 
+ 	spin_lock_irqsave(&glink->idr_lock, flags);
++	if (!create_device) {
++		/*
++		 * The channel was already in lcids, so the reference from
++		 * qcom_glink_alloc_channel() is spoken for. Take one for the
++		 * rcids entry, which qcom_glink_rx_close() and
++		 * qcom_glink_native_remove() will both put back.
++		 */
++		kref_get(&channel->refcount);
++	}
+ 	ret = idr_alloc(&glink->rcids, channel, rcid, rcid + 1, GFP_ATOMIC);
+ 	if (ret < 0) {
+ 		dev_err(glink->dev, "Unable to insert channel into rcid list\n");
+@@ -1703,9 +1731,8 @@
+ 	channel->rcid = 0;
+ 	spin_unlock_irqrestore(&glink->idr_lock, flags);
+ free_channel:
+-	/* Release the reference, iff we took it */
+-	if (create_device)
+-		kref_put(&channel->refcount, qcom_glink_channel_release);
++	/* Either the allocation reference or the one taken for rcids above */
++	kref_put(&channel->refcount, qcom_glink_channel_release);
+ 
+ 	return ret;
+ }

@@ -1,0 +1,12 @@
+[Unit]
+Description=rhodep: puerto USB en modo carga por defecto (OTG off)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/otg off
+
+[Install]
+WantedBy=multi-user.target

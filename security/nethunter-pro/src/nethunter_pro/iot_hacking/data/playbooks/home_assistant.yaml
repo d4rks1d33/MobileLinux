@@ -1,0 +1,33 @@
+id: home-assistant
+device_type: hub
+vendor: Home Assistant
+family: home-assistant
+requires:
+  port: 8123
+actions:
+  - id: manifest
+    label: "Get manifest.json"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8123/manifest.json"
+          save_as: manifest
+
+  - id: onboarding-check
+    label: "Check if onboarding flow is still open"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8123/api/onboarding"
+          save_as: onboard
+
+  - id: auth-providers
+    label: "Enumerate auth providers"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8123/auth/providers"
+          save_as: providers

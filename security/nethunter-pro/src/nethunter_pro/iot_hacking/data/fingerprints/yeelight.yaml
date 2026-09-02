@@ -1,0 +1,21 @@
+id: yeelight
+version: 1
+device_type: smart_bulb
+vendor: Xiaomi Yeelight
+family: yeelight
+threshold: 60
+matchers:
+  - name: port-55443
+    type: port
+    port: 55443
+    confidence: 50
+  - name: ssdp-yeelink
+    type: ssdp
+    st: yeelight
+    confidence: 40
+  - name: mdns-yeelink
+    type: mdns
+    mdns_type: _yeelink._tcp
+    confidence: 50
+metadata:
+  playbook: yeelight

@@ -1,0 +1,22 @@
+id: nanoleaf
+version: 1
+device_type: smart_bulb
+vendor: Nanoleaf
+family: nanoleaf
+threshold: 60
+matchers:
+  - name: mdns-nanoleaf
+    type: mdns
+    mdns_type: _nanoleafapi._tcp
+    confidence: 90
+  - name: port-16021
+    type: port
+    port: 16021
+    confidence: 40
+  - name: http-auth-realm
+    type: http_header
+    path: /
+    header_regex: 'Nl-Auth-Realm:\s*Nanoleaf'
+    confidence: 80
+metadata:
+  playbook: nanoleaf

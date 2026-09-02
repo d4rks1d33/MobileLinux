@@ -1,0 +1,134 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: describe the NFC controller
+
+The part is a Samsung S3FWRN5 and mainline has a driver for it, which the
+config already builds. What was missing is the node.
+
+It is the right driver on evidence rather than on the name: the binding's
+own example is s3fwrn5@27, the same address the vendor uses; the power-on
+sequences match value for value and delay for delay, enable high, wake low,
+20 ms, enable low, 20 ms; the vendor aliases wake to firm on a single pin
+(pdata->wake = pdata->firm), which is exactly what mainline's one
+wake-gpios does; the vendor's build forces CONFIG_SEC_NFC_PRODUCT_N5 and
+its Kconfig spells N5 as "RN5/RNx"; and the part speaks NCI, since the
+vendor hardcodes 2F 30 01 00, a well formed proprietary NCI command.
+
+Polarity lines up too. The vendor's SEC_NFC_PW_ON is 0 -- VEN is active low
+-- and s3fwrn5_phy_power_ctrl() drives gpio_en to 1 to disable and 0 to
+enable, so declaring the line ACTIVE_HIGH makes the logical values match
+the vendor's raw ones.
+
+clk_req is deliberately left out: mainline has no property for it, the
+vendor compiles its own clock handling out (CONFIG_SEC_NFC_GPIO_CLK is
+never defined by any of its build files), and no board in the vendor tree
+declares a clocks property for NFC at all.
+
+The pinctrl state is written here because the vendor's is never applied --
+it names its states nfc_active and nfc_suspend and the driver never calls
+pinctrl_select_state, so those pins are left however the bootloader set
+them.
+
+**This is not known to work.** The controller does not ACK at 0x27 with VEN
+asserted by hand and L9 measured at 1.8 V, in normal and in bootloader
+mode, and it never asserts clk_req, which is what a live part does to ask
+for its clock. What powers it has not been found: no board in the vendor
+tree declares an NFC supply, and there is no load switch or NFC-named rail
+anywhere in it.
+
+It is added anyway because a failed probe costs nothing, and it removes the
+one thing hand-driven GPIOs cannot rule out about themselves -- that they
+were driven wrongly. If the driver's own sequence gets an ACK, the problem
+was the testing; if it does not, the problem is upstream of software.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -530,6 +530,51 @@
+ 	pinctrl-0 = <&qup_i2c7_default>;
+ 	status = "okay";
+ 
++	/*
++	 * Samsung NFC controller. The vendor calls it sec-nfc and drives it with
++	 * its own out-of-tree driver, but the part is an S3FWRN5 and mainline
++	 * already has one:
++	 *
++	 *   - the binding's own example is s3fwrn5@27, the same address;
++	 *   - the power-on sequences match value for value and delay for delay,
++	 *     enable high, wake low, 20 ms, enable low, 20 ms;
++	 *   - the vendor aliases wake to firm on one pin (pdata->wake =
++	 *     pdata->firm), which is what mainline's single wake-gpios is;
++	 *   - the vendor's build forces CONFIG_SEC_NFC_PRODUCT_N5, and its own
++	 *     Kconfig spells N5 out as "RN5/RNx" -- S3FWRN5;
++	 *   - and the part speaks NCI: the vendor hardcodes 2F 30 01 00.
++	 *
++	 * Polarity: the vendor's SEC_NFC_PW_ON is 0, so VEN is active low, and
++	 * mainline agrees -- s3fwrn5_phy_power_ctrl() drives gpio_en to 1 to
++	 * disable and 0 to enable. Declaring it ACTIVE_HIGH is therefore right:
++	 * the logical values line up with the vendor's raw ones.
++	 *
++	 * clk_req (tlmm 7) is deliberately not described. mainline has no
++	 * property for it, the vendor's build compiles its clock handling out
++	 * entirely (CONFIG_SEC_NFC_GPIO_CLK is never defined), and no board in
++	 * the vendor tree declares a clocks property for NFC at all.
++	 *
++	 * This has not been seen to work: the part does not ACK at 0x27 with
++	 * VEN asserted by hand and L9 at 1.8 V, and it never asserts clk_req,
++	 * which is what a live controller does to ask for its clock. It is added
++	 * anyway because a failed probe costs nothing and rules out the GPIOs
++	 * being driven wrongly by hand, which is the one thing hand-testing
++	 * cannot rule out about itself.
++	 */
++	nfc@27 {
++		compatible = "samsung,s3fwrn5-i2c";
++		reg = <0x27>;
++
++		en-gpios = <&tlmm 48 GPIO_ACTIVE_HIGH>;
++		wake-gpios = <&tlmm 8 GPIO_ACTIVE_HIGH>;
++
++		interrupt-parent = <&tlmm>;
++		interrupts = <9 IRQ_TYPE_EDGE_RISING>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&nfc_default>;
++	};
++
+ 	cam_pmic: regulator@35 {
+ 		compatible = "onnn,fan53870";
+ 		reg = <0x35>;
+@@ -1690,6 +1735,37 @@
+ 			function = "gpio";
+ 			drive-strength = <2>;
+ 			bias-disable;
++		};
++	};
++
++	nfc_default: nfc-default-state {
++		/*
++		 * The vendor splits these into three states it never applies --
++		 * its driver names them nfc_active/nfc_suspend and never calls
++		 * pinctrl_select_state -- so the pins are left as the bootloader
++		 * set them. Describe them properly here instead.
++		 */
++		irq-pins {
++			pins = "gpio9";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-down;
++			input-enable;
++		};
++
++		clk-req-pins {
++			pins = "gpio7";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-down;
++			input-enable;
++		};
++
++		enable-pins {
++			pins = "gpio8", "gpio48";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
+ 		};
+ 	};
+ 

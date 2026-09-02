@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=NetHunter Pro
+Comment=Kali NetHunter control panel
+# Runs as the login user, not root. Elevating the whole app via pkexec broke
+# under Wayland: kwin (KDE / Plasma Mobile) refuses connections from a UID
+# that does not own the session, so `Gdk.Display.get_default()` returns None
+# and the app aborts with "Argument 0 does not allow None as a value". The
+# per-module ToolRunner calls with root=True are enough for the privileged
+# work; any picker that would otherwise read /root/.config must use a
+# world-readable copy (see the phishkin3 module's public certs path).
+Exec=nethunter-pro
+Icon=org.kali.NetHunterPro
+Terminal=false
+Categories=System;Security;
+Keywords=kali;nethunter;security;pentest;

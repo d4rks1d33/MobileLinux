@@ -1,0 +1,61 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: pin pm6125 L11 (UFS VCCQ2) at 1.8 V
+
+The &rpm_requests block was taken from sm6375-sony-xperia-murray-pdx225.dts,
+the only other board using this SoC when the port began, and L11 came across
+with Sony's wide range, 1620 mV to 1980 mV. Mainline's RPM regulator driver
+never reads the hardware, and no consumer of this rail votes a voltage:
+ufshcd only calls regulator_enable() and regulator_set_load() over vccq2, and
+the WCD9370 only enables its vdd-rxtx/vdd-px. So the framework settles on the
+range's floor. With a min of 1620000 declared against the pm660_ht_lvpldo
+range (base 1504000, 8 mV steps) the selector rounds up to 1624000 uV:
+
+	l11    enabled   1624000 uV
+
+L11 feeds two things at once, and both want 1.8 V:
+
+	ufshc  vccq2-supply     = <&pm6125_l11>   (UFS I/O rail)
+	wcd9370 vdd-rxtx/vdd-px = <&pm6125_l11>   (codec I/O)
+
+1.624 V is below the 1.7 V minimum UFS VCCQ2 is specified for, so the storage
+has been running out of spec since the port began -- a VCCQ2 below its floor
+degrades the UFS link's I/O margins and can show up as CRC errors, gear
+drops, UIC line errors, or silent data corruption in transit. The vendor
+pins it with qcom,init-voltage = <1800000> in holi-regulators-pm6125.dtsi
+(as L11A); mainline has no such property, so the constraint itself has to
+say it. Narrowing to min == max is what makes the framework vote 1.8 V, the
+same fix applied to L9 in the earlier "rhodep: pin pm6125 L9 at 1.8 V" patch.
+
+This raises the rail, it never lowers it, so the codec I/O that shares L11
+is only moved from 1.624 V up toward its own 1.8 V nominal.
+
+Not yet confirmed by measurement on the device; this is a fix by inspection
+against the vendor tree and the JEDEC UFS spec. L24 (UFS VCC) has the same
+origin and is worth the same treatment once this one is validated.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -300,9 +300,21 @@
+ 			regulator-max-microvolt = <1980000>;
+ 		};
+ 
++		/*
++		 * 1.8 V, not the 1624 mV the bottom of the PMIC's range gives.
++		 *
++		 * L11 is UFS VCCQ2 (and the WCD9370's I/O). Declaring the
++		 * part's full range and letting the framework pick means it
++		 * picks the minimum, which rounds up to 1624 mV -- below the
++		 * 1.7 V floor UFS VCCQ2 is specified for. Nothing votes a
++		 * voltage on this rail (ufshcd only enables it), so the
++		 * constraint has to. The vendor pins it with
++		 * qcom,init-voltage = <1800000>, which mainline has no
++		 * equivalent for.
++		 */
+ 		pm6125_l11: l11 {
+-			regulator-min-microvolt = <1620000>;
+-			regulator-max-microvolt = <1980000>;
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
+ 		};
+ 
+ 		pm6125_l12: l12 {

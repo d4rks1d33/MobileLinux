@@ -1,0 +1,60 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: throttle the GPU
+
+The gpuss0 and gpuss1 zones in sm6375.dtsi have passive trip points but no
+cooling-maps, so nothing slowed the GPU down before the critical trip. Now
+that the GPU is enabled and actually accelerating, it is a real heat source.
+
+The maps cannot live in the SoC dtsi because the gpu node is here, so
+reference the zones by path.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -18,6 +18,7 @@
+ #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
+ #include <dt-bindings/clock/qcom,sm6375-dispcc.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
++#include <dt-bindings/thermal/thermal.h>
+ #include "sm6375.dtsi"
+ #include "pm6125.dtsi"
+ #include "pmk8350.dtsi"
+@@ -201,6 +202,39 @@
+  * i2c8  = QUP1 SE2, pins gpio19/gpio20 (vendor qupv3_se8_i2c)
+  * i2c10 = QUP1 SE4, pins gpio4/gpio5   (vendor qupv3_se10_i2c)
+  */
++/*
++ * The gpuss0/gpuss1 zones in sm6375.dtsi have passive trips but had no
++ * cooling-maps, so nothing was throttled. The GPU cannot be mapped from the
++ * SoC .dtsi because the gpu node lives here, so it is done by path.
++ */
++&{/thermal-zones/gpuss0-thermal} {
++	cooling-maps {
++		map0 {
++			trip = <&gpuss0_alert0>;
++			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++		};
++
++		map1 {
++			trip = <&gpuss0_alert1>;
++			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++		};
++	};
++};
++
++&{/thermal-zones/gpuss1-thermal} {
++	cooling-maps {
++		map0 {
++			trip = <&gpuss1_alert0>;
++			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++		};
++
++		map1 {
++			trip = <&gpuss1_alert1>;
++			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++		};
++	};
++};
++
+ &i2c8 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";

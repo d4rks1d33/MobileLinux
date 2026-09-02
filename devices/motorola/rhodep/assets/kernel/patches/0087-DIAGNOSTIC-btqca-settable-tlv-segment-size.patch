@@ -1,0 +1,38 @@
+From: rhodep port
+Subject: [PATCH] DIAGNOSTIC: btqca: make the TLV segment size settable
+
+Not for upstream. The QCA firmware download fails with -110 after a warm
+reset while the short EDL version command on the same link still works,
+and forcing the link down to 115200 does not help, so the length of the
+transfer is the remaining suspect rather than the link speed. This makes
+the segment size a module parameter so the two can be told apart without
+a rebuild per data point.
+
+--- a/drivers/bluetooth/btqca.c	2026-08-28 16:37:22.697509001 +0000
++++ b/drivers/bluetooth/btqca.c	2026-08-28 16:37:22.707509001 +0000
+@@ -13,6 +13,11 @@
+ 
+ #include "btqca.h"
+ 
++static unsigned int tlv_seg_size = MAX_SIZE_PER_TLV_SEGMENT;
++module_param(tlv_seg_size, uint, 0644);
++MODULE_PARM_DESC(tlv_seg_size,
++		 "DIAGNOSTIC: bytes per TLV segment during firmware download");
++
+ int qca_read_soc_version(struct hci_dev *hdev, struct qca_btsoc_version *ver,
+ 			 enum qca_btsoc_type soc_type)
+ {
+@@ -621,7 +626,12 @@
+ 	segment = data;
+ 	remain = size;
+ 	while (remain > 0) {
+-		int segsize = min(MAX_SIZE_PER_TLV_SEGMENT, remain);
++		unsigned int lim = tlv_seg_size;
++		int segsize;
++
++		if (lim == 0 || lim > MAX_SIZE_PER_TLV_SEGMENT)
++			lim = MAX_SIZE_PER_TLV_SEGMENT;
++		segsize = min_t(int, lim, remain);
+ 
+ 		bt_dev_dbg(hdev, "Send segment %d, size %d", i++, segsize);
+ 

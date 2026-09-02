@@ -1,0 +1,25 @@
+id: dahua
+device_type: camera
+vendor: Dahua
+family: dahua
+requires: {}
+actions:
+  - id: device-type
+    label: "Get device model (cgi-bin)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/cgi-bin/magicBox.cgi?action=getDeviceType"
+          save_as: dt
+      - http_request:
+          url: "http://{{target.ip}}/cgi-bin/magicBox.cgi?action=getSerialNo"
+          save_as: sn
+
+  - id: rtsp-urls
+    label: "Print default RTSP stream URLs"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "rtsp://admin:admin@{{target.ip}}:554/cam/realmonitor?channel=1&subtype=0"
+      - note: "rtsp://admin:admin@{{target.ip}}:554/cam/realmonitor?channel=1&subtype=1"

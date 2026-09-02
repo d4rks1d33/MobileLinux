@@ -1,0 +1,24 @@
+id: shelly-gen2
+version: 1
+device_type: smart_switch
+vendor: Allterco / Shelly
+family: shelly-gen2
+threshold: 60
+matchers:
+  - name: http-rpc-device-info
+    type: http_body
+    path: /rpc/Shelly.GetDeviceInfo
+    regex: '"id":"shelly'
+    confidence: 90
+    extract:
+      id: '"id":"([^"]+)"'
+      mac: '"mac":"([^"]+)"'
+      model: '"model":"([^"]+)"'
+      gen: '"gen":([0-9]+)'
+      fw: '"ver":"([^"]+)"'
+  - name: port-80
+    type: port
+    port: 80
+    confidence: 10
+metadata:
+  playbook: shelly-gen2

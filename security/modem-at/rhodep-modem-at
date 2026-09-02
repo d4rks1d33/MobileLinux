@@ -1,0 +1,1097 @@
+#!/usr/bin/python3
+"""rhodep-modem-at - an AT command console for the modem.
+
+The Moto G82's modem answers AT commands, and until this existed nothing on the
+port used them. They do not travel over a serial port: the modem's glink edge
+advertises channels named DS and DATA1..DATA11, none of which any driver binds,
+and two of them speak AT. An endpoint is created on one with rpmsg_ctrl and the
+result is an ordinary read/write file descriptor.
+
+    GLINK edge (6080000.remoteproc)
+      └── DS  /  DATA1
+           └── /dev/rpmsg_ctrl2 + RPMSG_CREATE_EPT_IOCTL
+                └── /dev/rpmsgN
+                     └── AT
+
+That path goes through neither QMI nor DIAG, so it keeps working when
+ModemManager is not running, and it does not depend on the debug fuses, which
+on this handset are closed.
+
+Usage:
+
+    sudo rhodep-modem-at                 interactive console
+    sudo rhodep-modem-at ATI             one command and exit
+    sudo rhodep-modem-at -c DATA1 ATI    the same, on the other channel
+    sudo rhodep-modem-at -l              list the channels the modem advertises
+
+In the console, "?" prints a crib sheet of useful commands, and Ctrl-D or
+"quit" exits. Anything else is sent verbatim, so you do not need to remember
+which commands this tool knows about -- it knows about none of them, it is a
+pipe.
+
+Two things that will confuse you if nobody says them:
+
+  * a write can fail with EBUSY. That is glink reporting that the modem has not
+    posted a receive buffer, not the port being dead. This tool opens the
+    endpoint blocking and bounds every operation with an alarm, which is why it
+    never hangs.
+  * the port echoes. Each command is drained first and then read until a final
+    result code, so what you see is the answer and not the echo of whatever you
+    typed before.
+"""
+
+import argparse
+import fcntl
+import glob
+import os
+import select
+import signal
+import struct
+import sys
+import textwrap
+import time
+
+RPMSG_CREATE_EPT_IOCTL = (1 << 30) | (40 << 16) | (0xB5 << 8) | 0x01
+RPMSG_DESTROY_EPT_IOCTL = (0xB5 << 8) | 0x02          # _IO(0xb5, 0x2)
+MODEM_EDGE = "6080000.remoteproc"
+
+CRIB = """
+'help <command>' explains any of the 256 commands this modem reports, without
+sending anything: try 'help +CEREG', 'help csq', 'help $QCVOLT'.
+
+sending an SMS
+  sms +5491122334455 Hola          one line, the whole sequence for you
+  sms +5491122334455               then type the body, '.' sends, '!' cancels
+  AT+CMGF=1                        or do it by hand: the console now waits at
+  AT+CMGS="+5491122334455"         the modem's "> " prompt instead of hanging
+
+Every command below was tried against this modem and answers; the ones it does
+not support are called out, so the list is what works rather than what usually
+works.
+
+identity and firmware
+  ATI                     manufacturer, model, firmware revision, IMEI
+  AT+CGMR                 firmware revision on its own
+  AT+CGSN                 IMEI
+  AT+CIMI                 IMSI
+
+radio and registration
+  AT+CFUN?                1 = radio on, 0 = off, 4 = airplane
+  AT+COPS?                operator and access technology
+                          (the last field: 0 GSM, 2 UTRAN, 3 EDGE, 7 LTE)
+  AT+CEREG?               LTE registration:  0,1 registered  0,2 searching
+  AT+CGREG?               GPRS/EDGE registration
+  AT+CSQ                  signal: 0-31 and bit error rate; 99 means unknown
+  AT+CPAS                 activity status; 4 means a call is in progress
+  AT+CEER                 extended cause for the last failure
+  AT+CESQ                 NOT supported by this firmware, answers ERROR
+
+SIM
+  AT$QCSIMSTAT?           SIM init state
+  AT+CNUM                 own number, empty on this SIM
+
+data
+  AT+CGDCONT?             defined PDP contexts (APNs)
+  AT+CGACT?               which contexts are active
+  AT+CGCONTRDP            the live context: IP, gateway, DNS
+
+behaviour
+  AT+CMEE=2               verbose errors instead of a bare ERROR
+
+vendor
+  AT$QCDMG                would switch this port into DIAG mode and give the
+                          modem's own F3 log.  Answers ERROR on this firmware,
+                          which is why that log is out of reach --
+                          see docs/watchdog-ipa-lte-wip/HANDOFF.md
+
+Careful with AT+CFUN=0/1 and anything that writes: this is the real modem of a
+working phone, and some commands persist across reboots.
+"""
+
+
+
+# Every command below came from this modem's own AT+CLAC, which lists 256 of
+# them. They are grouped by what they do to the device, not by what they are
+# called, because that is the distinction that matters when you are poking at
+# the radio of a phone you need to keep working.
+
+# Read-only. Verified against this modem: safe to fire at will.
+SAFE = [
+    "ATI", "AT+CGMI", "AT+CGMM", "AT+CGMR", "AT+CGSN", "AT+CIMI", "AT+ICCID",
+    "AT+GCAP", "AT+CNUM", "AT+CPAS", "AT+CFUN?", "AT+COPS?", "AT+CREG?",
+    "AT+CGREG?", "AT+CEREG?", "AT+C5GREG?", "AT+CSQ", "AT+CEER", "AT+CBC",
+    "AT+CGDCONT?", "AT+CGACT?", "AT+CGATT?", "AT+CGPADDR", "AT+CGCONTRDP",
+    "AT+CPIN?", "AT+CLCC", "AT+CIND?", "AT+CSCA?", "AT+CPMS?", "AT+CMGF?",
+    "AT+CCLK?", "AT+CTZU?", "AT+WS46?", "AT+CEMODE?", "AT+CGCLASS?",
+    "AT$QCSIMSTAT?", "AT$QCPINSTAT?", "AT$QCSYSMODE?", "AT$QCHWREV",
+    "AT$QCBOOTVER", "AT$QCSQ", "AT$QCRSRP", "AT$QCRSRQ", "AT$QCRSCP",
+    "AT$QCECNO", "AT$QCBANDPREF?", "AT$QCDRX?", "AT$QCMSISDN?", "AT$QCCLAC",
+    "AT^SYSINFO", "AT^SPN", "AT^CARDMODE", "AT+CLAC",
+]
+
+# Changes state. Reversible, but it is a live radio.
+CONFIG = [
+    "AT+CFUN=", "AT+COPS=", "AT+CGDCONT=", "AT+CGATT=", "AT+CMEE=",
+    "AT+CMGF=", "AT+CNMI=", "AT+CTZU=", "AT+WS46=", "AT+CEMODE=",
+    "AT$QCBANDPREF=", "AT$QCDRX=", "AT$QCPDPP=", "AT$QCAPNE=",
+    "AT^SYSCONFIG", "AT^PREFMODE",
+]
+
+# Do not send these casually. Each one either drops the radio, writes something
+# that survives a reboot, or -- for the last group -- is simply unknown and one
+# of the batch that wedged this phone hard enough to need the power button.
+DANGEROUS = {
+    "AT$QCPWRDN":   "powers the modem down",
+    "AT+CFUN=0":    "drops the radio",
+    "AT+CFUN=1,1":  "resets the modem",
+    "AT+CRES":      "restores SMS settings from the SIM",
+    "AT+CSAS":      "saves SMS settings to the SIM",
+    "AT+CPWD":      "changes a SIM password",
+    "AT+CLCK":      "locks or unlocks the SIM",
+    "AT+CPIN=":     "burns a PIN attempt if it is wrong",
+    "AT$QCCLR":     "clears something -- semantics unknown",
+    "AT$QCACQDBC":  "clears the acquisition database, costs a slow re-scan",
+    "AT$QCDGEN":    "traffic generator",
+    "AT$QCRMCALL":  "brings up a data call behind ModemManager's back",
+    "AT$QCVOLT":    "UNKNOWN. In the batch that wedged the AP; see the README",
+    "AT$QCDMR":     "UNKNOWN. DM/DIAG related; $QCDMG is not even in this "
+                    "firmware's strings, so it is unlikely to open DIAG",
+    "AT$QCTER":     "UNKNOWN. Also in the batch that wedged the AP",
+}
+
+
+
+# What each command does, in English. Keys are matched case-insensitively
+# against the start of whatever you type, so "help CGDCONT", "help +CGDCONT"
+# and "help AT+CGDCONT=?" all find the same entry.
+#
+# Coverage is the 256 commands this modem reports through AT+CLAC. Where the
+# meaning of a vendor command is not actually known it says so rather than
+# guessing, because a confident wrong description is worse than none.
+HELP = {
+    # --- identity, firmware, capability ---
+    "ATI": "Identify: manufacturer, model, firmware revision, SVN and IMEI.",
+    "+GMI": "Manufacturer name.", "+CGMI": "Manufacturer name (3GPP form).",
+    "+GMM": "Model identifier.", "+CGMM": "Model identifier (3GPP form).",
+    "+GMR": "Firmware revision.", "+CGMR": "Firmware revision (3GPP form).",
+    "+GSN": "Serial number, i.e. the IMEI.", "+CGSN": "IMEI (3GPP form).",
+    "+GCAP": "Capability list: which command sets the modem supports.",
+    "+CLAC": "List all commands the modem implements. 256 of them here.",
+    "$QCCLAC": "Qualcomm's own list-all-commands.",
+    "$QCHWREV": "Hardware revision of the modem.",
+    "$QCBOOTVER": "Boot loader version string.",
+    "+CSCS": "Character set used for strings in AT replies (GSM, UCS2, IRA).",
+    "+WS46": "Radio access technology selection, the old 3GPP way.",
+    "%V": "Firmware version, vendor form.",
+
+    # --- radio state and registration ---
+    "+CFUN": "Functionality level. 1 full, 0 minimum with the radio off, "
+             "4 airplane. Writing this drops or restores the radio.",
+    "+COPS": "Operator selection. Read gives the current operator and the "
+             "access technology (0 GSM, 2 UTRAN, 3 EDGE, 7 LTE, 12 NR).",
+    "+COPN": "Read the modem's built-in operator name list.",
+    "+CREG": "Circuit-switched registration state and, optionally, the cell.",
+    "+CGREG": "GPRS/EDGE (packet) registration state.",
+    "+CEREG": "LTE (EPS) registration state. 0,1 is registered at home.",
+    "+C5GREG": "5G NR registration state.",
+    "+CSQ": "Signal strength as 0-31 plus bit error rate. 99 means unknown.",
+    "+CESQ": "Extended signal quality with RSRP and RSRQ. NOT supported by "
+             "this firmware, it answers ERROR; use $QCRSRP and $QCRSRQ.",
+    "$QCSQ": "Qualcomm signal quality, per access technology.",
+    "$QCRSRP": "LTE/NR reference signal received power, per antenna.",
+    "$QCRSRQ": "LTE/NR reference signal received quality.",
+    "$QCRSCP": "UMTS received signal code power.",
+    "$QCECNO": "UMTS Ec/No, the pilot signal to noise ratio.",
+    "$QCSYSMODE": "Current system mode: which technology is in use.",
+    "$QCBANDPREF": "Band preference as a bitmask. A second way to pin the "
+                   "radio to one band, alongside raw QMI.",
+    "$QCACQDBC": "Clear the acquisition database. Costs a slow full re-scan "
+                 "afterwards, so it is on the do-not-send list.",
+    "$QCCOPS": "Operator selection, vendor extension.",
+    "$QCCSGCOPS": "Closed subscriber group operator selection (femtocells).",
+    "$QCDRX": "Discontinuous reception settings: how often the modem wakes "
+              "to listen for paging.",
+    "$QCANTE": "Antenna state or tuner information. Meaning not verified here.",
+    "$QCCTM": "Cellular text telephone modem (TTY) mode.",
+    "^SYSINFO": "System information: service, roaming, SIM and technology.",
+    "^SYSCONFIG": "Preferred technology and roaming configuration.",
+    "^PREFMODE": "Preferred mode, vendor form of technology selection.",
+    "^MODE": "Unsolicited report of the current system mode.",
+    "^DSCI": "Unsolicited call state reports, vendor form.",
+    "^CARDMODE": "SIM card type report.",
+    "^SPN": "Service provider name from the SIM.",
+    "*CNTI": "Report the network technology in use.",
+
+    # --- SIM and security ---
+    "+CPIN": "SIM PIN state, and entry. A wrong entry burns an attempt.",
+    "+CIMI": "IMSI of the subscriber.",
+    "+ICCID": "Integrated circuit card id of the SIM.",
+    "+CNUM": "Subscriber number, if the SIM carries one.",
+    "+CUAD": "Read the SIM's application directory.",
+    "+CRSM": "Restricted SIM access: read SIM files directly.",
+    "+CSIM": "Generic SIM access: send raw APDUs. Powerful and unforgiving.",
+    "+CLCK": "Facility lock: lock or unlock the SIM or network locks. On the "
+             "do-not-send list, it can lock you out.",
+    "+CPWD": "Change a password for one of those facilities. Same warning.",
+    "+CPOL": "Preferred operator list stored on the SIM.",
+    "+CPLS": "Which preferred operator list to use.",
+    "$QCSIMSTAT": "SIM initialisation state. 'SIM INIT COMPLETED' is healthy.",
+    "$QCPINSTAT": "PIN state per application.",
+    "$QCSIMAPP": "SIM application selection.",
+    "$QCSIMT": "SIM toolkit related.",
+    "$QCMSISDN": "The subscriber number as the modem knows it.",
+
+    # --- packet data ---
+    "+CGDCONT": "Define or read PDP contexts, which is where the APNs live.",
+    "+CGDSCONT": "Define secondary PDP contexts.",
+    "+CGACT": "Activate or deactivate a PDP context, and read which are up.",
+    "+CGATT": "Attach to or detach from the packet domain.",
+    "+CGPADDR": "The IP address assigned to a context.",
+    "+CGCONTRDP": "Full dynamic parameters of an active context: address, "
+                  "gateway, DNS servers.",
+    "+CGSCONTRDP": "The same for a secondary context.",
+    "+CGTFT": "Traffic flow templates: packet filters for a context.",
+    "+CGTFTRDP": "Read back the negotiated traffic flow template.",
+    "+CGEQREQ": "Requested EPS quality of service for a context.",
+    "+CGEQMIN": "Minimum acceptable quality of service.",
+    "+CGEQOS": "EPS quality of service parameters.",
+    "+CGEQOSRDP": "Read back the negotiated EPS quality of service.",
+    "+CGQREQ": "Requested QoS, the older UMTS form.",
+    "+CGQMIN": "Minimum QoS, the older UMTS form.",
+    "+CGEREP": "Enable unsolicited packet domain event reporting.",
+    "+CGCMOD": "Modify an active PDP context.",
+    "+CGDATA": "Enter data state on a context.",
+    "+CGCLASS": "GPRS mobile class.",
+    "+CGSMS": "Whether SMS goes over the packet or circuit domain.",
+    "+CGPIAF": "How IPv6 addresses are formatted in replies.",
+    "+CEMODE": "EPS mode of operation: which domains the UE supports.",
+    "+CNMPSD": "Signal that no more packet-switched data is expected.",
+    "$QCPDPP": "PDP authentication (PAP/CHAP) parameters per context.",
+    "$QCPDPLT": "PDP context lifetime handling.",
+    "$QCPDPCFGE": "Extended PDP configuration.",
+    "$QCPDPCFGEXT": "Further extended PDP configuration.",
+    "$QCPDPIMSCFGE": "PDP configuration for the IMS context.",
+    "$QCAPNE": "APN table entry, vendor form.",
+    "$QCDNSP": "Primary DNS server for a context.",
+    "$QCDNSS": "Secondary DNS server for a context.",
+    "$QCPCOLIST": "Protocol configuration options received from the network.",
+    "$QCPCOMSISDN": "MSISDN delivered through protocol configuration options.",
+    "$QCRMCALL": "Start or stop a data call directly. On the do-not-send "
+                 "list: it brings up data behind ModemManager's back.",
+    "$QCDGEN": "Traffic generator for testing. On the do-not-send list.",
+    "+VZWAPNE": "Verizon APN table entry.",
+    "+VZWMRUE": "Verizon most-recently-used entry.",
+    "+VZWMRUC": "Verizon most-recently-used clear.",
+    "+VZWRSRP": "Verizon-form RSRP report.",
+    "+VZWRSRQ": "Verizon-form RSRQ report.",
+    "$QCMRUE": "Most-recently-used network entry.",
+    "$QCMRUC": "Clear the most-recently-used network list.",
+    "$QCDEFPROF": "Default profile selection.",
+    "$QCPRFCRT": "Create a profile.",
+    "$QCPRFMOD": "Modify a profile.",
+    "$QCNSP": "Network service provider related.",
+
+    # --- voice, SMS, supplementary services ---
+    "ATD": "Dial. With a number for voice, with *99# for legacy data.",
+    "ATA": "Answer an incoming call.", "ATH": "Hang up.",
+    "ATO": "Return to the data state from the command state.",
+    "+CHUP": "Hang up all calls.",
+    "+CLCC": "List current calls with their state and direction.",
+    "+CPAS": "Phone activity status. 4 means a call is in progress.",
+    "+CHLD": "Call hold and multiparty control.",
+    "+CVHU": "Whether ATH hangs up voice calls.",
+    "+CVMOD": "Voice call mode preference.",
+    "+CMOD": "Call mode: voice, data, or alternating.",
+    "+VTS": "Send DTMF tones.",
+    "+CLIP": "Calling line identification presentation.",
+    "+CLIR": "Calling line identification restriction.",
+    "+COLP": "Connected line identification presentation.",
+    "+CDIP": "Called line identification presentation.",
+    "+CCFC": "Call forwarding conditions.",
+    "+CCFCU": "Call forwarding, extended form.",
+    "$QCCCFC": "Call forwarding, vendor form.",
+    "+CCWA": "Call waiting.", "+CTFR": "Transfer an incoming call.",
+    "+CSSN": "Supplementary service notifications.",
+    "+CUSD": "USSD, the *123# style dialogues.",
+    "+CCUG": "Closed user group control.",
+    "+CAOC": "Advice of charge.", "+CACM": "Accumulated call meter.",
+    "+CAMM": "Accumulated call meter maximum.",
+    "+CPUC": "Price per unit and currency.",
+    "+CMGS": "Send an SMS.", "+CMGW": "Write an SMS to storage.",
+    "+CMGR": "Read an SMS.", "+CMGL": "List stored SMS.",
+    "+CMGD": "Delete an SMS.", "+CMGC": "Send an SMS command.",
+    "+CMSS": "Send an SMS from storage.",
+    "+CMGF": "SMS format: 0 PDU, 1 text.",
+    "+CSCA": "SMS service centre address.",
+    "+CSMP": "SMS text mode parameters.",
+    "+CSDH": "Show detailed header in text mode.",
+    "+CSCB": "Cell broadcast message types.",
+    "+CNMI": "How new messages are indicated to the terminal.",
+    "$QCCNMI": "New message indication, vendor form.",
+    "+CNMA": "Acknowledge a delivered message.",
+    "+CMMS": "More messages to send, keeps the link up.",
+    "+CPMS": "Preferred message storage.",
+    "+CSMS": "Select the message service.",
+    "+CSAS": "Save SMS settings to the SIM. On the do-not-send list, it "
+             "writes persistent state.",
+    "+CRES": "Restore SMS settings from the SIM. Same warning.",
+    "+CMCCS": "Message class and coding scheme handling.",
+    "+CPBS": "Phonebook storage selection.",
+    "+CPBR": "Read phonebook entries.",
+    "+CPBW": "Write a phonebook entry.",
+    "+CPBF": "Find phonebook entries.",
+    "$QCPBMPREF": "Phonebook manager preference.",
+
+    # --- IMS, eMBMS, 5G ---
+    "+CEMBMSCFG": "eMBMS (broadcast) configuration.",
+    "+CEMBMSCNT": "eMBMS content control.",
+    "+CEMBMSDATA": "eMBMS data path.",
+    "+CEMBMSSAI": "eMBMS service area identity.",
+    "+CEMBMSSRV": "eMBMS service control.",
+    "$QCIMSSRV": "IMS service state.",
+    "+C5GNSSAI": "5G network slice selection assistance information.",
+    "+C5GNSSAIRDP": "Read back the negotiated 5G slice information.",
+    "+C5GSMS": "5G SMS handling.", "+C5GUSMS": "5G SMS over NAS.",
+    "+CSUPI": "5G subscription permanent identifier.",
+
+    # --- errors, time, misc ---
+    "+CMEE": "Error verbosity. 0 plain ERROR, 1 numeric, 2 verbose text. "
+             "Set 2 first when something fails and you want to know why.",
+    "+CEER": "Extended error report: the cause of the last failure.",
+    "+CRC": "Cellular result codes for incoming calls.",
+    "+CR": "Service reporting control.",
+    "+CIND": "Indicator status: signal, service, battery and so on.",
+    "+CMER": "Mobile equipment event reporting.",
+    "+CMEC": "Which device controls the keypad, display and indicators.",
+    "+CCLK": "Real-time clock.", "$CCLK": "Real-time clock, vendor form.",
+    "+CTZU": "Automatic time zone update from the network.",
+    "+CTZR": "Time zone change reporting.",
+    "+CSDF": "Date format.", "+CSTF": "Time format.",
+    "+CBC": "Battery charge as the modem sees it.",
+    "+CEN": "Emergency number list.",
+    "+CEAP": "EAP authentication through the SIM.",
+    "+CERP": "EAP retrieve parameters.",
+    "+CPIN": "SIM PIN state and entry.",
+    "$QCTER": "UNKNOWN. Terminal-related, semantics not established. One of "
+              "the batch that wedged the phone, so it is refused by default.",
+    "$QCVOLT": "UNKNOWN. Name suggests a voltage reading, unverified. Also "
+               "in the batch that wedged the phone; refused by default.",
+    "$QCDMR": "UNKNOWN. DM/DIAG related, historically the companion of "
+              "$QCDMG which sets the diagnostic port rate. $QCDMG is not even "
+              "present in this firmware's strings, so this is unlikely to "
+              "open a DIAG port. Refused by default.",
+    "$QCCLR": "UNKNOWN. Clears something. Refused by default.",
+    "$QCPWRDN": "Power the modem down. Refused by default.",
+    "$QCRPW": "Vendor command, semantics not established here.",
+    "$QCRCIND": "Result code indication control.",
+    "$QCATMOD": "AT command mode selection.",
+    "$QCCALLATTR": "Call attributes.",
+    "$CREG": "Registration state, vendor form.",
+    "$CSQ": "Signal quality, vendor form.",
+
+    # --- the old modem furniture ---
+    "ATE": "Echo on or off. This port echoes by default.",
+    "ATZ": "Reset to a stored profile.",
+    "AT&F": "Restore factory defaults for the AT interface.",
+    "AT&W": "Write the current AT settings to a profile.",
+    "AT&V": "Show the current AT configuration.",
+    "AT&C": "How DCD behaves.", "AT&D": "How DTR is handled.",
+    "AT&S": "How DSR behaves.", "AT&E": "Result code selection.",
+    "ATQ": "Whether result codes are sent at all.",
+    "ATV": "Result codes as words or numbers.",
+    "ATX": "How much detail CONNECT result codes carry.",
+    "ATL": "Speaker volume, a relic.", "ATM": "Speaker control, a relic.",
+    "ATS0": "Rings before auto-answer. 0 disables it.",
+    "ATS3": "Carriage return character.", "ATS4": "Line feed character.",
+    "ATS5": "Backspace character.",
+    "+IPR": "Serial port bit rate. Meaningless over glink.",
+    "+ICF": "Character framing.", "+IFC": "Flow control.",
+    "+FCLASS": "Fax class selection.",
+    "+DR": "Data compression reporting.", "+DS": "Data compression.",
+    "+ES": "Error control negotiation.", "+ESA": "Synchronous access mode.",
+    "+CBST": "Bearer service type for data calls.",
+    "+CRLP": "Radio link protocol parameters.",
+    "+CV120": "V.120 parameters.", "+CHSN": "HSCSD parameters.",
+    "+CSTA": "Type of address for dialling.",
+    "+PACSP": "PLMN mode bit from the SIM.",
+
+    # --- dial modifiers and the S registers, all Hayes-era furniture ---
+    "T": "Tone dialling modifier, as in ATDT. Inert on a digital network.",
+    "P": "Pulse dialling modifier, as in ATDP. Inert here too.",
+    "\\Q": "Flow control selection, Hayes backslash form.",
+    "\\S": "Display the current status.",
+    "\\V": "Connect message format selection.",
+    "ATS2": "Escape character, normally '+' as in the +++ escape sequence.",
+    "ATS6": "Seconds to wait before blind dialling.",
+    "ATS7": "Seconds to wait for a carrier before giving up.",
+    "ATS8": "Pause in seconds produced by a comma in a dial string.",
+    "ATS9": "Carrier detect response time.",
+    "ATS10": "Delay from losing the carrier to hanging up.",
+    "ATS11": "DTMF tone duration.",
+    "ATS103": "Connection setup selection, an ISDN-era register.",
+    "ATS104": "Data setup selection, likewise.",
+
+    # --- vendor spellings of the 3GPP QoS commands ---
+    "+QCGQREQ": "Requested QoS, vendor spelling of +CGQREQ.",
+    "+QCGQMIN": "Minimum acceptable QoS, vendor spelling of +CGQMIN.",
+    "+QCGEQREQ": "Requested EPS QoS, vendor spelling of +CGEQREQ.",
+    "+QCGEQMIN": "Minimum EPS QoS, vendor spelling of +CGEQMIN.",
+    "+QCGEQOS": "EPS QoS parameters, vendor spelling of +CGEQOS.",
+    "+QCGTFT": "Traffic flow template, vendor spelling of +CGTFT.",
+    "+CCMMD": "UNKNOWN. Present in this firmware's command list, but its "
+              "meaning is not established. Not on the do-not-send list only "
+              "because nothing suggests it is destructive.",
+}
+
+
+class Timeout(Exception):
+    pass
+
+
+def _alarm(*_):
+    raise Timeout()
+
+
+signal.signal(signal.SIGALRM, _alarm)
+
+
+def list_channels():
+    out = []
+    for p in sorted(glob.glob("/sys/bus/rpmsg/devices/*")):
+        base = os.path.basename(p)
+        if base.startswith(MODEM_EDGE):
+            out.append(base.split("glink-edge.", 1)[-1].rsplit(".", 2)[0])
+    return out
+
+
+def modem_ctrl():
+    """Find the rpmsg control device belonging to the modem's glink edge.
+
+    Do not hardcode /dev/rpmsg_ctrlN. The number depends on the order the
+    remoteprocs probe and really does move between boots -- the modem was
+    rpmsg_ctrl2 on one boot and rpmsg_ctrl3 on the next, which made this tool
+    fail with a bare ENOENT.
+    """
+    for c in sorted(glob.glob("/sys/class/rpmsg/rpmsg_ctrl*")):
+        try:
+            target = os.path.realpath(c)
+        except OSError:
+            continue
+        if MODEM_EDGE in target:
+            dev = "/dev/" + os.path.basename(c)
+            if os.path.exists(dev):
+                return dev
+    return None
+
+
+def endpoint_name(dev):
+    """Channel name behind a /dev/rpmsgN, from sysfs."""
+    try:
+        with open("/sys/class/rpmsg/%s/name" % os.path.basename(dev)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def existing_endpoints(name=None):
+    out = []
+    for dev in sorted(glob.glob("/dev/rpmsg[0-9]*")):
+        n = endpoint_name(dev)
+        if n and (name is None or n == name):
+            out.append((dev, n))
+    return out
+
+
+def destroy_fd(fd):
+    """Release an endpoint through the descriptor already held for it.
+
+    Reopening the device to destroy it means rpmsg_eptdev_open() builds a whole
+    second glink channel, handshake and all, purely to tear it down again. That
+    churn is what produced one 'close ack on unknown channel' warning per run,
+    while plain open/close cycles produced none. The ioctl works perfectly well
+    on the descriptor that is already open, so do that instead.
+    """
+    try:
+        fcntl.ioctl(fd, RPMSG_DESTROY_EPT_IOCTL)
+        return True
+    except OSError:
+        return False
+
+
+def destroy(dev):
+    """Release an endpoint we have no descriptor for, i.e. one left behind."""
+    try:
+        fd = os.open(dev, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.ioctl(fd, RPMSG_DESTROY_EPT_IOCTL)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def open_channel(name):
+    """Return (fd, device, we_created_it) for a named glink channel.
+
+    An endpoint left behind by a previous run keeps the channel busy: glink
+    will not create a second one and open() then fails with EINVAL, which reads
+    exactly like the modem refusing the channel. So reuse one if it is there,
+    and destroy whatever we create on the way out.
+    """
+    ctrl = modem_ctrl()
+    if not ctrl:
+        raise SystemExit(
+            "no rpmsg control device for %s.\n"
+            "Is rpmsg_ctrl loaded and the modem running?\n"
+            "  lsmod | grep rpmsg_ctrl\n"
+            "  cat /sys/class/remoteproc/remoteproc0/state" % MODEM_EDGE)
+
+    # An endpoint left over from an earlier run is not merely untidy. Mainline
+    # glink loses a reference on channels opened from this side (see
+    # kernel/patches/0080), so a leftover can be a character device whose glink
+    # channel has already been freed, and opening it walked a dangling pointer
+    # and took the whole phone down with an Oops in __pi_strcmp under
+    # qcom_glink_create_ept. Clear leftovers instead of adopting them; on a
+    # kernel without that patch there is no way for userspace to make this
+    # safe, so say so rather than pretend.
+    stale = existing_endpoints(name)
+    if stale:
+        for dev, _ in stale:
+            gone = destroy(dev)
+            print("released a leftover endpoint %s (%s)%s" %
+                  (dev, name, "" if gone else " -- it would not release"),
+                  file=sys.stderr)
+        time.sleep(0.3)
+
+    before = set(glob.glob("/dev/rpmsg[0-9]*"))
+    fd = os.open(ctrl, os.O_RDWR)
+    try:
+        fcntl.ioctl(fd, RPMSG_CREATE_EPT_IOCTL,
+                    struct.pack("32sII", name.encode(), 0xFFFFFFFF, 0xFFFFFFFF))
+    except OSError as e:
+        os.close(fd)
+        raise SystemExit("cannot create an endpoint on %s: %s" % (name, e))
+    os.close(fd)
+
+    for _ in range(20):
+        time.sleep(0.1)
+        new = sorted(set(glob.glob("/dev/rpmsg[0-9]*")) - before)
+        if new:
+            break
+    else:
+        raise SystemExit("no /dev/rpmsgN appeared for channel %s" % name)
+
+    dev = new[-1]
+    try:
+        # Blocking on purpose: a non-blocking write returns EBUSY whenever the
+        # modem has not posted a receive intent yet.
+        return os.open(dev, os.O_RDWR), dev, True
+    except OSError as e:
+        destroy(dev)
+        raise SystemExit(
+            "channel %s created %s but will not open: %s\n"
+            "The modem does not acknowledge that channel. DS and DATA1 answer;\n"
+            "DIAG never does." % (name, dev, e))
+
+
+def drain(fd, secs=0.3):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if not r:
+            continue
+        try:
+            signal.alarm(2)
+            os.read(fd, 4096)
+        except (Timeout, OSError):
+            break
+        finally:
+            signal.alarm(0)
+
+
+# Commands that answer with a "> " prompt instead of OK, and then wait for a
+# body terminated by Ctrl-Z. Sending one of these and waiting for OK is how the
+# console used to hang: the modem was holding the prompt open and nobody was
+# going to type into it.
+# The standard ones are +CMGS, +CMGW, +CMGC and +CNMA, but this modem reports
+# 256 commands including 54 proprietary ones, and there is no list of which of
+# those want a body. So do not keep a list: the modem says so itself by sending
+# a bare "> ", and any command that does it gets the same treatment.
+CTRL_Z = b"\x1a"
+ESC = b"\x1b"
+
+
+def is_prompt(buf):
+    """Is the modem sitting at a "> " prompt waiting for a body?
+
+    The last non-empty line has to be exactly ">". Testing whether the whole
+    buffer ends with ">" would misfire on a reply whose text happens to end
+    that way while its OK has not arrived yet.
+    """
+    lines = [l.strip() for l in buf.decode("ascii", "replace").splitlines()
+             if l.strip()]
+    return bool(lines) and lines[-1] == ">"
+
+
+def command(fd, cmd, wait=5.0, prompt_ok=False):
+    drain(fd)
+    try:
+        signal.alarm(3)
+        os.write(fd, (cmd + "\r\n").encode())
+    except Timeout:
+        return "(write blocked: the modem posted no receive buffer)"
+    except OSError as e:
+        return "(write failed: %s)" % e
+    finally:
+        signal.alarm(0)
+
+    end = time.monotonic() + wait
+    buf = b""
+    while time.monotonic() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if not r:
+            continue
+        try:
+            signal.alarm(2)
+            buf += os.read(fd, 4096)
+        except (Timeout, OSError):
+            break
+        finally:
+            signal.alarm(0)
+        tail = buf.strip()
+        if tail.endswith(b"OK") or tail.endswith(b"ERROR") or b"+CME ERROR" in buf:
+            break
+        # A bare "> " on its own line is a complete answer: the modem is now
+        # waiting for a body and will send nothing further until it gets one.
+        #
+        # Matched on the last line being exactly ">" rather than on the buffer
+        # ending with one, so that a normal reply which happens to end in ">"
+        # while its OK is still in flight is not mistaken for a prompt.
+        if prompt_ok and is_prompt(buf):
+            break
+
+    text = buf.decode("ascii", "replace")
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if lines and lines[0].strip().upper() == cmd.strip().upper():
+        lines = lines[1:]                       # drop the echo
+    return "\n".join(lines) if lines else "(no answer)"
+
+
+def send_body(fd, body, wait=90.0):
+    """Send a message body and the Ctrl-Z that submits it.
+
+    No carriage return is appended: the body ends where Ctrl-Z says it ends,
+    and any newline inside it is part of the message. The wait is long because
+    the modem answers only once the network has taken the message, which is
+    seconds on a good day and much longer on a bad one.
+    """
+    drain(fd, 0.1)
+    try:
+        signal.alarm(3)
+        os.write(fd, body.encode("utf-8", "replace") + CTRL_Z)
+    except Timeout:
+        return "(write blocked: the modem posted no receive buffer)"
+    except OSError as e:
+        return "(write failed: %s)" % e
+    finally:
+        signal.alarm(0)
+
+    end = time.monotonic() + wait
+    buf = b""
+    while time.monotonic() < end:
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if not r:
+            continue
+        try:
+            signal.alarm(2)
+            buf += os.read(fd, 4096)
+        except (Timeout, OSError):
+            break
+        finally:
+            signal.alarm(0)
+        tail = buf.strip()
+        if tail.endswith(b"OK") or tail.endswith(b"ERROR") or b"+CME ERROR" in buf:
+            break
+    lines = [l.strip() for l in buf.decode("ascii", "replace").splitlines()
+             if l.strip()]
+    return "\n".join(lines) if lines else "(no answer after %.0fs)" % wait
+
+
+def abort_body(fd):
+    """Back out of text-entry mode without sending anything."""
+    try:
+        signal.alarm(2)
+        os.write(fd, ESC)
+    except (Timeout, OSError):
+        pass
+    finally:
+        signal.alarm(0)
+    drain(fd, 0.3)
+
+
+def read_body(prompt="sms> "):
+    """Collect a message body from the terminal.
+
+    Ctrl-Z cannot be typed into input() usefully, so a line holding only "."
+    sends and a line holding only "!" cancels, which is the same convention
+    mail clients have used forever.
+    """
+    print("  the modem is waiting for the message.")
+    print("  end with a line containing only  .   to send")
+    print("  or a line containing only        !   to cancel")
+    lines = []
+    while True:
+        try:
+            line = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if line.strip() == ".":
+            return "\n".join(lines)
+        if line.strip() == "!":
+            return None
+        lines.append(line)
+
+
+def send_sms(fd, number, text, say=print):
+    """The whole AT+CMGS dance: text mode, the number, the body, Ctrl-Z."""
+    r = command(fd, "AT+CMGF=1")
+    say("AT+CMGF=1 -> %s" % r)
+    if "OK" not in r:
+        say("the modem would not go into text mode; not sending")
+        return False
+    r = command(fd, 'AT+CMGS="%s"' % number, prompt_ok=True)
+    say('AT+CMGS="%s" -> %s' % (number, r))
+    if r.strip().splitlines()[-1:] != [">"]:
+        say("no prompt, so the modem did not accept the number")
+        return False
+    r = send_body(fd, text)
+    say(r)
+    return "OK" in r
+
+
+def kmsg(text):
+    """Leave a trace that survives a reset, in ramoops."""
+    try:
+        with open("/dev/kmsg", "w") as k:
+            k.write("modem-at: %s\n" % text)
+    except OSError:
+        pass
+
+
+def uptime():
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except OSError:
+        return -1.0
+
+
+def danger(cmd):
+    up = cmd.strip().upper()
+    for k, why in DANGEROUS.items():
+        if up.startswith(k.upper()):
+            return why
+    return None
+
+
+def explain(query):
+    """Find the HELP entry for whatever the user typed.
+
+    People type "help CSQ", "help +CSQ", "help AT+CSQ?" and "help at+cgdcont=?"
+    and all four mean the same question, so normalise rather than demand a
+    canonical spelling.
+    """
+    up = query.strip().upper()
+    if not up:
+        return None
+    bases = [up]
+    if up.startswith("AT"):
+        bases.append(up[2:])
+    else:
+        bases.append("AT" + up)
+    # a bare name like "csq" or "cgdcont" means +CSQ or +CGDCONT to a human
+    if up[:1].isalpha() and not up.startswith("AT"):
+        for sig in ("+", "$", "^", "*"):
+            bases.append(sig + up)
+    forms = []
+    for b in bases:
+        b = b.strip()
+        if not b:
+            continue
+        forms.append(b)
+        # AT+CGDCONT=? / AT+CGDCONT? / AT+CGDCONT=1,"IP" all name +CGDCONT
+        for cut in ("=?", "?", "="):
+            if cut in b:
+                forms.append(b.split(cut, 1)[0])
+    keys = {k.upper(): k for k in HELP}
+    for f in forms:
+        if f in keys:
+            return keys[f], HELP[keys[f]]
+    # Longest key the query starts with, so ATS0=0 still finds ATS0. The
+    # remainder has to look like arguments rather than more name, or "zzz"
+    # matches ATZ and cheerfully describes a modem reset.
+    best = None
+    for f in forms:
+        for ku, k in keys.items():
+            rest = f[len(ku):] if f.startswith(ku) else None
+            if rest is None:
+                continue
+            if rest and not rest[0] in '=?,;:0123456789 "\'':
+                continue
+            if best is None or len(ku) > len(best[0]):
+                best = (ku, k)
+    if best:
+        return best[1], HELP[best[1]]
+    return None
+
+
+def suggest(query):
+    """Commands whose name or description mentions the query, for near misses."""
+    q = query.strip().upper().lstrip("A").lstrip("T").lstrip("+$^*")
+    if len(q) < 2:
+        return []
+    hits = [k for k in HELP if q in k.upper()]
+    if not hits:
+        hits = [k for k in HELP if q.lower() in HELP[k].lower()]
+    return sorted(hits)[:12]
+
+
+def show_help(query, fd=None):
+    """Print the explanation, plus the live value when it is safe to ask."""
+    found = explain(query)
+    if not found:
+        near = suggest(query)
+        print("no entry for %r." % query.strip())
+        if near:
+            print("did you mean: %s" % ", ".join(near))
+        else:
+            print("try 'help' on its own to see how to search, or --commands "
+                  "for everything the modem reports.")
+        return
+    key, text = found
+    print("%s\n  %s" % (key, textwrap.fill(text, 74, subsequent_indent="  ")))
+    why = danger(key if key.upper().startswith("AT") else "AT" + key)
+    if why:
+        print("  REFUSED BY DEFAULT: %s" % textwrap.fill(
+            why, 74, subsequent_indent="  "))
+
+
+def probe(fd, cmd, force=False):
+    """Send one command, having first written it where a reset cannot erase it.
+
+    This exists because ten Qualcomm vendor commands were once sent in a batch
+    with no trace, one of them wedged the application processor hard enough to
+    need the power button, and there was no way afterwards to tell which. A
+    marker in /dev/kmsg lands in the ramoops console record, so the last thing
+    tried is always recoverable from the next boot.
+    """
+    why = danger(cmd)
+    if why and not force:
+        print("%s is on the do-not-send list: %s" % (cmd, why))
+        print("re-run with --force if you mean it, and read the console record")
+        print("afterwards with:  sudo rhodep-pstore-keep ; less /root/pstore-history/*")
+        return
+
+    before = uptime()
+    kmsg("sending %s (uptime %.2f)" % (cmd, before))
+    print("marker written; sending %s" % cmd)
+    answer = command(fd, cmd)
+    after = uptime()
+    kmsg("survived %s (uptime %.2f)" % (cmd, after))
+    print(answer)
+    print("--- still alive, uptime %.2f -> %.2f" % (before, after))
+
+
+def list_commands(fd):
+    """Ask the modem for its own command set and classify it."""
+    listing = command(fd, "AT+CLAC", wait=10.0)
+    names = []
+    for line in listing.splitlines():
+        line = line.strip()
+        if not line or line in ("OK", "ERROR"):
+            continue
+        names.append(line if line.startswith("AT") else "AT" + line)
+    if not names:
+        print("AT+CLAC returned nothing usable:")
+        print(listing)
+        return
+    print("the modem implements %d commands\n" % len(names))
+
+    def group(pred):
+        return sorted(n for n in names if pred(n))
+
+    risky = group(lambda n: danger(n))
+    vendor = group(lambda n: (n.startswith("AT$") or n.startswith("AT^")) and not danger(n))
+    std = group(lambda n: n.startswith("AT+") and not danger(n))
+    basic = group(lambda n: not n.startswith(("AT+", "AT$", "AT^")))
+
+    for title, items in (("do not send casually", risky),
+                         ("vendor ($ and ^)", vendor),
+                         ("standard (+)", std),
+                         ("basic / S-registers", basic)):
+        print("%s: %d" % (title, len(items)))
+        line = "  "
+        for i in items:
+            if len(line) + len(i) > 96:
+                print(line); line = "  "
+            line += i.replace("AT", "", 1) + " "
+        if line.strip():
+            print(line)
+        print()
+    print("Nothing above was executed. Use --probe to try one, with a marker.")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="AT console for the modem, over glink rather than a serial port.")
+    ap.add_argument("-c", "--channel", default="DS",
+                    help="glink channel to use (default DS; DATA1 also answers)")
+    ap.add_argument("-l", "--list", action="store_true",
+                    help="list the channels the modem advertises and exit")
+    ap.add_argument("--commands", action="store_true",
+                    help="ask the modem for its own command list and classify it, "
+                         "executing nothing")
+    ap.add_argument("--probe", metavar="CMD",
+                    help="send one command with a marker in /dev/kmsg first, so "
+                         "that if it takes the phone down the ramoops record says which")
+    ap.add_argument("--force", action="store_true",
+                    help="allow --probe to send a command on the do-not-send list")
+    ap.add_argument("--cleanup", action="store_true",
+                    help="release endpoints left behind by earlier runs and exit")
+    ap.add_argument("--sms", nargs=2, metavar=("NUMBER", "TEXT"),
+                    help="send an SMS and exit, doing the whole AT+CMGF/"
+                         "AT+CMGS/Ctrl-Z sequence")
+    ap.add_argument("--explain", metavar="CMD",
+                    help="say what a command does and exit, without opening a "
+                         "channel or touching the modem at all. Partial names "
+                         "work: --explain band")
+    ap.add_argument("cmd", nargs="*", help="a single command to run, then exit")
+    args = ap.parse_args()
+
+    if args.explain:
+        # Deliberately before the root check and before any channel is opened:
+        # looking up what a command means must never require a modem.
+        show_help(args.explain)
+        return
+
+    if args.list:
+        chans = list_channels()
+        print("channels advertised by the modem edge:")
+        for c in chans:
+            print("  %s%s" % (c, "   <- answers AT" if c in ("DS", "DATA1") else ""))
+        if not chans:
+            print("  (none: is the modem running?)")
+        print("\nmodem rpmsg control device: %s" % (modem_ctrl() or "NOT FOUND"))
+        held = existing_endpoints()
+        if held:
+            print("\nendpoints currently open:")
+            for dev, n in held:
+                print("  %s -> %s" % (dev, n))
+        return
+
+    if os.geteuid() != 0:
+        print("needs root (the rpmsg control device is root-only)", file=sys.stderr)
+        return 1
+
+    if args.cleanup:
+        held = existing_endpoints()
+        if not held:
+            print("nothing to release")
+            return
+        for dev, n in held:
+            print("%s (%s): %s" % (dev, n, "released" if destroy(dev) else "would not release"))
+        return
+
+    fd, dev, mine = open_channel(args.channel)
+    try:
+        if args.commands:
+            list_commands(fd)
+            return
+        if args.probe:
+            probe(fd, args.probe, args.force)
+            return
+        if args.sms:
+            return 0 if send_sms(fd, args.sms[0], args.sms[1]) else 1
+        if args.cmd:
+            # One-shot mode can hit a prompt too. There is no terminal to type
+            # a body into, so say so and back the modem out rather than leaving
+            # it in text-entry mode for whoever opens the channel next.
+            reply = command(fd, " ".join(args.cmd), prompt_ok=True)
+            print(reply)
+            if reply.strip().splitlines()[-1:] == [">"]:
+                abort_body(fd)
+                print("the modem is asking for a message body. Use the console,"
+                      " or --sms for the AT+CMGS case. Backed out with ESC.")
+            return
+
+        print("modem AT console on %s (%s). '?' for a crib sheet, Ctrl-D to quit."
+              % (args.channel, dev))
+        hello = command(fd, "AT")
+        print("AT -> %s" % hello)
+        if "OK" not in hello:
+            print("that channel does not look like an AT port; try -c DATA1")
+
+        while True:
+            try:
+                line = input("at> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                continue
+            if line in ("quit", "exit"):
+                break
+            if line == "?":
+                print(CRIB)
+                continue
+            if line.lower() == "help":
+                print("help <command>   what a command does, e.g. help +CEREG\n"
+                      "                 %d commands are described. Partial "
+                      "names work:\n"
+                      "                 'help band', 'help signal', 'help APN'."
+                      % len(HELP))
+                continue
+            if line.lower().startswith("help "):
+                show_help(line[5:], fd)
+                continue
+            if line.lower().startswith("sms "):
+                rest = line[4:].strip()
+                number, _, text = rest.partition(" ")
+                if not number:
+                    print("usage: sms <number> <message>")
+                    continue
+                if not text:
+                    body = read_body()
+                    if body is None:
+                        print("cancelled")
+                        continue
+                    text = body
+                send_sms(fd, number, text)
+                continue
+            # Every command is allowed to answer with a prompt, not just the
+            # ones known to. If the modem asks for a body, we notice.
+            reply = command(fd, line, prompt_ok=True)
+            print(reply)
+            if reply.strip().splitlines()[-1:] == [">"]:
+                body = read_body()
+                if body is None:
+                    abort_body(fd)
+                    print("cancelled")
+                else:
+                    print(send_body(fd, body))
+    finally:
+        # Destroy through this descriptor, then close it: no second channel is
+        # built, and the endpoint does not survive to trip up the next run.
+        if mine:
+            destroy_fd(fd)
+        os.close(fd)
+        if mine and os.path.exists(dev):
+            destroy(dev)
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

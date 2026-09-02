@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Say why the PMIC last brought the SoC down, in words.
+
+The PON registers have been read in this port for a while, but only as raw
+bytes compared between runs: 088d 00 -> 01, 08c2 00 -> 02, 08c4 80 -> 40. That
+was enough to tell one reset apart from another and nothing more.
+
+Mainline has no decoder. The vendor's does, in
+drivers/input/misc/qpnp-power-on.c, and this is that logic and those tables:
+
+    PON_REASON1        base + 0xC0    why the SoC powered on
+    WARM_RESET_REASON1 base + 0xC2
+    PON_OFF_REASON     base + 0xC7    which of the three sequences ran
+    POFF_REASON1       base + 0xC5      if bit 7 of OFF_REASON
+    FAULT_REASON1      base + 0xC8      if bit 6, two bytes, index + 16
+    S3_RESET_REASON    base + 0xCA      if bit 5, index + 32
+
+The distinction that matters here is PS_HOLD, which means the SoC itself asked
+to go down, against a PMIC watchdog or a fault, which means the PMIC decided.
+Nothing in this port has been able to tell those apart until now.
+
+The regmap debugfs number changes between boots, so find the PON peripheral by
+looking for its registers rather than hardcoding 0-00 or 0-06.
+"""
+
+import glob
+import os
+import sys
+
+PON_REASON = [
+    "Hard Reset", "SMPL (sudden momentary power loss)", "RTC alarm expiry",
+    "DC charger insertion", "USB charger insertion", "PON1 (secondary PMIC)",
+    "CBL (external power supply)", "KPD (power key press)",
+]
+
+# One flat table, as the vendor keeps it: 0-15 POFF, 16-31 FAULT, 32-39 S3.
+POFF_REASON = {
+    0: "SOFT (software)",
+    1: "PS_HOLD (the SoC asked to be shut down)",
+    2: "PMIC_WD (PMIC watchdog)",
+    3: "GP1 (keypad reset 1)",
+    4: "GP2 (keypad reset 2)",
+    5: "KPDPWR_AND_RESIN (power key and reset line)",
+    6: "RESIN_N (reset line / volume down)",
+    7: "KPDPWR_N (long power key hold)",
+    11: "CHARGER (enum timer, boot done)",
+    12: "TFT (thermal fault tolerance)",
+    13: "UVLO (under voltage lock out)",
+    14: "OTST3 (over temperature)",
+    15: "STAGE3 (stage 3 reset)",
+    16: "GP_FAULT0", 17: "GP_FAULT1", 18: "GP_FAULT2", 19: "GP_FAULT3",
+    20: "MBG_FAULT", 21: "OVLO (over voltage lock out)",
+    22: "UVLO (under voltage lock out)", 23: "AVDD_RB",
+    27: "FAULT_FAULT_N", 28: "FAULT_PBS_WATCHDOG_TO", 29: "FAULT_PBS_NACK",
+    30: "FAULT_RESTART_PON", 31: "OTST3 (over temperature)",
+    36: "S3_RESET_FAULT_N", 37: "S3_RESET_PBS_WATCHDOG_TO",
+    38: "S3_RESET_PBS_NACK", 39: "S3_RESET_KPDPWR_ANDOR_RESIN",
+}
+
+WANTED = (0x8C0, 0x8C2, 0x8C5, 0x8C7, 0x8C8, 0x8C9, 0x8CA)
+
+
+def find_pon():
+    """The PON peripheral's regmap, whatever it is called this boot.
+
+    Only SPMI devices are touched, and they are named explicitly rather than
+    globbed. Reading a regmap dump asks the bus for every register in it, and
+    doing that to an i2c device that is asleep hangs the application processor
+    hard enough to need the power button. That is how this tool froze the
+    phone the first time it ran: the glob happily matched 0-0035, 3-003b,
+    4-0034 and 4-0035, which are i2c, not the PMIC.
+
+    SPMI names have two hex digits after the dash, i2c has four, but that is a
+    coincidence worth not relying on, so ask the SPMI bus instead.
+    """
+    names = set()
+    try:
+        for dev in os.listdir("/sys/bus/spmi/devices"):
+            if "-" in dev:
+                names.add(dev)
+    except OSError:
+        pass
+    # The primary PMIC's base peripheral is not always a bus device, and the
+    # PON block has lived there on this phone.
+    names.add("0-00")
+
+    for name in sorted(names):
+        path = "/sys/kernel/debug/regmap/%s/registers" % name
+        if not os.path.exists(path):
+            continue
+        text = read_block(path, 0x800, 0x100)
+        if text and "08c0:" in text and "08c7:" in text:
+            return path, text
+    return None, None
+
+
+# Each line of a regmap dump is exactly "%04x: %02x\n", nine bytes, and the
+# file is positional: seeking to addr*9 lands on that register. Reading the
+# whole dump does not work -- a plain read() comes back after about 8 KB, long
+# before 0x800 -- so seek to the block wanted instead of reading from zero.
+LINE = 9
+
+
+def read_block(path, first, count):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        os.lseek(fd, first * LINE, os.SEEK_SET)
+        out = b""
+        want = count * LINE
+        while len(out) < want:
+            chunk = os.read(fd, want - len(out))
+            if not chunk:
+                break
+            out += chunk
+        return out.decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def parse(text):
+    regs = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        a, _, v = line.partition(":")
+        try:
+            regs[int(a.strip(), 16)] = int(v.strip(), 16)
+        except ValueError:
+            continue
+    return regs
+
+
+def bits(value):
+    return [i for i in range(8) if value & (1 << i)]
+
+
+def main():
+    """--raw dumps the whole PON block instead of the decoded summary.
+
+    Two different causes can decode to the same sentence. Comparing an LTE
+    death against a deliberately triggered access violation needs the bytes
+    themselves, because the question is whether any bit differs at all, not
+    whether the summary reads the same.
+    """
+    raw = "--raw" in sys.argv
+    if os.geteuid() != 0:
+        print("needs root: the regmap debugfs is root-only", file=sys.stderr)
+        return 1
+    path, text = find_pon()
+    if not path:
+        print("could not find the PON peripheral in /sys/kernel/debug/regmap.\n"
+              "Is CONFIG_REGMAP_DEBUGFS on and debugfs mounted?", file=sys.stderr)
+        return 1
+    regs = parse(text)
+    if raw:
+        for a in range(0x8C0, 0x8D0):
+            if a in regs:
+                print("%04x: %02x" % (a, regs[a]))
+        return 0
+    print("PON registers from %s" % path)
+    for a in WANTED:
+        if a in regs:
+            print("  %04x: %02x" % (a, regs[a]))
+
+    r = regs.get(0x8C0, 0)
+    on = [PON_REASON[b] for b in bits(r) if b < len(PON_REASON)]
+    print("\npowered on because: %s" % (", ".join(on) if on else "nothing set"))
+
+    w = regs.get(0x8C2, 0)
+    print("warm reset reason1: %02x%s" % (w, "" if w else "  (none)"))
+
+    off = regs.get(0x8C7, 0)
+    print("\noff reason register %02x:" % off)
+    if off & 0x80:
+        which, base, extra = "POFF sequence", 0, regs.get(0x8C5, 0)
+    elif off & 0x40:
+        which, base = "FAULT sequence", 16
+        extra = regs.get(0x8C8, 0) | (regs.get(0x8C9, 0) << 8)
+    elif off & 0x20:
+        which, base, extra = "S3 reset sequence", 32, regs.get(0x8CA, 0)
+    else:
+        print("  none of the POFF, FAULT or S3 bits are set.")
+        print("  Nothing was recorded: this is what a boot looks like when the")
+        print("  PMIC never took the SoC down, or when the record was cleared.")
+        return 0
+
+    print("  %s ran, status %04x" % (which, extra))
+    if not extra:
+        print("  ...but the status register is zero, so no specific cause.")
+        return 0
+    for b in range(16):
+        if extra & (1 << b):
+            idx = base + b
+            print("  -> %s" % POFF_REASON.get(idx, "reserved/unknown (index %d)" % idx))
+    print("\nPS_HOLD means the SoC asked to go down. A PMIC watchdog or a fault")
+    print("means the PMIC decided on its own, without asking.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

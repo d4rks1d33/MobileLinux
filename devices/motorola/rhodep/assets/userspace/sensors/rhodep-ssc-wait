@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""rhodep: block until the ADSP sensor core actually has sensors.
+
+The listener feeding the registry and the sensor core finishing its parse are
+two different moments, about a second apart.  iio-sensor-proxy asks once and
+believes the answer, so starting it too early gives a phone with no sensors and
+no error anywhere.  This is what the ordering between the two hangs off.
+
+Asks the sensor core (QMI service 400) to look up a data type over its SUID
+lookup sensor and reports whether anything answers.
+
+  rhodep-ssc-wait [--timeout SEC] [datatype ...]     default: accel
+
+Exit 0 as soon as every requested data type resolves, 1 on timeout.
+"""
+
+import argparse
+import socket
+import struct
+import sys
+import time
+
+SSC_SERVICE = 400
+# The SUID of the lookup sensor itself, the one fixed point in the protocol.
+LOOKUP_SUID = 0xABABABABABABABAB
+
+
+def _varint(n):
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out += bytes([b | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def _bytes(field, data):
+    return _varint((field << 3) | 2) + _varint(len(data)) + data
+
+
+def _uint(field, value):
+    return _varint((field << 3) | 0) + _varint(value)
+
+
+def _fixed64(field, value):
+    return _varint((field << 3) | 1) + struct.pack("<Q", value)
+
+
+def _fixed32(field, value):
+    return _varint((field << 3) | 5) + struct.pack("<I", value)
+
+
+def build_request(datatype, txn):
+    """sns_client_request_msg for sns_suid_req { data_type }.
+
+    Two things here are not guessable and cost an afternoon each if wrong:
+    msg_id is a protobuf FIXED32, not a varint -- encode it as a varint and the
+    service still answers SUCCESS while reading the wrong field; and the
+    request needs TLV 0x10 set to 1 next to the payload, without which the
+    sensor core accepts everything, allocates a client id, and never sends an
+    indication.
+    """
+    suid_req = _bytes(1, datatype.encode()) + _uint(2, 0) + _uint(3, 0)
+    payload = (
+        _bytes(1, _fixed64(1, LOOKUP_SUID) + _fixed64(2, LOOKUP_SUID))
+        + _fixed32(2, 512)                       # msg_id: SUID lookup
+        + _bytes(3, _uint(1, 1) + _uint(2, 0))   # suspend_config
+        + _bytes(4, _bytes(2, suid_req))
+    )
+    body = struct.pack("<H", len(payload)) + payload
+    tlvs = (
+        b"\x10" + struct.pack("<H", 1) + b"\x01"
+        + b"\x01" + struct.pack("<H", len(body)) + body
+    )
+    return (
+        b"\x00"
+        + struct.pack("<H", txn)
+        + struct.pack("<H", 0x20)
+        + struct.pack("<H", len(tlvs))
+        + tlvs
+    )
+
+
+def find_ssc_port():
+    """The sensor core's port moves across an ADSP restart (5:14 -> 5:13 was
+    seen here), so anything that hardcodes it silently tests nothing."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["qrtr-lookup"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:
+        return (5, 14)
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 5 and f[0] == str(SSC_SERVICE):
+            return (int(f[3]), int(f[4]))
+    return (5, 14)
+
+
+def has_sensor(datatype, txn, addr, timeout=2.0):
+    """False rather than an exception on anything transient.
+
+    At boot this runs while the ADSP is still settling, so sendto() to a port
+    that has just gone away returns ECONNRESET and recvfrom() can too.  Those
+    are 'not yet', not 'broken': letting them out of here kills the unit and
+    takes the listener with it, which is a phone with no sensors because of a
+    race in the readiness check.
+    """
+    try:
+        s = socket.socket(socket.AF_QIPCRTR, socket.SOCK_DGRAM)
+    except OSError:
+        return False
+    try:
+        s.bind((1, 0))
+        s.settimeout(0.5)
+        s.sendto(build_request(datatype, txn), addr)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                pkt, _ = s.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return False
+            if pkt[0] == 0x04:              # QMI indication
+                return pkt.count(b"\x12\x12\x09") > 0
+        return False
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--timeout", type=float, default=45.0)
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("datatypes", nargs="*", default=None)
+    args = ap.parse_args()
+
+    wanted = args.datatypes or ["accel"]
+    deadline = time.time() + args.timeout
+    txn = 1
+
+    while time.time() < deadline:
+        addr = find_ssc_port()
+        missing = []
+        for dt in wanted:
+            txn += 1
+            if not has_sensor(dt, txn, addr):
+                missing.append(dt)
+        if not missing:
+            if not args.quiet:
+                print("rhodep-ssc-wait: %s present" % " ".join(wanted))
+            return 0
+        time.sleep(1.0)
+
+    print("rhodep-ssc-wait: timed out waiting for %s" % " ".join(missing),
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,232 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: sm6375: use this SoC's own IPA SRAM layout
+
+ipa_data_v4_11_sm6375 borrowed qcm2290's ipa_mem_local_data, and the two
+layouts are not the same. Everything from the modem's processing context
+onwards sits at a different offset and a different size, and one region -
+the filter and route statistics - does not exist in qcm2290 at all:
+
+  region                mainline (qcm2290)   vendor (this SoC)
+  modem_hdr_proc_ctx    0x0ad0 / 0x0200      0x0ad0 / 0x0ac0
+  apps_hdr_proc_ctx     0x0cd0 / 0x0200      0x1590 / 0x0200
+  nat_tbl               0x0ee0 / 0x0d00      0x17a0 / 0x0500
+  pdn_config            0x1be8 / 0x0050      0x1ca8 / 0x0050
+  stats_quota_modem     0x1c40 / 0x0030      0x1d00 / 0x0030
+  stats_tethering       0x1cb8 / 0x0238      0x1d78 / 0x0238
+  stats_fnr             absent               0x1fb0 / 0x0800
+  stats_drop            0x1ef0 / 0x0020      0x27b0 / 0x0020
+  modem                 0x1f18 / 0x100c      0x27d8 / 0x0800
+
+from the vendor's ipa_4_11_mem_part, techpack/dataipa/.../ipa_v3/ipa_utils.c
+line 3949. mainline already has an id for the missing region,
+IPA_MEM_STATS_FILTER_ROUTE, marked "IPA v4.5+"; the v4.11 table simply never
+listed it.
+
+This is not bookkeeping. ipa_qmi.c:323 and :336 send IPA_MEM_MODEM and
+IPA_MEM_MODEM_PROC_CTX to the modem over QMI as the regions it owns. Getting
+them wrong tells the modem to put its tables where the AP has put something
+else - and telling it its processing context is 0x200 when its firmware uses
+0xac0 overruns by five times, straight through what this table calls the AP's
+own processing context and out the far side.
+
+That matches the failure exactly, including the part that made it so hard to
+place: it only happens once the modem *attaches* to a network and installs
+those tables. With the radio powered but not attached the device has been
+watched for 22 minutes without a reset; attached to LTE it dies in 3 to 10
+minutes, silently, which §1 of HANDOFF-SESSION4.md established is what this
+SoC does when a transaction goes somewhere it should not.
+
+Canary counts are derived from the gaps between regions, the same way the
+existing tables are built.
+
+No device tree involved, so no new boot image: rebuild ipa.ko, copy it over,
+reload.
+
+--- a/drivers/net/ipa/data/ipa_data-v4.11.c
++++ b/drivers/net/ipa/data/ipa_data-v4.11.c
+@@ -370,6 +370,174 @@
+ 	.smem_size	= 0x00009000,
+ };
+ 
++/* IPA-resident memory region layout for SM6375.
++ *
++ * The layout above is qcm2290's and this SoC does not share it. Everything
++ * from the modem's processing context onwards is at a different place and a
++ * different size, and there is a whole region, the filter/route statistics,
++ * that qcm2290 does not have at all. Transcribed from the vendor's
++ * ipa_4_11_mem_part (techpack/dataipa/.../ipa_v3/ipa_utils.c:3949):
++ *
++ *   region                mainline (qcm2290)   vendor (this SoC)
++ *   modem_hdr_proc_ctx    0x0ad0 / 0x0200      0x0ad0 / 0x0ac0
++ *   apps_hdr_proc_ctx     0x0cd0 / 0x0200      0x1590 / 0x0200
++ *   nat_tbl               0x0ee0 / 0x0d00      0x17a0 / 0x0500
++ *   stats_fnr             absent               0x1fb0 / 0x0800
++ *   stats_drop            0x1ef0 / 0x0020      0x27b0 / 0x0020
++ *   modem                 0x1f18 / 0x100c      0x27d8 / 0x0800
++ *
++ * This is not cosmetic. ipa_qmi.c hands IPA_MEM_MODEM and
++ * IPA_MEM_MODEM_PROC_CTX to the modem over QMI as the regions it owns, so
++ * getting them wrong tells the modem to write its tables somewhere the AP has
++ * given to something else. Telling it its processing context is 0x200 when its
++ * firmware uses 0xac0 overruns five times over, into what we call the AP's own
++ * context and past it.
++ *
++ * Which is exactly when the failure appears: only once the modem attaches to a
++ * network and installs those tables. With the radio on but not attached the
++ * device runs for as long as anyone has watched it.
++ */
++static const struct ipa_mem ipa_mem_local_data_sm6375[] = {
++	{
++		.id		= IPA_MEM_UC_SHARED,
++		.offset		= 0x0000,
++		.size		= 0x0080,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_UC_INFO,
++		.offset		= 0x0080,
++		.size		= 0x0200,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_V4_FILTER_HASHED,
++		.offset		= 0x0288,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_FILTER,
++		.offset		= 0x0308,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_FILTER_HASHED,
++		.offset		= 0x0388,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_FILTER,
++		.offset		= 0x0408,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_ROUTE_HASHED,
++		.offset		= 0x0488,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_ROUTE,
++		.offset		= 0x0508,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_ROUTE_HASHED,
++		.offset		= 0x0588,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_ROUTE,
++		.offset		= 0x0608,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_MODEM_HEADER,
++		.offset		= 0x0688,
++		.size		= 0x0240,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_AP_HEADER,
++		.offset		= 0x08c8,
++		.size		= 0x0200,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_MODEM_PROC_CTX,
++		.offset		= 0x0ad0,
++		.size		= 0x0ac0,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_AP_PROC_CTX,
++		.offset		= 0x1590,
++		.size		= 0x0200,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_NAT_TABLE,
++		.offset		= 0x17a0,
++		.size		= 0x0500,
++		.canary_count	= 4,
++	},
++	{
++		.id		= IPA_MEM_PDN_CONFIG,
++		.offset		= 0x1ca8,
++		.size		= 0x0050,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_STATS_QUOTA_MODEM,
++		.offset		= 0x1d00,
++		.size		= 0x0030,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_STATS_QUOTA_AP,
++		.offset		= 0x1d30,
++		.size		= 0x0048,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_TETHERING,
++		.offset		= 0x1d78,
++		.size		= 0x0238,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_FILTER_ROUTE,
++		.offset		= 0x1fb0,
++		.size		= 0x0800,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_DROP,
++		.offset		= 0x27b0,
++		.size		= 0x0020,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_MODEM,
++		.offset		= 0x27d8,
++		.size		= 0x0800,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_END_MARKER,
++		.offset		= 0x3000,
++		.size		= 0x0000,
++		.canary_count	= 10,
++	},
++};
++
+ /* Memory configuration data for SM6375.
+  *
+  * Same local layout and SMEM size as the other IPA v4.11 SoCs, but the modem
+@@ -378,8 +546,8 @@
+  * ipa_smmu_ap: qcom,additional-mapping = <0x0C123000 0x0C123000 0x2000>).
+  */
+ static const struct ipa_mem_data ipa_mem_data_sm6375 = {
+-	.local_count	= ARRAY_SIZE(ipa_mem_local_data),
+-	.local		= ipa_mem_local_data,
++	.local_count	= ARRAY_SIZE(ipa_mem_local_data_sm6375),
++	.local		= ipa_mem_local_data_sm6375,
+ 	.imem_addr	= 0x0c123000,
+ 	.imem_size	= 0x00002000,
+ 	.smem_size	= 0x00009000,

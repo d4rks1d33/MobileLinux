@@ -1,0 +1,54 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: pin pm6125 L9 at 1.8 V
+
+L9 was declared with the PMIC's whole range, 1504 mV to 2000 mV, and no
+consumer asks for a particular voltage, so the framework settles on the
+bottom of it. Measured on the device with Bluetooth on, which is what pulls
+this rail up:
+
+	l9    1 user   enabled   1504000 uV
+
+Everything on L9 is a 1.8 V load. In this device tree it is the WCN3990's
+vddio. In the vendor tree it is also the WCD937x's cdc-vdd-rxtx and
+cdc-vddpx, the SAR sensor's cap_vdd, and on the boards that declare an NFC
+supply at all, the NFC controller at 1800000 uV. The vendor sets it with
+qcom,init-voltage = <1800000> in holi-regulators-pm6125.dtsi; mainline has
+no such property, so the constraint itself has to say it.
+
+Found while chasing the NFC controller, which does not ACK at 0x27. That
+investigation is not concluded -- the chip still does not answer with the
+rail up and VEN asserted -- but a 1.8 V part sitting on a 1.5 V rail is
+worth correcting whether or not it turns out to be the reason.
+
+Worth noting Bluetooth has been running on this rail at 1504 mV all along.
+It works, so this is not the cause of any known fault, but it is out of
+spec and the warm-reset trouble documented in
+docs/bluetooth-warm-reset-wip/ lived on this same supply.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -738,9 +738,22 @@
+ 			regulator-max-microvolt = <1304000>;
+ 		};
+ 
++		/*
++		 * 1.8 V, not the 1504 mV the bottom of the PMIC's range gives.
++		 *
++		 * Declaring the part's full range and letting the framework pick
++		 * means it picks the minimum, and this rail was measured running
++		 * at 1504 mV with a consumer attached. Everything on it wants
++		 * 1.8: the WCN3990's vddio below, and in the vendor tree the
++		 * WCD937x's cdc-vdd-rxtx and cdc-vddpx, the SAR sensor's cap_vdd
++		 * and -- on the boards that declare it -- the NFC controller.
++		 * The vendor pins it with qcom,init-voltage = <1800000>, which
++		 * mainline has no equivalent for; narrowing the constraint is how
++		 * it is said here.
++		 */
+ 		pm6125_l9: l9 {
+-			regulator-min-microvolt = <1504000>;
+-			regulator-max-microvolt = <2000000>;
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
+ 		};
+ 
+ 		pm6125_l10: l10 {

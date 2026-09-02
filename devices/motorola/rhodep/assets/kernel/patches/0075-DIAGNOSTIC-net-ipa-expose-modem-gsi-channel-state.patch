@@ -1,0 +1,118 @@
+From: rhodep port <none@example.com>
+Date: Mon, 24 Aug 2026 22:10:00 -0300
+Subject: [PATCH] DIAGNOSTIC: net: ipa: expose modem GSI state and mem_offset
+
+Not for source= beyond the investigation it belongs to.
+
+An LTE attach kills this SoC about ten seconds after the modem finishes
+programming its GSI channels, and the interval is constant across runs, so
+something expires. Everything the AP can see has been checked and is clean:
+the data path carries real traffic on GSM, runtime PM is not it, no QMI
+message goes unanswered, no GSI or IPA error interrupt fires, and rmtfs never
+stalls. Whatever is waiting is on the modem's side.
+
+One piece of the modem's state is readable from here. GSI banks its registers
+per execution environment, and mainline only ever addresses its own:
+
+	REG_STRIDE_FIELDS(CH_C_CNTXT_0, ch_c_cntxt_0,
+			  0x0000f000 + 0x4000 * GSI_EE_AP, 0x80);
+
+The modem's bank is one stride further along, and gsi->virt is the raw
+mapping, so its channel contexts are at 0xf000 + 0x4000 * GSI_EE_MODEM +
+0x80 * channel, with CHSTATE in bits 20-23 decoding as the AP's does.
+
+Export them so userspace can sample the file while the attach runs. A modem
+channel sitting in error, or stuck mid-transition, would say where the ten
+seconds go.
+
+Taking a runtime PM reference is not tidiness here: a register read against a
+gated GSI does not come back, and the AP suspends IPA immediately after the
+attach, which is exactly when this is worth reading.
+
+Also export ipa->mem_offset. Every address handed to the modem over QMI is
+built on it, and two sizes were built on it as well until 0079, so whether it
+is zero decides whether that mistake ever mattered.
+---
+--- a/drivers/net/ipa/ipa_sysfs.c
++++ b/drivers/net/ipa/ipa_sysfs.c
+@@ -3,6 +3,8 @@
+ /* Copyright (C) 2021-2024 Linaro Ltd. */
+ 
+ #include <linux/device.h>
++#include <linux/io.h>
++#include <linux/pm_runtime.h>
+ #include <linux/sysfs.h>
+ #include <linux/types.h>
+ 
+@@ -58,8 +60,71 @@
+ 
+ static DEVICE_ATTR_RO(version);
+ 
++/* DIAGNOSTIC: the modem's GSI channel states, one hex digit each.
++ *
++ * GSI banks its registers per execution environment and mainline only ever
++ * addresses its own, so the modem's contexts sit one 0x4000 stride further
++ * along. CHSTATE is bits 20-23 and decodes as the AP's does: 1 allocated,
++ * 2 started, 3 stopped, 4 stopping, 0xf error.
++ */
++#define GSI_CH_C_CNTXT_0_RAW(ee, ch)	(0xf000 + 0x4000 * (ee) + 0x80 * (ch))
++#define GSI_DIAG_CHANNEL_COUNT		16
++
++static ssize_t
++modem_gsi_state_show(struct device *dev, struct device_attribute *attr,
++		     char *buf)
++{
++	struct ipa *ipa = dev_get_drvdata(dev);
++	void __iomem *virt = ipa->gsi.virt;
++	size_t len = 0;
++	u32 ch;
++	int ret;
++
++	/* A read against a gated GSI does not return, and the AP suspends IPA
++	 * right after the attach, which is when this is worth reading.
++	 */
++	ret = pm_runtime_get_sync(dev);
++	if (ret < 0) {
++		pm_runtime_put_noidle(dev);
++		return ret;
++	}
++
++	for (ch = 0; ch < GSI_DIAG_CHANNEL_COUNT; ch++) {
++		u32 val = ioread32(virt +
++				   GSI_CH_C_CNTXT_0_RAW(GSI_EE_MODEM, ch));
++
++		len += sysfs_emit_at(buf, len, "%x", (val >> 20) & 0xf);
++	}
++	len += sysfs_emit_at(buf, len, "\n");
++
++	pm_runtime_put(dev);
++
++	return len;
++}
++
++static DEVICE_ATTR_RO(modem_gsi_state);
++
++/* DIAGNOSTIC: the shared memory base offset the hardware reports.
++ *
++ * Every address handed to the modem over QMI is built on this. Two sizes were
++ * built on it as well until 0079; if this reads zero that mistake was
++ * harmless, and if it does not, the modem was told its statistics regions were
++ * this many bytes larger than they are.
++ */
++static ssize_t
++mem_offset_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct ipa *ipa = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "0x%08x\n", ipa->mem_offset);
++}
++
++static DEVICE_ATTR_RO(mem_offset);
++
+ static struct attribute *ipa_attrs[] = {
+ 	&dev_attr_version.attr,
++	&dev_attr_modem_gsi_state.attr,
++	&dev_attr_mem_offset.attr,
+ 	NULL
+ };
+ 

@@ -1,0 +1,31 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] soc: qcom: pd_mapper: add sm6375
+
+sm6375 is missing from the match table, so qcom_pd_mapper never probes on it
+and nothing provides the service registry. The module loads and then sits
+there: no entry under /sys/bus/platform/drivers/qcom_pd_mapper, nothing in the
+log, no domains advertised.
+
+Firmware on a Motorola Moto G82 5G (SM6375) says what that costs, in its own
+words. Among the strings in the modem image:
+
+	Diag_LSM.c:servreg_get_local_domain() returned null
+
+so the modem's diagnostic subsystem asks for its protection domain, is told
+there is none, and does not start. Which matches what is seen from the other
+side: the modem advertises twelve glink channels and none of them is a diag
+channel, and opening DIAG, DIAG_CNTL or DIAG_DATA from the AP never completes,
+because nothing on the modem owns them.
+
+sm6375 has mpss, adsp and cdsp, the same three as sm6115, so it takes the same
+domain set.
+--- a/drivers/soc/qcom/qcom_pd_mapper.c
++++ b/drivers/soc/qcom/qcom_pd_mapper.c
+@@ -615,6 +615,7 @@
+ 	{ .compatible = "qcom,sm4250", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6115", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6350", .data = sm6350_domains, },
++	{ .compatible = "qcom,sm6375", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm7150", .data = sm7150_domains, },
+ 	{ .compatible = "qcom,sm7225", .data = sm6350_domains, },
+ 	{ .compatible = "qcom,sm7325", .data = sc7280_domains, },

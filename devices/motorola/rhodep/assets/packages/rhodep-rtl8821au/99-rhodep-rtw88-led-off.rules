@@ -1,0 +1,9 @@
+# rhodep: keep the rtw88 adapter's activity LED off.
+#
+# The Archer T2U Nano has a bright blue LED that serves no purpose on a phone
+# and adds heat at the single USB-C port (already warm from OTG VBUS boost). The
+# rtw88 driver exposes it as a standard LED class device named rtw88-<usb>, so
+# switch its trigger to none and brightness to 0 as soon as it appears. The
+# instance name (rtw88-1-1:1.0) depends on the USB port, so match by prefix.
+ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="rtw88-*", \
+	ATTR{trigger}="none", ATTR{brightness}="0"

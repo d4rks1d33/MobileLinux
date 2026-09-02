@@ -1,0 +1,30 @@
+id: chromecast
+version: 1
+device_type: streamer
+vendor: Google
+family: chromecast
+threshold: 60
+matchers:
+  - name: mdns-googlecast
+    type: mdns
+    mdns_type: _googlecast._tcp
+    confidence: 70
+    txt_regex: 'md='
+    extract:
+      md: 'md=([^"]+?)(?:"|$)'
+      fn: 'fn=([^"]+?)(?:"|$)'
+  - name: port-8008
+    type: port
+    port: 8008
+    confidence: 15
+  - name: port-8009
+    type: port
+    port: 8009
+    confidence: 15
+  - name: eureka-endpoint
+    type: http_body
+    path: /setup/eureka_info
+    regex: 'eureka|Google Cast'
+    confidence: 40
+metadata:
+  playbook: chromecast

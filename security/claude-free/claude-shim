@@ -1,0 +1,28 @@
+#!/bin/sh
+# rhodep: shim so `claude` works in a root shell.
+#
+# Claude Code installs into a home directory and updates itself there, so it is
+# on the desktop user's PATH and not on root's. This finds it wherever it lives
+# rather than hardcoding a path that an update could move.
+#
+# Worth being clear about what this means: a root shell is now running a binary
+# that the desktop user can replace. On a single-user machine where that user
+# already has sudo, this grants nothing that was not already available - but on a
+# machine with other users, do not install this.
+set -u
+
+for candidate in \
+	"$HOME/.local/bin/claude" \
+	"$HOME/.claude/local/claude" \
+	"$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6)/.local/bin/claude" \
+	"$(getent passwd 1000 2>/dev/null | cut -d: -f6)/.local/bin/claude" \
+	"$(getent passwd 1000 2>/dev/null | cut -d: -f6)/.claude/local/claude"
+do
+	case "$candidate" in
+	/.local/bin/claude|/.claude/local/claude) continue ;;   # empty home
+	esac
+	[ -x "$candidate" ] && exec "$candidate" "$@"
+done
+
+echo "claude: not installed in any home directory this could find" >&2
+exit 127

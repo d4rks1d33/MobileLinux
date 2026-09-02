@@ -1,0 +1,7 @@
+id: claude-free
+kind: convenience
+layer: generic
+summary: Claude Code over any opencode-configured model provider
+install: install.sh
+depends:
+  apt: [nodejs, npm, python3]

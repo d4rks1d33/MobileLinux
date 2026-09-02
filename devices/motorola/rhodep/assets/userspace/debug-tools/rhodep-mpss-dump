@@ -1,0 +1,90 @@
+#!/usr/bin/python3
+"""Dump the modem's DDR carveout as it was left by the previous boot.
+
+Why this can work at all. DDR survives the silent reset -- the firmware
+regions came back byte for byte identical across one -- and the only thing
+that overwrites the modem's 256 MB carveout is the application processor
+loading modem.mdt into it, at about twelve seconds into the next boot. Stop
+that from happening and the carveout still holds whatever the modem had in it
+at the instant the SoC went down: its heap, its stacks, and its internal F3
+log buffer.
+
+So this runs before qcom_q6v5_pas is allowed to load, copies the region out,
+and only then loads the driver -- which is also what brings WiFi back, since
+the WLAN protection domain lives inside the modem. The modprobe is in a
+finally: losing it would leave the phone with no network and no way in.
+"""
+import mmap, os, subprocess, sys, time
+
+BASE, SIZE = 0x8b800000, 0x10000000        # pil-mpss-wlan@8b800000
+OUT_DIR = "/root/mpss-dumps"
+CHUNK = 16 << 20
+
+
+def log(msg):
+    print(msg, flush=True)
+    try:
+        with open("/dev/kmsg", "w") as k:
+            k.write("mpss-dump: %s\n" % msg)
+    except Exception:
+        pass
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    reason = "unknown"
+    try:
+        with open("/proc/cmdline") as f:
+            for tok in f.read().split():
+                if tok.startswith("androidboot.bootreason="):
+                    reason = tok.split("=", 1)[1]
+    except Exception:
+        pass
+    name = "%s/mpss-%s-%s.bin" % (OUT_DIR, time.strftime("%Y%m%d-%H%M%S"), reason)
+
+    log("dumping 0x%08x+0x%x to %s (bootreason=%s)" % (BASE, SIZE, name, reason))
+    fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+    out = open(name, "wb")
+    nonzero = 0
+    try:
+        for off in range(0, SIZE, CHUNK):
+            m = mmap.mmap(fd, CHUNK, mmap.MAP_SHARED, mmap.PROT_READ, offset=BASE + off)
+            data = m[:]
+            m.close()
+            out.write(data)
+            nonzero += sum(1 for b in data[::4096] if b)
+    finally:
+        out.close()
+        os.close(fd)
+        os.system("sync")
+    log("dump complete, %d of %d sampled pages non-zero" % (nonzero, SIZE // 4096))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log("FAILED: %s" % e)
+    finally:
+        # Always bring the modem back: WiFi depends on it and it is the only
+        # way back into this phone.
+        for f in ("/etc/modprobe.d/rhodep-nomodem.conf",):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+        subprocess.call(["/sbin/modprobe", "qcom_q6v5_pas"])
+
+        # ...and then make ath10k try again. Loading the modem is not enough:
+        # ath10k_snoc probes early, the WLAN protection domain lives inside the
+        # modem, and having failed once it never retries. Two boots were spent
+        # discovering that the phone comes up with no network at all, which on
+        # a device reached over WiFi means no way back in. Give the modem a
+        # moment to publish its services, then reload the driver.
+        time.sleep(20)
+        subprocess.call(["/sbin/modprobe", "-r", "ath10k_snoc"])
+        time.sleep(2)
+        subprocess.call(["/sbin/modprobe", "ath10k_snoc"])
+
+        subprocess.call(["/bin/systemctl", "disable", "rhodep-mpss-dump.service"])
+        log("modem driver loaded, ath10k reloaded, one-shot disarmed")

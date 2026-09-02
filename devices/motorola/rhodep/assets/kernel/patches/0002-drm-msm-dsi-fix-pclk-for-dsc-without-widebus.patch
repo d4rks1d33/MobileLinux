@@ -1,0 +1,116 @@
+From: d4rks1d3 <teogorqui1@hotmail.es>
+Date: Mon, 3 Aug 2026 00:00:00 +0000
+Subject: [PATCH] drm/msm/dsi: fix pixel clock for DSC panels without widebus
+
+dsi_adjust_pclk_for_compression() sizes the pixel clock assuming the
+interface consumes bits_per_component * 3 bits per pclk cycle, but
+dsi_timing_setup() programs the stream using bits_per_pclk, which is 24
+whenever widebus is unavailable:
+
+	if (wide_bus_enabled) {
+		if (msm_host->mode_flags & MIPI_DSI_MODE_VIDEO)
+			bits_per_pclk = dsc->bits_per_component * 3;
+		else
+			bits_per_pclk = 48;
+	} else {
+		bits_per_pclk = 24;
+	}
+	hdisplay = DIV_ROUND_UP(msm_dsc_get_bytes_per_line(dsc) * 8,
+				bits_per_pclk);
+
+For 8 bpc panels both expressions evaluate to 24 and the mismatch is
+invisible, which is why every DSC panel currently in tree works. On a
+10 bpc panel without widebus the clock ends up provisioned for 288 pclk
+cycles per line while the controller is told the line is 360 cycles long,
+i.e. 20% too slow, and the transfer cannot keep up.
+
+The only 10 bpc DSC panel in tree (visionox,rm692e5) sits on SM7325, whose
+DSI controller is >= 6G v2.5.0, so widebus is enabled and both sides take
+the 48 bits per pclk branch. SM6375 has a 6G v2.4 controller, which leaves
+10 bpc + DSC + no widebus as the one uncovered combination.
+
+Use the same bits per pclk model in both places.
+
+Signed-off-by: d4rks1d3 <teogorqui1@hotmail.es>
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -586,11 +586,13 @@
+  *  transfer time and data overhead as a starting point of the calculations.
+  */
+ static unsigned long
+-dsi_adjust_pclk_for_compression(const struct drm_display_mode *mode,
++dsi_adjust_pclk_for_compression(struct msm_dsi_host *msm_host,
++				const struct drm_display_mode *mode,
+ 				const struct drm_dsc_config *dsc,
+ 				bool is_bonded_dsi)
+ {
+ 	int hdisplay, new_hdisplay, new_htotal;
++	u32 bits_per_pclk;
+ 
+ 	/*
+ 	 * For bonded DSI, split hdisplay across two links and round up each
+@@ -602,8 +604,25 @@
+ 	if (is_bonded_dsi)
+ 		hdisplay /= 2;
+ 
++	/*
++	 * The number of pclk cycles the interface actually consumes per line
++	 * must match what dsi_timing_setup() programs, otherwise the pixel
++	 * clock ends up too slow and the transfer never completes (frame done
++	 * timeouts). Without widebus the DSI moves 24 bits per pclk regardless
++	 * of bits_per_component, so using bits_per_component * 3 here
++	 * under-clocks 10bpc panels by 20%.
++	 */
++	if (msm_dsi_host_is_wide_bus_enabled(&msm_host->base)) {
++		if (msm_host->mode_flags & MIPI_DSI_MODE_VIDEO)
++			bits_per_pclk = dsc->bits_per_component * 3;
++		else
++			bits_per_pclk = 48;
++	} else {
++		bits_per_pclk = 24;
++	}
++
+ 	new_hdisplay = DIV_ROUND_UP(hdisplay * drm_dsc_get_bpp_int(dsc),
+-				    dsc->bits_per_component * 3);
++				    bits_per_pclk);
+ 
+ 	if (is_bonded_dsi)
+ 		new_hdisplay *= 2;
+@@ -613,7 +632,8 @@
+ 	return mult_frac(mode->clock * 1000u, new_htotal, mode->htotal);
+ }
+ 
+-static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
++static unsigned long dsi_get_pclk_rate(struct msm_dsi_host *msm_host,
++		const struct drm_display_mode *mode,
+ 		const struct drm_dsc_config *dsc, bool is_bonded_dsi)
+ {
+ 	unsigned long pclk_rate;
+@@ -621,7 +641,7 @@
+ 	pclk_rate = mode->clock * 1000u;
+ 
+ 	if (dsc)
+-		pclk_rate = dsi_adjust_pclk_for_compression(mode, dsc, is_bonded_dsi);
++		pclk_rate = dsi_adjust_pclk_for_compression(msm_host, mode, dsc, is_bonded_dsi);
+ 
+ 	/*
+ 	 * For bonded DSI mode, the current DRM mode has the complete width of the
+@@ -641,7 +661,7 @@
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	u8 lanes = msm_host->lanes;
+ 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
++	unsigned long pclk_rate = dsi_get_pclk_rate(msm_host, mode, msm_host->dsc, is_bonded_dsi);
+ 	unsigned long pclk_bpp;
+ 
+ 	if (lanes == 0) {
+@@ -660,7 +680,7 @@
+ 
+ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+ {
+-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
++	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host, msm_host->mode, msm_host->dsc, is_bonded_dsi);
+ 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
+ 							msm_host->mode);
+ 

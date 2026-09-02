@@ -1,0 +1,14 @@
+[Unit]
+Description=Backstop for the apt hold enforcer
+Documentation=file:/usr/share/doc/rhodep-apt/README
+
+# The enforcer already runs at boot and after every apt transaction. This is
+# only for the case where something changes the holds without going through
+# apt at all.
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

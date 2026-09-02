@@ -1,0 +1,28 @@
+id: synology
+version: 1
+device_type: nas
+vendor: Synology
+family: synology
+threshold: 60
+matchers:
+  - name: port-5000
+    type: port
+    port: 5000
+    confidence: 30
+  - name: port-5001
+    type: port
+    port: 5001
+    confidence: 20
+  - name: http-title
+    type: http_body
+    path: /
+    regex: 'Synology|DiskStation'
+    confidence: 60
+  - name: http-webman
+    type: http_body
+    path: /webman/index.cgi
+    regex: 'DSM|Synology'
+    confidence: 70
+metadata:
+  playbook: synology
+  known_cves: ["CVE-2024-10442", "CVE-2023-2729"]

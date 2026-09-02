@@ -1,0 +1,7 @@
+id: plasma
+name: Plasma Mobile
+compositor: kwin_wayland
+toolkit: qt
+session: plasma-mobile
+packages:
+  apt: [plasma-mobile, plasma-nano, kwin-wayland]

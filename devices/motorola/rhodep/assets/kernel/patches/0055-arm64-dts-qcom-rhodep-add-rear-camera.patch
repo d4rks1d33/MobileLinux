@@ -1,0 +1,113 @@
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -1534,6 +1534,39 @@
+ };
+ 
+ &tlmm {
++	/*
++	 * CCI0 has two masters and each one has its own pin pair:
++	 * master 0 on gpio39/40 and master 1 on gpio41/42 (vendor
++	 * blair-pinctrl.dtsi, cci0_active and cci1_active). Declaring only
++	 * one pair leaves the other master electrically dead, which shows up
++	 * as "master 1 queue 0 timeout" and a sensor that never ACKs.
++	 */
++	cci0_default: cci0-default-state {
++		pins = "gpio39", "gpio40", "gpio41", "gpio42";
++		function = "cci_i2c";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_rear_default: cam-rear-default-state {
++		mclk-pins {
++			pins = "gpio30";
++			function = "cam_mclk";
++			/* 2 mA, matching the vendor pinctrl. A stronger drive on a
++			 * 24 MHz clock is a plausible source of coupling onto the
++			 * neighbouring CCI lines. */
++			drive-strength = <2>;
++			bias-disable;
++		};
++
++		reset-pins {
++			pins = "gpio35";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
+ 	cam_pmic_en_default: cam-pmic-en-default-state {
+ 		pins = "gpio33";
+ 		function = "gpio";
+@@ -1548,3 +1581,69 @@
+ 		bias-pull-up;
+ 	};
+ };
++
++/*
++ * Rear main camera: Samsung S5KJN1 (50 MP), on CCI0 master 1, CSIPHY0.
++ * Wiring from the vendor overlay (blair-camera-sensor-mot-rhodep-overlay.dtsi):
++ * MCLK1 on gpio30, reset on gpio35, and the three rails off the FAN53870.
++ */
++&cci0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&cci0_default>;
++	status = "okay";
++};
++
++&cci0_i2c1 {
++	/*
++	 * Address, register width and chip id all come out of Qualcomm's own
++	 * sensor configuration blob for this board, read off the stock ROM
++	 * (vendor/lib64/camera/com.qti.sensormodule.mot_rhodep_s5kjn1_sunny.bin):
++	 *
++	 *   addr 0xac (8-bit) = 0x56 7-bit, regType 2, dataType 2,
++	 *   reg 0x0000, expected id 0x38e1
++	 *
++	 * The blob also identifies the module vendor by reading register 0x0d of
++	 * the EEPROM at 0xa0/0x50: this board answers 0x5355 ("SU", Sunny), not
++	 * 0x5154 ("QT", Qtech), which is how the right blob was picked.
++	 *
++	 * Note this is NOT the 0x10 the Fairphone FP5 uses for the same part.
++	 */
++	camera_rear: camera@56 {
++		compatible = "samsung,s5kjn1";
++		reg = <0x56>;
++
++		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
++		assigned-clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
++		assigned-clock-rates = <24000000>;
++
++		vdda-supply = <&cam_vana>;
++		vddd-supply = <&cam_vdig>;
++		vddio-supply = <&cam_vio>;
++
++		reset-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_rear_default>;
++
++		port {
++			camera_rear_ep: endpoint {
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <700000000>;
++				remote-endpoint = <&csiphy0_ep>;
++			};
++		};
++	};
++};
++
++&camss {
++	status = "okay";
++
++	ports {
++		port@0 {
++			reg = <0>;
++			csiphy0_ep: endpoint {
++				data-lanes = <0 1 2 3>;
++				remote-endpoint = <&camera_rear_ep>;
++			};
++		};
++	};
++};

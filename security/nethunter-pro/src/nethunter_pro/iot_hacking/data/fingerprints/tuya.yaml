@@ -1,0 +1,22 @@
+id: tuya
+version: 1
+device_type: smart_plug
+vendor: Tuya (many brands)
+family: tuya
+threshold: 60
+matchers:
+  - name: udp-6666-tuya
+    type: udp_reply
+    port: 6666
+    body_regex: 'gwId|productKey'
+    confidence: 85
+    extract:
+      gwId: '"gwId":"([^"]+)"'
+      productKey: '"productKey":"([^"]+)"'
+      version: '"version":"([^"]+)"'
+  - name: port-6668
+    type: port
+    port: 6668
+    confidence: 30
+metadata:
+  playbook: tuya

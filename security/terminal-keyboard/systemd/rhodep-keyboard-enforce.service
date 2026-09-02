@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore the terminal keyboard settings that cannot be made immutable
+Documentation=file:///usr/local/share/rhodep/keyboard/README.md
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-keyboard-enforce
+# Never hold up a boot over a keyboard setting.
+TimeoutStartSec=60
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Installed as /usr/lib/systemd/system-sleep/rhodep-adsp
+#
+# Keep the ADSP alive across a suspend.
+#
+# The sensors protection domain inside the ADSP reads its registry from the
+# application processor over FastRPC, and the AP side of that is the listener
+# daemon rhodep-sscrpcd. A suspend freezes all of userspace, the listener stops
+# answering, and the sensors PD gives up and asserts:
+#
+#	qcom_q6v5_pas a400000.remoteproc: fatal error received:
+#	  err_qdi.c:1045:EX:sensor_process:0x1:frpc_dsp:0xc4:PC=0xb203dab0
+#	remoteproc remoteproc1: crash detected in adsp: type fatal error
+#
+# A sensors-PD assertion is fatal to the *whole* ADSP: it restarts, and it
+# takes audio with it. Worse, until kernel patch 0059 the restart also oopsed
+# the kernel inside __clk_register(), which holds the global clk prepare_lock,
+# so every clk_prepare_enable() on the system deadlocked afterwards and the
+# display could never be turned back on.
+#
+# Stopping the listener before the freeze avoids the assert entirely: measured
+# on the device, stopping it while awake does not disturb the ADSP, and a
+# 120-second suspend/resume with this hook in place leaves the sound card, the
+# sensors and the display all intact.
+#
+# Do not "fix" this by making the listener unfreezable; that needs kernel
+# support and it would still have to answer the DSP while the AP is asleep.
+
+case "$1" in
+pre)
+	systemctl stop rhodep-sscrpcd 2>/dev/null
+	;;
+post)
+	# --no-block on purpose: rhodep-sscrpcd's ExecStartPost waits up to 45 s
+	# for the sensor core to report real sensors, and blocking the resume on
+	# that would show up as a phone that takes a minute to wake.
+	systemctl --no-block start rhodep-sscrpcd 2>/dev/null
+	;;
+esac
+
+exit 0

@@ -1,0 +1,8 @@
+id: lomiri
+name: Lomiri (UBports)
+compositor: mir
+toolkit: qt
+session: lomiri
+packages:
+  apt: [lomiri, lomiri-session]
+status: planned

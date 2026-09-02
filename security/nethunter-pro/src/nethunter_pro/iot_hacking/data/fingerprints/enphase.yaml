@@ -1,0 +1,19 @@
+id: enphase-envoy
+version: 1
+device_type: solar
+vendor: Enphase
+family: enphase
+threshold: 60
+matchers:
+  - name: http-production
+    type: http_body
+    path: /production.json
+    regex: '"production":|"consumption":|"storage":'
+    confidence: 90
+  - name: http-info
+    type: http_body
+    path: /info.xml
+    regex: 'Envoy|<part_num>'
+    confidence: 80
+metadata:
+  playbook: enphase

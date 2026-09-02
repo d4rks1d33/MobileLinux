@@ -1,0 +1,36 @@
+id: phone-android
+version: 1
+device_type: phone
+vendor: Android
+family: android-phone
+threshold: 40
+matchers:
+  - name: nmap-os-android
+    type: nmap_os
+    os_regex: 'Android|Google Android'
+    confidence: 75
+  - name: mdns-google-nearby
+    type: mdns
+    mdns_type: _nearbysharing._tcp
+    confidence: 40
+  # Common OUIs for phone hardware vendors -- Motorola / Xiaomi /
+  # OnePlus / Google Pixel / Huawei Mate. A single OUI hit is a
+  # weak signal on its own (below the threshold), but combined with
+  # e.g. a locally-administered address it's often enough to guess
+  # "this is a phone".
+  - name: oui-motorola
+    type: mac_oui
+    values: ["50:2F:BB", "5C:51:88", "A4:70:D6", "F0:D7:AA",
+             "D0:53:49", "B4:79:A7", "80:6C:1B"]
+    confidence: 40
+  - name: oui-xiaomi
+    type: mac_oui
+    values: ["3C:BD:3E", "50:8F:4C", "D4:37:D7", "8C:BE:BE",
+             "F8:1A:67", "68:DF:DD", "AC:C1:EE", "F0:B4:29"]
+    confidence: 40
+  - name: oui-google-pixel
+    type: mac_oui
+    values: ["3C:5A:B4", "A4:77:33", "F4:F5:D8", "F4:F5:E8",
+             "40:4E:36"]
+    confidence: 40
+metadata: {}

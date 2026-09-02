@@ -1,0 +1,15 @@
+[Unit]
+Description=Open the modem's primary GW provisioning session
+Documentation=file:/usr/share/doc/rhodep-modem/README.md
+After=rmtfs.service tqftpserv.service pd-mapper.service
+Wants=rmtfs.service tqftpserv.service
+Before=ModemManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-uim-provision
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

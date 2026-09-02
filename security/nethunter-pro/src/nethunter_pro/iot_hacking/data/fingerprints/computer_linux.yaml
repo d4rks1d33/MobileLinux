@@ -1,0 +1,18 @@
+id: computer-linux
+version: 1
+device_type: computer
+vendor: Linux
+family: linux-pc
+threshold: 60
+matchers:
+  - name: nmap-os-linux
+    type: nmap_os
+    os_regex: 'Linux'
+    confidence: 70
+    extract:
+      kernel: 'Linux ([0-9.]+)'
+  - name: port-22-ssh
+    type: port
+    port: 22
+    confidence: 20
+metadata: {}

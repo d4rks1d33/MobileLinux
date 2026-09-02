@@ -1,0 +1,282 @@
+diff --git a/inc/rhodep_trace.h b/inc/rhodep_trace.h
+new file mode 100644
+index 0000000..289b0ff
+--- /dev/null
++++ b/inc/rhodep_trace.h
+@@ -0,0 +1,69 @@
++/* rhodep: trace every apps_std request coming from the DSP.
++ *
++ * The DSP's own file requests are the only log there is of what the sensor
++ * framework wants -- the same lesson the modem taught this port: before
++ * theorising, read what it is asking for.  A missing file is answered with a
++ * plain error and the DSP does not complain, it just asserts several steps
++ * later somewhere unrelated.
++ *
++ * Off unless RHODEP_FASTRPC_TRACE names a file, because on a healthy boot this
++ * is ~2700 lines of registry reads that nobody needs.  To turn it on:
++ *
++ *   systemctl edit rhodep-sscrpcd
++ *     [Service]
++ *     Environment=RHODEP_FASTRPC_TRACE=/var/log/rhodep-fastrpc-trace.log
++ *
++ * Writes straight to the file and flushes every line, deliberately: the thing
++ * being debugged tends to end in an ADSP crash, and a buffered log loses
++ * exactly the last few lines that matter.
++ */
++#ifndef RHODEP_TRACE_H
++#define RHODEP_TRACE_H
++
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++
++static inline void rhodep_trace(const char *fmt, ...) {
++  static FILE *tf;
++  static int tried;
++  static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
++  va_list ap;
++  struct timespec ts;
++
++  pthread_mutex_lock(&lk);
++  if (!tf) {
++    const char *path;
++
++    if (tried) {
++      pthread_mutex_unlock(&lk);
++      return;
++    }
++    tried = 1;
++    path = getenv("RHODEP_FASTRPC_TRACE");
++    if (!path || !*path) {
++      pthread_mutex_unlock(&lk);
++      return;
++    }
++    tf = fopen(path, "ae");
++    if (!tf) {
++      pthread_mutex_unlock(&lk);
++      return;
++    }
++  }
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  fprintf(tf, "[%5ld.%03ld] ", (long)ts.tv_sec, ts.tv_nsec / 1000000);
++  va_start(ap, fmt);
++  vfprintf(tf, fmt, ap);
++  va_end(ap);
++  fputc('\n', tf);
++  fflush(tf);
++  pthread_mutex_unlock(&lk);
++}
++
++#define RTRACE(...) rhodep_trace(__VA_ARGS__)
++#define RSTR(s) ((s) ? (s) : "(null)")
++
++#endif /* RHODEP_TRACE_H */
+diff --git a/src/Makefile.am b/src/Makefile.am
+index eb80b93..ec9422e 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -113,7 +113,12 @@ libsdsp_default_listener_la_DEPENDENCIES = libsdsprpc.la
+ libsdsp_default_listener_la_LDFLAGS = libsdsprpc.la -shared -module $(USE_LOG) -version-number @LT_VERSION_NUMBER@ $(LIBDSPRPC_LDFLAGS)
+ libsdsp_default_listener_la_CFLAGS = $(SDSP_CFLAGS) -DUSE_SYSLOG
+ 
+-sbin_PROGRAMS = adsprpcd cdsprpcd sdsprpcd gdsprpcd
++sbin_PROGRAMS = adsprpcd cdsprpcd sdsprpcd gdsprpcd rhodep-sscrpcd
++
++rhodep_sscrpcd_SOURCES = rhodep_sscrpcd.c
++rhodep_sscrpcd_DEPENDENCIES = libadsp_default_listener.la
++rhodep_sscrpcd_CFLAGS = -I$(top_srcdir)/inc
++rhodep_sscrpcd_LDADD = -ldl
+ 
+ adsprpcddir = $(libdir)
+ adsprpcd_SOURCES = dsprpcd.c
+diff --git a/src/apps_std_imp.c b/src/apps_std_imp.c
+index ba047aa..b43140f 100644
+--- a/src/apps_std_imp.c
++++ b/src/apps_std_imp.c
+@@ -38,6 +38,7 @@
+ #include "remote.h"
+ #include "rpcmem_internal.h"
+ #include "verify.h"
++#include "rhodep_trace.h"
+ #include <dirent.h>
+ #include <limits.h>
+ #include <dlfcn.h>
+@@ -273,6 +274,7 @@ static void apps_std_FILE_set_buffer_stream(struct apps_std_info *sinfo,
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_fopen)(const char *name, const char *mode,
+                             apps_std_FILE *psout) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("fopen(\"%s\", \"%s\")", RSTR(name), RSTR(mode));
+   int nErr = AEE_SUCCESS;
+   FILE *stream = NULL;
+   uint64_t tdiff = 0;
+@@ -307,6 +309,7 @@ bail:
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_fopen_fd)(const char *name, const char *mode, int *fd,
+                                int *len) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("fopen_fd(\"%s\", \"%s\")", RSTR(name), RSTR(mode));
+   int nErr = AEE_SUCCESS;
+   struct stat statbuf;
+   void *source = NULL;
+@@ -388,6 +391,7 @@ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_freopen)(apps_std_FILE sin, const char *name,
+                               const char *mode,
+                               apps_std_FILE *psout) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("freopen(\"%s\")", RSTR(name));
+   int nErr = AEE_SUCCESS;
+   struct apps_std_info *sinfo = 0;
+   FILE *stream;
+@@ -874,6 +878,7 @@ __QAIC_IMPL(apps_std_print_string)(const char *str) __QAIC_IMPL_ATTRIBUTE {
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_getenv)(const char *name, char *val, int valLen,
+                              int *valLenReq) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("getenv(\"%s\")", RSTR(name));
+   int nErr = AEE_SUCCESS;
+   errno = 0;
+   char *vv = getenv(name);
+@@ -891,6 +896,7 @@ __QAIC_IMPL(apps_std_getenv)(const char *name, char *val, int valLen,
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_setenv)(const char *name, const char *val,
+                              int override) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("setenv(\"%s\", \"%s\")", RSTR(name), RSTR(val));
+   int nErr = AEE_SUCCESS;
+   errno = 0;
+ #ifdef _WIN32
+@@ -1088,6 +1094,7 @@ bail:
+ __QAIC_IMPL_EXPORT int __QAIC_IMPL(apps_std_fopen_with_env)(
+     const char *envvarname, const char *delim, const char *name,
+     const char *mode, apps_std_FILE *psout) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("fopen_with_env(env=\"%s\", \"%s\", \"%s\")", RSTR(envvarname), RSTR(name), RSTR(mode));
+ 
+   int nErr = AEE_SUCCESS;
+   char *dirListBuf = NULL;
+@@ -1145,6 +1152,7 @@ bail:
+ __QAIC_IMPL_EXPORT int __QAIC_IMPL(apps_std_fopen_with_env_fd)(
+     const char *envvarname, const char *delim, const char *name,
+     const char *mode, int *fd, int *len) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("fopen_with_env_fd(env=\"%s\", \"%s\", \"%s\")", RSTR(envvarname), RSTR(name), RSTR(mode));
+ 
+   int nErr = ENOENT, err = ENOENT;
+   char *dirName = NULL;
+@@ -1297,6 +1305,7 @@ bail:
+ __QAIC_HEADER_EXPORT int __QAIC_IMPL(apps_std_get_search_paths_with_env)(
+     const char *envvarname, const char *delim, _cstring1_t *paths, int pathsLen,
+     uint32_t *numPaths, uint16_t *maxPathLen) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("get_search_paths_with_env(env=\"%s\")", RSTR(envvarname));
+ 
+   char *path = NULL;
+   char *pathDomain = NULL;
+@@ -1406,6 +1415,7 @@ bail:
+ __QAIC_HEADER_EXPORT int
+ __QAIC_HEADER(apps_std_fileExists)(const char *path,
+                                    bool *exists) __QAIC_HEADER_ATTRIBUTE {
++  RTRACE("fileExists(\"%s\")", RSTR(path));
+   int nErr = AEE_SUCCESS, err = 0;
+   struct stat buffer;
+ 
+@@ -1449,6 +1459,7 @@ bail:
+ 
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_fremove)(const char *name) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("fremove(\"%s\")", RSTR(name));
+   int nErr = AEE_SUCCESS;
+ 
+   if (NULL == name) {
+@@ -1549,6 +1560,7 @@ bail:
+ __QAIC_IMPL_EXPORT int
+ __QAIC_HEADER(apps_std_opendir)(const char *name,
+                                 apps_std_DIR *dir) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("opendir(\"%s\")", RSTR(name));
+   int nErr = 0;
+   DIR *odir;
+   struct apps_std_dir_info *dirinfo = 0;
+@@ -1648,6 +1660,7 @@ bail:
+ 
+ __QAIC_IMPL_EXPORT int __QAIC_HEADER(apps_std_mkdir)(const char *name, int mode)
+     __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("mkdir(\"%s\", 0%o)", RSTR(name), (unsigned)mode);
+   int nErr = AEE_SUCCESS;
+   uint64_t tdiff = 0;
+ 
+@@ -1671,6 +1684,7 @@ __QAIC_IMPL_EXPORT int __QAIC_HEADER(apps_std_mkdir)(const char *name, int mode)
+ 
+ __QAIC_IMPL_EXPORT int
+ __QAIC_HEADER(apps_std_rmdir)(const char *name) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("rmdir(\"%s\")", RSTR(name));
+   int nErr = AEE_SUCCESS;
+ 
+   if (NULL == name) {
+@@ -1690,6 +1704,7 @@ __QAIC_HEADER(apps_std_rmdir)(const char *name) __QAIC_IMPL_ATTRIBUTE {
+ __QAIC_IMPL_EXPORT int
+ __QAIC_HEADER(apps_std_stat)(const char *name,
+                              apps_std_STAT *ist) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("stat(\"%s\")", RSTR(name));
+   int nErr = AEE_SUCCESS, nOpenErr = AEE_SUCCESS, fd = -1;
+   apps_std_FILE ps;
+   struct apps_std_info *sinfo = 0;
+@@ -1767,6 +1782,7 @@ bail:
+ __QAIC_IMPL_EXPORT int
+ __QAIC_IMPL(apps_std_frename)(const char *oldname,
+                               const char *newname) __QAIC_IMPL_ATTRIBUTE {
++  RTRACE("frename(\"%s\", \"%s\")", RSTR(oldname), RSTR(newname));
+   int nErr = AEE_SUCCESS;
+ 
+   if (NULL == oldname || NULL == newname)
+diff --git a/src/rhodep_sscrpcd.c b/src/rhodep_sscrpcd.c
+new file mode 100644
+index 0000000..57d0fc5
+--- /dev/null
++++ b/src/rhodep_sscrpcd.c
+@@ -0,0 +1,51 @@
++// rhodep: single-shot FastRPC listener daemon for the ADSP sensors PD.
++// SPDX-License-Identifier: BSD-3-Clause
++//
++// This is dsprpcd.c without the restart loop.  The stock daemon retries every
++// 100 ms forever, and on this port a failure inside the sensors PD is a fatal
++// error that restarts the whole ADSP -- so a retry loop turns one crash into a
++// reboot storm that takes audio with it.  Here a failure is a failure.
++//
++//   rhodep-sscrpcd [pdname]      default: sensorspd
++
++#include <dlfcn.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++typedef int (*listener_start_t)(int argc, char *argv[]);
++
++int main(int argc, char *argv[]) {
++  const char *pd = (argc > 1) ? argv[1] : "sensorspd";
++  char *av[3];
++  listener_start_t start;
++  void *h;
++  int rc;
++
++  h = dlopen("libadsp_default_listener.so.1", RTLD_NOW);
++  if (!h)
++    h = dlopen("libadsp_default_listener.so", RTLD_NOW);
++  if (!h) {
++    fprintf(stderr, "rhodep-sscrpcd: dlopen failed: %s\n", dlerror());
++    return 1;
++  }
++
++  start = (listener_start_t)dlsym(h, "adsp_default_listener_start");
++  if (!start) {
++    fprintf(stderr, "rhodep-sscrpcd: dlsym failed: %s\n", dlerror());
++    return 1;
++  }
++
++  av[0] = argv[0];
++  av[1] = (char *)pd;
++  av[2] = NULL;
++
++  fprintf(stderr, "rhodep-sscrpcd: starting listener for '%s'\n", pd);
++  fflush(stderr);
++
++  rc = start(2, av);
++
++  fprintf(stderr, "rhodep-sscrpcd: listener exited rc=%d (0x%x)\n", rc, rc);
++  return rc ? 1 : 0;
++}

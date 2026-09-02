@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The pwnagotchi face for the Pwnagotchi module: two eyes and a mouth, the
+     (^__^) look. Single-colour, 16x16, symbolic so it recolours with the theme
+     like every other module icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- left eye -->
+  <path d="M 3.2,5.4 4.9,7 3.2,8.6 2.5,7.9 3.5,7 2.5,6.1 Z"/>
+  <!-- right eye -->
+  <path d="M 12.8,5.4 11.1,7 12.8,8.6 13.5,7.9 12.5,7 13.5,6.1 Z"/>
+  <!-- mouth: a small open rounded rectangle -->
+  <path d="M 6,10 h 4 c 0.55,0 1,0.45 1,1 0,0.55 -0.45,1 -1,1 H 6 C 5.45,12 5,11.55 5,11 5,10.45 5.45,10 6,10 Z m 0.4,0.8 c -0.11,0 -0.2,0.09 -0.2,0.2 0,0.11 0.09,0.2 0.2,0.2 h 3.2 c 0.11,0 0.2,-0.09 0.2,-0.2 0,-0.11 -0.09,-0.2 -0.2,-0.2 z"/>
+</svg>

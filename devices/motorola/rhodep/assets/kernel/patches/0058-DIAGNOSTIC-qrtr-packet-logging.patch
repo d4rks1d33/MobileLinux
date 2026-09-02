@@ -1,0 +1,67 @@
+From: rhodep port <none@example.com>
+Date: Wed, 20 Aug 2026 03:40:00 -0300
+Subject: [PATCH] DIAGNOSTIC: log qrtr packets, senders and payload heads
+
+Temporary instrumentation, to be dropped once sensors are understood.
+
+The first version of this proved the sensor core does send indications:
+a 32 byte response followed by a 71 byte indication. What it also showed
+is that those go to some other client's port, once a second, while our
+own port only ever gets the 32 byte response. So something on this system
+is already talking to the sensor core correctly and we are not.
+
+This extends it to answer who and how: log the sending process on TX
+along with the head of the payload, and include the payload head on RX
+too so the indication can be read straight out of dmesg without having
+to receive it.
+--- a/net/qrtr/af_qrtr.c
++++ b/net/qrtr/af_qrtr.c
+@@ -524,14 +524,31 @@
+ 		qrtr_tx_resume(node, skb);
+ 	} else {
+ 		ipc = qrtr_port_lookup(cb->dst_port);
+-		if (!ipc)
++		if (!ipc) {
++			pr_info("qrtr-dbg: DROP no port: %d:%d -> %d:%d type %d size %zu\n",
++				cb->src_node, cb->src_port,
++				cb->dst_node, cb->dst_port, cb->type, size);
+ 			goto err;
++		}
+ 
+ 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
++			pr_info("qrtr-dbg: DROP queue full: %d:%d -> %d:%d type %d size %zu\n",
++				cb->src_node, cb->src_port,
++				cb->dst_node, cb->dst_port, cb->type, size);
+ 			qrtr_port_put(ipc);
+ 			goto err;
+ 		}
+ 
++		{
++			u8 h[96];
++			size_t n = min_t(size_t, size, sizeof(h));
++
++			skb_copy_bits(skb, 0, h, n);
++			pr_info("qrtr-dbg: RX %d:%d -> %d:%d type %d size %zu head %*ph\n",
++				cb->src_node, cb->src_port,
++				cb->dst_node, cb->dst_port, cb->type, size,
++				(int)n, h);
++		}
+ 		qrtr_port_put(ipc);
+ 	}
+ 
+@@ -984,6 +1001,15 @@
+ 	}
+ 
+ 	type = le32_to_cpu(qrtr_type);
++	if (addr->sq_node != ipc->us.sq_node) {
++		u8 h[96];
++		size_t n = min_t(size_t, len, sizeof(h));
++
++		skb_copy_bits(skb, 0, h, n);
++		pr_info("qrtr-dbg: TX [%s] %d:%d -> %d:%d len %zu head %*ph\n",
++			current->comm, ipc->us.sq_node, ipc->us.sq_port,
++			addr->sq_node, addr->sq_port, len, (int)n, h);
++	}
+ 	rc = enqueue_fn(node, skb, type, &ipc->us, addr);
+ 	if (rc >= 0)
+ 		rc = len;

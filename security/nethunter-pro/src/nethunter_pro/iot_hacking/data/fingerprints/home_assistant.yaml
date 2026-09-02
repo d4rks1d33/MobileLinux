@@ -1,0 +1,24 @@
+id: home-assistant
+version: 1
+device_type: hub
+vendor: Home Assistant
+family: home-assistant
+threshold: 60
+matchers:
+  - name: manifest-json
+    type: http_body
+    path: /manifest.json
+    regex: 'Home Assistant'
+    confidence: 90
+    extract:
+      name: '"name":"([^"]+)"'
+  - name: port-8123
+    type: port
+    port: 8123
+    confidence: 20
+  - name: mdns-hass
+    type: mdns
+    mdns_type: _home-assistant._tcp
+    confidence: 60
+metadata:
+  playbook: home-assistant

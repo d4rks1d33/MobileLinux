@@ -1,0 +1,47 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: bq256xx: honour the battery charge limits
+
+bq256xx_hw_init() programs the charge current and the charge voltage from
+the driver's own defaults, and only uses what monitored-battery says as the
+upper bound of the clamp inside the setters:
+
+	bq256xx_set_ichg(bq, bq->chip_info->bq256xx_def_ichg);
+	bq256xx_set_vbatreg(bq, bq->chip_info->bq256xx_def_vbatreg);
+
+So a battery description is only able to lower these two, never to raise
+them. On the Motorola Moto G82 5G the cell takes 4350 mV, but the bq25601
+default is 4208 mV, so the part comes up regulating 4208 mV: it reports the
+battery as Full at about 82% and trickles, and roughly a tenth of the
+capacity is unreachable until userspace writes constant_charge_voltage by
+hand.
+
+The neighbouring calls in the same function already trust the battery
+description directly:
+
+	bq256xx_set_iprechg(bq, bat_info->precharge_current_ua);
+	bq256xx_set_iterm(bq, bat_info->charge_term_current_ua);
+
+Use it for these two as well. The clamps in the setters still apply, and
+when no battery is described the fallback path has already filled bat_info
+with those same defaults, so behaviour there is unchanged.
+
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -1644,7 +1644,7 @@
+ 		return ret;
+ 
+ 	ret = bq->chip_info->bq256xx_set_ichg(bq,
+-				bq->chip_info->bq256xx_def_ichg);
++				bat_info->constant_charge_current_max_ua);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1654,7 +1654,7 @@
+ 		return ret;
+ 
+ 	ret = bq->chip_info->bq256xx_set_vbatreg(bq,
+-				bq->chip_info->bq256xx_def_vbatreg);
++				bat_info->constant_charge_voltage_max_uv);
+ 	if (ret)
+ 		return ret;
+ 

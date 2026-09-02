@@ -1,0 +1,32 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: give the camera PMIC its input supply
+
+PM6125's S6 feeds the FAN53870's low LDO group -- LDO1 and LDO2, which
+are cam_vdig -- and the vendor device tree says so outright:
+
+	vin1-supply = <&S6A>;
+
+Without it Linux reports `s6 = disabled, users=0` while that rail is
+physically powering the camera. Nothing breaks today, but a rail the
+kernel believes is free is a rail something may legitimately switch off,
+and that failure would arrive much later as a camera that used to work.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -516,6 +510,16 @@
+ 		compatible = "onnn,fan53870";
+ 		reg = <0x35>;
+ 		enable-gpios = <&tlmm 33 GPIO_ACTIVE_HIGH>;
++
++		/*
++		 * PM6125's S6 feeds the low LDO group (LDO1/LDO2, i.e.
++		 * cam_vdig), which the vendor device tree spells out as
++		 * vin1-supply = <&S6A>. Without this Linux believes S6 is
++		 * disabled with no users while it is physically powering
++		 * the camera, and a rail nobody claims is a rail something
++		 * may legitimately switch off.
++		 */
++		vin1-supply = <&pm6125_s6>;
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&cam_pmic_en_default>;
+ 

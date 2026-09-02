@@ -167,11 +167,28 @@ class Runner:
     A single Runner instance is threaded through build/flash so that a whole
     operation can be planned (dry-run) and its missing tools summarized at the
     end.
+
+    Execution model (important for safety):
+
+    * ``dry_run=True``  -> nothing is ever executed; every command is printed.
+    * ``dry_run=False`` -> a command is executed ONLY if (a) its gating tool is
+      present AND (b) ``execute`` is True (opt-in). Otherwise it is printed as a
+      plan. This prevents heavy/destructive build tools that merely happen to be
+      installed (pmbootstrap, losetup, mkfs) from running against non-existent
+      inputs or real devices just because the user ran ``build``.
+
+    Set ``execute=True`` (CLI ``--execute``) to actually run build steps.
+    ``allow_dangerous`` additionally permits ops flagged ``dangerous=True``
+    (loop/mkfs/partitioning on real block devices); those are otherwise always
+    planned, never auto-run.
     """
 
-    def __init__(self, dry_run: bool = False, verbose: bool = True):
+    def __init__(self, dry_run: bool = False, verbose: bool = True,
+                 execute: bool = False, allow_dangerous: bool = False):
         self.dry_run = dry_run
         self.verbose = verbose
+        self.execute = execute
+        self.allow_dangerous = allow_dangerous
         self.missing = MissingTools()
 
     def _fmt(self, cmd: list[str]) -> str:
@@ -186,23 +203,36 @@ class Runner:
         capture: bool = False,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        dangerous: bool = False,
     ) -> subprocess.CompletedProcess | None:
-        """Run ``cmd``.
+        """Run ``cmd`` subject to the execution model described above.
 
-        ``tool`` is the executable whose presence gates real execution; if it
-        is missing, the command is treated as dry-run and recorded. If not
-        given, ``cmd[0]`` is used.
+        ``tool`` is the executable whose presence gates real execution; if it is
+        missing, the command is planned (printed) and recorded. If not given,
+        ``cmd[0]`` is used. ``dangerous`` marks ops that touch real block
+        devices; those require ``allow_dangerous``.
         """
         gate = tool or (cmd[0] if cmd else "")
         present = have(gate)
         pretty = self._fmt(cmd)
 
-        if self.dry_run or not present:
-            prefix = ui.dim("[dry-run]") if self.dry_run else ui.yellow("[skip: tool missing]")
+        if not present:
+            self.missing.check(gate)
+
+        gated_off = dangerous and not self.allow_dangerous
+        should_run = (not self.dry_run) and present and self.execute and not gated_off
+
+        if not should_run:
+            if self.dry_run:
+                prefix = ui.dim("[dry-run]")
+            elif not present:
+                prefix = ui.yellow("[skip: tool missing]")
+            elif gated_off:
+                prefix = ui.yellow("[plan: needs --allow-dangerous]")
+            else:
+                prefix = ui.dim("[plan: use --execute to run]")
             if self.verbose:
                 print(f"{prefix} {pretty}")
-            if not present:
-                self.missing.check(gate)
             return None
 
         if self.verbose:

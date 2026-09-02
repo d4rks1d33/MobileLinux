@@ -1,0 +1,63 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: add the soundwire TX wake interrupt
+
+Jack detection on this port only works because a udev rule pins the WCD9370
+TX soundwire slave permanently awake:
+
+	ATTR{power/control}="on"
+
+MBHC raises nothing while that slave is suspended, so without the rule
+plugging headphones in does nothing at all. The cost is that the slave, and
+with it its master, never enters runtime suspend -- the port burns power to
+keep a jack detector listening.
+
+That should not be necessary, and the pieces are nearly all there already.
+wcd937x-sdw.c declares the TX device able to wake the bus:
+
+	pdev->prop.wake_capable = true;
+	pdev->prop.simple_clk_stop_capable = true;
+
+and the Qualcomm master implements the wake path -- but it takes the wake
+line from the *second* interrupt of the controller node:
+
+	ctrl->wake_irq = of_irq_get(dev->of_node, 1);
+	if (ctrl->wake_irq > 0)
+		devm_request_threaded_irq(..., qcom_swrm_wake_irq_handler, ...);
+
+sm6375.dtsi gives swr0 one interrupt, so wake_irq is never set and the
+slave has no way to signal while the link is stopped. The binding has had
+the second one all along -- qcom,soundwire.yaml documents
+interrupt-names = "core", "wakeup" -- and sm8450, sm8550, sm8650 and
+sc8280xp all declare it. sm6375 simply never did.
+
+The line is a TLMM GPIO on this SoC rather than another GIC SPI, which is
+why it needs interrupts-extended. The number is the vendor's, from the
+rhodep audio overlay, against the same controller (swrm-io-base 0xA740000,
+which is swr0, the one clocked by txmacro):
+
+	interrupts-extended =
+		<&wakegic 5 IRQ_TYPE_LEVEL_HIGH>,
+		<&tlmm 128 GPIO_ACTIVE_HIGH>;
+	interrupt-names = "swr_master_irq", "swr_wake_irq";
+
+GPIO 128 is unclaimed in this port. The trigger is given as LEVEL_HIGH to
+match the driver, which requests it with IRQF_TRIGGER_HIGH regardless of
+what the device tree says.
+
+This only adds the wake path. The udev rule stays for now: removing it is
+the point of the exercise, but it should not be removed until the codec has
+been shown to detect a jack from runtime suspend on real hardware.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1914,7 +1914,9 @@
+ 		swr0: soundwire@a740000 {
+ 			compatible = "qcom,soundwire-v1.6.0";
+ 			reg = <0x0 0x0a740000 0x0 0x2000>;
+-			interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>;
++			interrupts-extended = <&intc GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>,
++					      <&tlmm 128 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "core", "wakeup";
+ 
+ 			clocks = <&txmacro>;
+ 			clock-names = "iface";

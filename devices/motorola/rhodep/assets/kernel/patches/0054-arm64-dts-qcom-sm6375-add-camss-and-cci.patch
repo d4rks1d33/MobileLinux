@@ -1,0 +1,176 @@
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1533,6 +1533,172 @@
+ 			};
+ 		};
+ 
++		camss: camss@5c6e000 {
++			compatible = "qcom,sm6375-camss";
++
++			reg = <0 0x05c6e000 0 0x1000>,
++			      <0 0x05c75000 0 0x1000>,
++			      <0 0x05c7c000 0 0x1000>,
++			      <0 0x05c52000 0 0x2000>,
++			      <0 0x05c54000 0 0x2000>,
++			      <0 0x05c56000 0 0x2000>,
++			      <0 0x05c58000 0 0x2000>,
++			      <0 0x05c11000 0 0x1000>,
++			      <0 0x05c6f000 0 0x4000>,
++			      <0 0x05c76000 0 0x4000>,
++			      <0 0x05c7d000 0 0x4000>;
++			reg-names = "csid0",
++				    "csid1",
++				    "csid2",
++				    "csiphy0",
++				    "csiphy1",
++				    "csiphy2",
++				    "csiphy3",
++				    "top",
++				    "vfe0",
++				    "vfe1",
++				    "vfe2";
++
++			clocks = <&gcc GCC_CAMERA_AHB_CLK>,
++				 <&gcc GCC_CAMSS_AXI_CLK>,
++				 <&gcc GCC_CAMSS_NRT_AXI_CLK>,
++				 <&gcc GCC_CAMSS_RT_AXI_CLK>,
++				 <&gcc GCC_CAMSS_TFE_0_CSID_CLK>,
++				 <&gcc GCC_CAMSS_TFE_1_CSID_CLK>,
++				 <&gcc GCC_CAMSS_TFE_2_CSID_CLK>,
++				 <&gcc GCC_CAMSS_CPHY_0_CLK>,
++				 <&gcc GCC_CAMSS_CSI0PHYTIMER_CLK>,
++				 <&gcc GCC_CAMSS_CPHY_1_CLK>,
++				 <&gcc GCC_CAMSS_CSI1PHYTIMER_CLK>,
++				 <&gcc GCC_CAMSS_CPHY_2_CLK>,
++				 <&gcc GCC_CAMSS_CSI2PHYTIMER_CLK>,
++				 <&gcc GCC_CAMSS_CPHY_3_CLK>,
++				 <&gcc GCC_CAMSS_CSI3PHYTIMER_CLK>,
++				 <&gcc GCC_CAMSS_TOP_AHB_CLK>,
++				 <&gcc GCC_CAMSS_TFE_0_CLK>,
++				 <&gcc GCC_CAMSS_TFE_0_CPHY_RX_CLK>,
++				 <&gcc GCC_CAMSS_TFE_1_CLK>,
++				 <&gcc GCC_CAMSS_TFE_1_CPHY_RX_CLK>,
++				 <&gcc GCC_CAMSS_TFE_2_CLK>,
++				 <&gcc GCC_CAMSS_TFE_2_CPHY_RX_CLK>;
++			clock-names = "ahb",
++				      "axi",
++				      "camnoc_nrt_axi",
++				      "camnoc_rt_axi",
++				      "csi0",
++				      "csi1",
++				      "csi2",
++				      "csiphy0",
++				      "csiphy0_timer",
++				      "csiphy1",
++				      "csiphy1_timer",
++				      "csiphy2",
++				      "csiphy2_timer",
++				      "csiphy3",
++				      "csiphy3_timer",
++				      "top_ahb",
++				      "vfe0",
++				      "vfe0_cphy_rx",
++				      "vfe1",
++				      "vfe1_cphy_rx",
++				      "vfe2",
++				      "vfe2_cphy_rx";
++
++			interrupts = <GIC_SPI 210 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 212 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 77 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 72 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 73 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 74 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 312 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 211 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 213 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 78 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "csid0",
++					  "csid1",
++					  "csid2",
++					  "csiphy0",
++					  "csiphy1",
++					  "csiphy2",
++					  "csiphy3",
++					  "vfe0",
++					  "vfe1",
++					  "vfe2";
++
++			power-domains = <&gcc CAMSS_TOP_GDSC>;
++
++			/*
++			 * Stream id from the vendor tree's camera SMMU context bank
++			 * (blair-camera.dtsi, msm_cam_smmu_tfe). Do NOT copy
++			 * qcm2290's 0x400/0x820/0x840: 0x820 belongs to the display
++			 * on this SoC and duplicating it wedges the boot.
++			 */
++			iommus = <&apps_smmu 0x800 0x0>;
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci0: cci@5c1b000 {
++			compatible = "qcom,sm6375-cci", "qcom,msm8996-cci";
++			reg = <0 0x05c1b000 0 0x1000>;
++			interrupts = <GIC_SPI 206 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&gcc CAMSS_TOP_GDSC>;
++			clocks = <&gcc GCC_CAMSS_TOP_AHB_CLK>,
++				 <&gcc GCC_CAMSS_CCI_0_CLK>;
++			clock-names = "camss_top_ahb", "cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++
++			cci0_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci0_i2c1: i2c-bus@1 {
++				reg = <1>;
++				/* 100 kHz: at 400 kHz reads from the sensor come back
++				 * byte-shifted, which is a timing signature. */
++				clock-frequency = <100000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci1: cci@5c1c000 {
++			compatible = "qcom,sm6375-cci", "qcom,msm8996-cci";
++			reg = <0 0x05c1c000 0 0x1000>;
++			interrupts = <GIC_SPI 214 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&gcc CAMSS_TOP_GDSC>;
++			clocks = <&gcc GCC_CAMSS_TOP_AHB_CLK>,
++				 <&gcc GCC_CAMSS_CCI_1_CLK>;
++			clock-names = "camss_top_ahb", "cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++
++			cci1_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci1_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
+ 		adreno_smmu: iommu@5940000 {
+ 			compatible = "qcom,sm6375-smmu-v2", "qcom,adreno-smmu",
+ 				     "qcom,smmu-v2";

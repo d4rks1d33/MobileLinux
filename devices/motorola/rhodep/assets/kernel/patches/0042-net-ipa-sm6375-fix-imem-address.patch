@@ -1,0 +1,68 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: sm6375: point IMEM at 0x0c123000
+
+ipa_data_v4_11_sm6375 reuses the ipa_mem_data of the other IPA v4.11 SoCs
+(qcm2290/sm6115), which puts the modem's route and filter tables in IMEM at
+0x146a8000. That address does not exist on SM6375, so ipa_imem_init()
+installs an IOMMU mapping for a region the hardware never touches, and the
+window the hardware *does* touch is left unmapped.
+
+Nothing notices until the modem actually registers on a network: the moment
+it installs its route/filter tables the IPA reads them through its own
+context bank and the SMMU faults, which on this SoC takes the whole SoC down
+with the watchdog:
+
+	arm-smmu c600000.iommu: Unhandled context fault: fsr=0x402,
+		iova=0x0c123080, fsynr=0x370002, cbfrsynra=0x4a0, cb=7
+	arm-smmu c600000.iommu: FSR = 00000402 [Format=2 TF], SID=0x4a0
+	androidboot.bootreason=watchdog
+
+0x4a0 is the IPA AP context bank and 0x0c123080 is inside the region the
+downstream Motorola SM6375 kernel identity maps into exactly that bank:
+
+	blair.dtsi, ipa_smmu_ap:
+		iommus = <&apps_smmu 0x04A0 0x0>;
+		qcom,additional-mapping =
+		/* modem tables in IMEM */
+		<0x0C123000 0x0C123000 0x2000>;
+		qcom,ipa-q6-smem-size = <36864>;   /* 0x9000, matches smem_size */
+
+which is consistent with the rest of SM6375's IMEM: mainline sm6375.dtsi
+already describes sram@c125000 as "qcom,sm6375-imem", 8 KiB above this.
+
+Give SM6375 its own ipa_mem_data with the right IMEM window. The local
+region layout and the 0x9000 SMEM size are unchanged, so only the mapping
+moves.
+
+--- a/drivers/net/ipa/data/ipa_data-v4.11.c
++++ b/drivers/net/ipa/data/ipa_data-v4.11.c
+@@ -370,6 +370,21 @@
+ 	.smem_size	= 0x00009000,
+ };
+ 
++/* Memory configuration data for SM6375.
++ *
++ * Same local layout and SMEM size as the other IPA v4.11 SoCs, but the modem
++ * route and filter tables live elsewhere in IMEM. The address is the one the
++ * downstream kernel identity maps into the IPA AP context bank (blair.dtsi,
++ * ipa_smmu_ap: qcom,additional-mapping = <0x0C123000 0x0C123000 0x2000>).
++ */
++static const struct ipa_mem_data ipa_mem_data_sm6375 = {
++	.local_count	= ARRAY_SIZE(ipa_mem_local_data),
++	.local		= ipa_mem_local_data,
++	.imem_addr	= 0x0c123000,
++	.imem_size	= 0x00002000,
++	.smem_size	= 0x00009000,
++};
++
+ /* Interconnect rates are in 1000 byte/second units */
+ static const struct ipa_interconnect_data ipa_interconnect_data[] = {
+ 	{
+@@ -423,6 +438,6 @@
+ 	.endpoint_count		= ARRAY_SIZE(ipa_gsi_endpoint_data),
+ 	.endpoint_data		= ipa_gsi_endpoint_data,
+ 	.resource_data		= &ipa_resource_data,
+-	.mem_data		= &ipa_mem_data,
++	.mem_data		= &ipa_mem_data_sm6375,
+ 	.power_data		= &ipa_power_data_no_icc,
+ };

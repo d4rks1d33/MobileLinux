@@ -1,0 +1,44 @@
+#!/bin/sh
+# Reconciliador de WoWLAN.
+#
+# El hook /usr/lib/systemd/system-sleep/rhodep-wowlan desarma WoWLAN al despertar
+# a proposito, para que NetworkManager no baje wlan0, y lo rearma 2 segundos
+# despues desde una unidad transitoria. Eso deja una ventana corta, y sobre todo
+# depende de que ese rearmado efectivamente ocurra. Ya fallo de dos maneras
+# distintas durante el desarrollo -- una vez porque systemd mato el cgroup, otra
+# porque logind rechazo el inhibidor -- y en ambos casos el telefono quedo con
+# WoWLAN apagado de forma permanente y sin manera de despertarlo por red.
+#
+# El estado deseado es simple y verificable: si wlan0 esta asociada y el sistema
+# esta despierto, WoWLAN tiene que estar armado. Esto lo comprueba y lo corrige,
+# en vez de asumir que el momento del resume salio bien.
+
+STAMP=/run/rhodep-wowlan.resuming
+MAXAGE=15
+
+# Durante la ventana del resume el desarmado es intencional: no tocar, o se
+# arruina justo lo que el hook intenta lograr.
+if [ -e "$STAMP" ]; then
+	age=$(( $(date +%s) - $(stat -c %Y "$STAMP" 2>/dev/null || echo 0) ))
+	if [ "$age" -lt "$MAXAGE" ]; then
+		exit 0
+	fi
+	# Marca vieja: el rearmado murio sin limpiarla. Seguir y corregir.
+	rm -f "$STAMP"
+	logger -t rhodep-wowlan-check "marca de resume vieja (${age}s): el rearmado no termino"
+fi
+
+# Solo tiene sentido con la interfaz asociada; si no hay enlace no hay nada que
+# despertar y armar WoWLAN no significa nada.
+iw dev wlan0 link 2>/dev/null | grep -q "^Connected" || exit 0
+
+PHY=$(iw dev wlan0 info 2>/dev/null | awk '/wiphy/ {print "phy" $2; exit}')
+[ -n "$PHY" ] || exit 0
+
+iw "$PHY" wowlan show 2>/dev/null | grep -qi "is enabled" && exit 0
+
+if iw "$PHY" wowlan enable magic-packet 2>/dev/null; then
+	logger -t rhodep-wowlan-check "WoWLAN estaba desarmado con wlan0 asociada; rearmado en $PHY"
+else
+	logger -t rhodep-wowlan-check "ERROR: WoWLAN desarmado y no se pudo rearmar en $PHY"
+fi

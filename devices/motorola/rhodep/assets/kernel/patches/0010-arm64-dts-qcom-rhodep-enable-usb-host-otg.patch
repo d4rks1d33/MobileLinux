@@ -1,0 +1,69 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: enable USB host (OTG)
+
+The port was limited to "peripheral", so USB-C adapters (WiFi dongles,
+ethernet, keyboards) could not be used.
+
+Switch to dr_mode = "otg" plus usb-role-switch. The role switch matters for
+more than convenience: without it, dwc3_drd_init() takes the ID-pin OTG path,
+which requests an "otg" interrupt. This SoC declares only a single interrupt
+on the dwc3 node, so that path is at best fragile and can fail the probe,
+which would take USB (and with it the only SSH access on this device) down.
+dwc3_setup_role_switch() needs no extra interrupt and registers the switch
+with allow_userspace_control.
+
+role-switch-default-mode = "peripheral" keeps the port coming up as a gadget,
+so USB networking and SSH keep working exactly as before. Host mode is opted
+into at runtime:
+
+	echo host   > /sys/kernel/debug/usb/4e00000.usb/mode
+	echo device > /sys/kernel/debug/usb/4e00000.usb/mode
+
+Note that dwc3_mode_write() silently discards the write when dr_mode is not
+OTG (drivers/usb/dwc3/debugfs.c), which is why that debugfs file existed but
+did nothing before this change.
+
+There is no Type-C port controller driver for this device in mainline
+(/sys/class/typec and /sys/class/usb_role are both empty), so role detection
+is manual for now.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -566,7 +566,36 @@
+ };
+ 
+ &usb_1_dwc3 {
+-	dr_mode = "peripheral";
++	/*
++	 * "otg" instead of "peripheral" so the port can be used as a host
++	 * (adaptadores USB-C: WiFi, ethernet, teclados...).
++	 *
++	 * This phone has no Type-C driver in mainline (nothing under
++	 * /sys/class/typec or /sys/class/usb_role), so automatic role detection
++	 * does not work: the port comes up in device mode, which is exactly what
++	 * we want, since SSH access goes over the USB gadget.
++	 *
++	 * Switching to host is done by hand through the dwc3 debugfs:
++	 *   echo host   > /sys/kernel/debug/usb/4e00000.usb/mode
++	 *   echo device > /sys/kernel/debug/usb/4e00000.usb/mode
++	 *
++	 * Note that dwc3_mode_write() drops the write SILENTLY if dr_mode is not
++	 * OTG (drivers/usb/dwc3/debugfs.c), which is why with "peripheral" the
++	 * file exists but does nothing.
++	 */
++	dr_mode = "otg";
++
++	/*
++	 * usb-role-switch is the SAFE route: it makes dwc3 take
++	 * dwc3_setup_role_switch() instead of the ID pin OTG path, which asks for
++	 * an "otg" interrupt this SoC does not declare (the node has a single
++	 * interrupt) and could fail the probe, taking USB and SSH down with it.
++	 *
++	 * It also registers the role switch with allow_userspace_control, so a
++	 * role switch shows up under /sys/class/usb_role to change roles.
++	 */
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
+ };
+ 
+ &usb_1_hsphy {

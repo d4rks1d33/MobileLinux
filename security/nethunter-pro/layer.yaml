@@ -1,0 +1,12 @@
+id: nethunter-pro
+kind: security-tool
+layer: distro
+desktop: [phosh, plasma]
+summary: NetHunter Pro control panel (GTK4/libadwaita) with 53 modules
+install: install.sh
+requires_root: true
+depends:
+  apt: [gir1.2-gtk-4.0, gir1.2-adw-1, python3, nmap, aircrack-ng, macchanger]
+notes: >
+  Native reimplementation (no Android chroot). Includes IoT hacking engine
+  (35 fingerprints, 28 playbooks), phishkin3, BLE spam, Bjorn adapter.

@@ -1,0 +1,17 @@
+id: lifx
+device_type: smart_bulb
+vendor: LIFX
+family: lifx
+requires: {}
+actions:
+  - id: getservice
+    label: "GetService probe (unauth handshake)"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "LIFX LAN protocol is UDP 56700, header docs at lan.developer.lifx.com"
+      - udp_send:
+          host: "{{target.ip}}"
+          port: 56700
+          payload_hex: "2400003401000000000000000000000000000000000000000000000000020000"
+          save_as: getservice_reply

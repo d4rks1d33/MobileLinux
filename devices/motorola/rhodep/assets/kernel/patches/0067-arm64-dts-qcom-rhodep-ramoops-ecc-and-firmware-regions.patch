@@ -1,0 +1,95 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 16:40:00 -0300
+Subject: [PATCH] arm64: dts: qcom: rhodep: make the crash log survive, and
+ reserve what the firmware writes
+
+Two problems with persistent storage on this board, found while looking
+for a way to diagnose the silent watchdog resets that keep mobile data
+switched off.
+
+First, the ramoops region does not come back intact. Writing a known
+pattern and rebooting, 1.3% of the bytes returned altered on one boot and
+3.7% on another, spread evenly through the buffer rather than gathered in
+a block. Data written seconds before the reset came back as damaged as
+data written three minutes earlier, so this is the reset doing it and not
+retention decay. The address is not the problem: 0xaf000000 is
+Motorola's own RAMOOPS_BASE_ADDR.
+
+A console log tolerates that -- it reads fine with occasional wrong
+characters. A compressed crash dump does not, and a compressed dump is
+what pstore keeps by default, so every dmesg record recovered so far has
+died the same way:
+
+  pstore: zlib_inflate() failed, ret = -3!
+
+which leaves nothing at all to read after a crash. Turn on the
+Reed-Solomon ECC ramoops already implements. At ecc-size = 32 it corrects
+up to sixteen bad bytes in each 255 byte block, against the three to nine
+the measured rates imply.
+
+Second, three regions listed in Motorola's memory map are written by
+firmware and were never reserved here, so Linux has been handing them out
+as ordinary memory: the watchdog CPU context dump, the TrustZone log
+backup and the annotation buffer. The first is written at reset, when it
+no longer matters. The TrustZone log backup does not have that excuse --
+TZ can write it while Linux is running, over whatever the allocator gave
+away.
+
+Addresses and sizes are from include/dt-bindings/moto/moto-mem-reserve.h,
+resolved: WDOG_CPUCTX_BASE is RAMOOPS_BASE_ADDR - 0x5c00 * 8, TZLOG_BCK
+sits 0x30000 below that, and MMI_ANNOTATE 0x800 below again.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -126,6 +126,49 @@
+ 			ftrace-size = <0x0>;
+ 			mem-type = <1>;
+ 			max-reason = <5>;
++			/*
++			 * This region does not survive a reset intact. Measured
++			 * over two reboots, 1.3% and 3.7% of the bytes came back
++			 * altered, spread evenly rather than in a block, and
++			 * data written seconds before the reset was as damaged
++			 * as data written minutes earlier -- so it is the reset
++			 * that does it, not decay.
++			 *
++			 * A console log survives that: it is readable with some
++			 * characters wrong. A compressed crash dump does not,
++			 * and that is what pstore stores by default, which is
++			 * why every recovered dmesg record so far has died with
++			 * "zlib_inflate() failed, ret = -3".
++			 *
++			 * Reed-Solomon over each 255 byte block, correcting up
++			 * to ecc-size/2 bad bytes, covers both rates with room
++			 * to spare.
++			 */
++			ecc-size = <32>;
++		};
++
++		/*
++		 * Three regions the firmware writes to on its own. Motorola
++		 * reserves all of them (include/dt-bindings/moto/
++		 * moto-mem-reserve.h, sizes and addresses from there); this
++		 * port did not, so Linux has been handing them out as ordinary
++		 * memory. The TrustZone log backup is the one that matters:
++		 * TZ can write it while Linux is running, on top of whatever
++		 * happens to be there.
++		 */
++		mmi_annotate@aefa1800 {
++			reg = <0x0 0xaefa1800 0x0 0x800>;
++			no-map;
++		};
++
++		tzlog_dump@aefa2000 {
++			reg = <0x0 0xaefa2000 0x0 0x30000>;
++			no-map;
++		};
++
++		wdog_cpuctx@aefd2000 {
++			reg = <0x0 0xaefd2000 0x0 0x2e000>;
++			no-map;
+ 		};
+ 	};
+ 

@@ -1,0 +1,45 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: mark the GPU SMMU as an adreno SMMU
+
+Userspace hits this on the first DRM_IOCTL_MSM_GET_PARAM:
+
+  WARNING: msm_iommu_pagetable_create ... "No per-process page tables"
+    msm_iommu_pagetable_create+0x278/0x294
+    a6xx_create_private_vm+0x28/0x74
+    msm_gpu_create_private_vm+0x38/0x120
+    msm_context_vm+0x58/0x80
+    adreno_get_param+0x38/0x31c
+
+so every context falls back to sharing one address space.
+
+arm-smmu-qcom only installs the Adreno implementation, which is what
+provides the adreno_smmu_priv interface used for per-process page tables,
+when the SMMU node claims to be one:
+
+	if (np && of_device_is_compatible(np, "qcom,adreno-smmu"))
+		impl = data->adreno_impl;
+	else
+		impl = data->impl;
+
+The pieces are already in place: "qcom,sm6375-smmu-v2" is in
+qcom_smmu_impl_of_match[] pointing at qcom_smmu_v2_data, which does have
+.adreno_impl = &qcom_adreno_smmu_v2_impl, and qcom_adreno_can_do_ttbr1()
+only refuses msm8996, so an SMMU v2 is fine here. Only the compatible was
+missing, matching what sm6115.dtsi already does for its GPU SMMU.
+
+This went unnoticed for the same reason as the catalog mismatch: no
+upstream device tree enables the SM6375 GPU, so this SMMU was never used
+by the GPU.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1487,7 +1487,8 @@
+ 		};
+ 
+ 		adreno_smmu: iommu@5940000 {
+-			compatible = "qcom,sm6375-smmu-v2", "qcom,smmu-v2";
++			compatible = "qcom,sm6375-smmu-v2", "qcom,adreno-smmu",
++				     "qcom,smmu-v2";
+ 			reg = <0 0x05940000 0 0x10000>;
+ 			#iommu-cells = <1>;
+ 			#global-interrupts = <2>;

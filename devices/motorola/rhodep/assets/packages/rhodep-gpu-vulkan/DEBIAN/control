@@ -1,0 +1,23 @@
+Package: rhodep-gpu-vulkan
+Version: 2
+Architecture: arm64
+Maintainer: rhodep port
+Depends: mesa-vulkan-drivers, libvulkan1, vulkan-tools
+Recommends: vulkan-validationlayers
+Description: Vulkan on the Adreno 619 via Turnip (freedreno) for Motorola rhodep
+ Mesa ships Turnip, the open Vulkan driver for Adreno, inside
+ mesa-vulkan-drivers, but two things stop it being picked up on this port out of
+ the box. The loader has to find the freedreno ICD manifest, and on a device
+ with no other Vulkan implementation `vulkaninfo` otherwise reports zero
+ devices; and the driver has to be pinned, because Turnip on the A619 is young
+ and an unattended upgrade could regress it under the compositor.
+ .
+ This package points the Vulkan loader at Mesa's freedreno ICD
+ (VK_ICD_FILENAMES / VK_DRIVER_FILES), holds mesa-vulkan-drivers to the
+ validated version, and registers its files with the port's protection so an
+ apt run or a stray editor cannot quietly undo it. Verified with `vulkaninfo`
+ reporting "Turnip Adreno (TM) 619" and `vkcube` rendering.
+ .
+ Note: KWin already runs accelerated on this GPU through the freedreno GL
+ driver; this adds the Vulkan path on top, which zink, dxvk/wine and native
+ Vulkan applications use. GL is unaffected either way.

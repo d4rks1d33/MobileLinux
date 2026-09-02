@@ -1,0 +1,78 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: add qcom,sm6375-ipa without interconnects
+
+The Motorola Moto G82 5G (SM6375) has an IPA v4.11 block, identical to the
+one already described by ipa_data_v4_11 (verified against holi.dtsi:3251 in
+the downstream Motorola SM6375 kernel: base 0x5800000, GSI 0x5804000,
+GIC_SPI 257/259, RPM_SMD_IPA_CLK, qcom,ipa-hw-ver = <20> = IPAv4.11).
+
+Mainline has no interconnect provider for SM6375 (drivers/interconnect/qcom/
+has no sm6375, and sm6375.dtsi declares no NoC providers), so the standard
+ipa_data_v4_11 cannot be used as-is: of_icc_bulk_get() would fail on the
+"memory"/"config" paths and IPA would never probe.
+
+Add a variant power configuration with interconnect_count = 0. With no
+paths, of_icc_bulk_get() (drivers/interconnect/bulk.c) returns 0 without
+touching any provider, and icc_bulk_disable()/icc_bulk_set_bw() become
+no-ops. A dedicated compatible "qcom,sm6375-ipa" selects this variant so no
+other SoC is affected. This can be dropped once an SM6375 interconnect
+driver exists.
+
+--- a/drivers/net/ipa/data/ipa_data-v4.11.c	2026-08-07 01:42:00.838923014 +0000
++++ b/drivers/net/ipa/data/ipa_data-v4.11.c	2026-08-07 01:41:40.390923004 +0000
+@@ -392,6 +392,15 @@
+ 	.interconnect_data	= ipa_interconnect_data,
+ };
+ 
++/*
++ * Same as ipa_power_data, but without interconnects. Used on SoCs that lack
++ * an interconnect provider in mainline (e.g. SM6375).
++ */
++static const struct ipa_power_data ipa_power_data_no_icc = {
++	.core_clock_rate	= 60 * 1000 * 1000,	/* Hz */
++	.interconnect_count	= 0,
++};
++
+ /* Configuration data for an SoC having IPA v4.11 */
+ const struct ipa_data ipa_data_v4_11 = {
+ 	.version		= IPA_VERSION_4_11,
+@@ -404,3 +413,16 @@
+ 	.mem_data		= &ipa_mem_data,
+ 	.power_data		= &ipa_power_data,
+ };
++
++/* Configuration data for SM6375: IPA v4.11 without interconnect voting */
++const struct ipa_data ipa_data_v4_11_sm6375 = {
++	.version		= IPA_VERSION_4_11,
++	.qsb_count		= ARRAY_SIZE(ipa_qsb_data),
++	.qsb_data		= ipa_qsb_data,
++	.modem_route_count	= 8,
++	.endpoint_count		= ARRAY_SIZE(ipa_gsi_endpoint_data),
++	.endpoint_data		= ipa_gsi_endpoint_data,
++	.resource_data		= &ipa_resource_data,
++	.mem_data		= &ipa_mem_data,
++	.power_data		= &ipa_power_data_no_icc,
++};
+--- a/drivers/net/ipa/ipa_data.h	2026-08-07 01:42:05.402704002 +0000
++++ b/drivers/net/ipa/ipa_data.h	2026-08-07 01:41:40.392923004 +0000
+@@ -252,6 +252,7 @@
+ extern const struct ipa_data ipa_data_v4_7;
+ extern const struct ipa_data ipa_data_v4_9;
+ extern const struct ipa_data ipa_data_v4_11;
++extern const struct ipa_data ipa_data_v4_11_sm6375;
+ extern const struct ipa_data ipa_data_v5_0;
+ extern const struct ipa_data ipa_data_v5_2;
+ extern const struct ipa_data ipa_data_v5_5;
+--- a/drivers/net/ipa/ipa_main.c	2026-08-07 01:42:10.848704004 +0000
++++ b/drivers/net/ipa/ipa_main.c	2026-08-07 01:41:40.393923004 +0000
+@@ -658,6 +658,10 @@
+ 		.data		= &ipa_data_v4_7,
+ 	},
+ 	{
++		.compatible	= "qcom,sm6375-ipa",
++		.data		= &ipa_data_v4_11_sm6375,
++	},
++	{
+ 		.compatible	= "qcom,sm8350-ipa",
+ 		.data		= &ipa_data_v4_9,
+ 	},

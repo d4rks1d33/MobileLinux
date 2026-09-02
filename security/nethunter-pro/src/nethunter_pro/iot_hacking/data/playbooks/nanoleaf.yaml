@@ -1,0 +1,15 @@
+id: nanoleaf
+device_type: smart_bulb
+vendor: Nanoleaf
+family: nanoleaf
+requires:
+  port: 16021
+actions:
+  - id: probe
+    label: "Probe (401 = detected, needs token)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:16021/api/v1/"
+          save_as: probe

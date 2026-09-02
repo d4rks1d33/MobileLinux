@@ -1,0 +1,26 @@
+id: bose-soundtouch
+version: 1
+device_type: speaker
+vendor: Bose
+family: soundtouch
+threshold: 60
+matchers:
+  - name: port-8090
+    type: port
+    port: 8090
+    confidence: 40
+  - name: mdns-soundtouch
+    type: mdns
+    mdns_type: _soundtouch._tcp
+    confidence: 80
+  - name: http-info
+    type: http_body
+    path: /info
+    regex: '<info deviceID=|Bose'
+    confidence: 60
+    extract:
+      deviceID: 'deviceID="([^"]+)"'
+      name: '<name>([^<]+)</name>'
+      type: '<type>([^<]+)</type>'
+metadata:
+  playbook: bose-soundtouch

@@ -1,0 +1,236 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] nfc: route the MIFARE listen to the embedded secure element
+
+Patch 0112 enumerates the eSE (NFCEE id 0x83 on rhodep, the one whose supported
+protocol is MIFARE), which is where an Android transit app provisions a MIFARE
+card. The applet persists across the OS change and the eSE runs Crypto1 itself,
+so to make the card answer a reader from Linux the controller only has to enable
+that NFCEE and route the MIFARE listen to it.
+
+Remember the eSE's NFCEE id when it turns up in an NFCEE_DISCOVER_NTF (the one
+that lists the MIFARE protocol). When card emulation is requested and an eSE was
+found, NFCEE_MODE_SET(ENABLE) it and route the MIFARE protocol entry in the
+listen mode routing table to that NFCEE instead of the host.
+
+When steering to the eSE, three things differ from host emulation:
+
+  - Route the NFC-A *technology* to the eSE, not just the MIFARE protocol.
+    MIFARE Classic selection happens at the NFC-A technology level, so the eSE
+    has to own the technology to present the card's own ATQA/SAK/UID.
+  - Do NOT set any LA_* config (LA_NFCID1, LA_SEL_INFO, ...) from the host. The
+    eSE owns the NFC-A identity; a host LA_NFCID1 would override the real card's
+    UID and a host LA_SEL_INFO=0x08 would advertise ISO-DEP instead of MIFARE,
+    so the reader would never see the provisioned card.
+  - This controller does not light its listen front-end for NFC-A alone; it
+    only wakes when NFC-F listen is also offered. But NFC-F with the firmware
+    defaults arms an autonomous NFC-DEP (P2P) peer / Type-3 tag that answers the
+    reader instead of routing the field to the eSE. Neutralise it in the
+    emulation path -- LF_PROTOCOL_TYPE = 0 (no NFC-DEP over NFC-F) and
+    LF_T3T_FLAGS = 0 (no Type-3 listen slots) -- and then offer NFC-A + NFC-F
+    listen. NFC-F now only powers the analog front-end; the NFC-A field reaches
+    the eSE.
+
+The controller accepts all of this with status 0x0, but the card still does not
+answer a reader (tested with the SUBE app and a Flipper Zero -- see docs/nfc.md).
+An ETSI HCI network bring-up for the eSE was tried and does not apply: the eSE
+NFCEE advertises the MIFARE protocol, not the HCI Access interface, so
+CORE_CONN_CREATE(HCI_ACCESS) is rejected, and MIFARE card emulation does not use
+the HCI/APDU path anyway. The remaining block is the NFC-A listen front-end not
+engaging at RF, most likely a vendor RF profile the plain NCI path cannot
+reproduce -- the same ceiling as host emulation.
+
+--- a/include/net/nfc/nci.h	2026-09-01 22:59:53.266251007 +0000
++++ b/include/net/nfc/nci.h	2026-09-01 22:57:03.430301012 +0000
+@@ -132,6 +132,7 @@
+ #define NCI_LA_NFCID1						0x33
+ #define NCI_LA_SEL_INFO						0x32
+ #define NCI_LF_PROTOCOL_TYPE					0x50
++#define NCI_LF_T3T_FLAGS					0x3f
+ #define NCI_LF_CON_BITR_F					0x54
+ 
+ /* NCI Configuration Parameters masks */
+--- a/include/net/nfc/nci_core.h	2026-09-01 22:59:46.862251004 +0000
++++ b/include/net/nfc/nci_core.h	2026-09-01 22:57:03.430301012 +0000
+@@ -254,6 +254,12 @@
+ 	__u8			manufact_id;
+ 	__u32			manufact_specific_info;
+ 
++	/* NFCEE id of the embedded secure element (the one that lists the
++	 * MIFARE protocol), learned from NFCEE_DISCOVER_NTF. 0 = none found.
++	 * A provisioned MIFARE card lives here; routing the MIFARE listen to
++	 * this NFCEE lets it answer a reader. */
++	__u8			ese_nfcee_id;
++
+ 	/* Save RF Discovery ID or NFCEE ID under conn_create */
+ 	struct dest_spec_params cur_params;
+ 	/* Save destination type under conn_create */
+--- a/net/nfc/nci/ntf.c	2026-09-01 22:59:53.267251007 +0000
++++ b/net/nfc/nci/ntf.c	2026-09-01 22:57:03.430301012 +0000
+@@ -958,6 +958,24 @@
+ 
+ 	nfcee_ntf = (struct nci_nfcee_discover_ntf *)skb->data;
+ 
++	/* The NCI 2.0 NFCEE_DISCOVER_NTF is variable length: id, status,
++	 * num_protocols, protocols[], num_tlvs, tlvs[]. Scan the supported
++	 * protocols for MIFARE (0x80); the NFCEE that lists it is the embedded
++	 * secure element holding a provisioned MIFARE card. Remember its id so
++	 * the emulation path can route the MIFARE listen to it. */
++	if (skb->len >= 3) {
++		u8 nfcee_id = skb->data[0];
++		u8 num_proto = skb->data[2];
++		unsigned int i;
++
++		for (i = 0; i < num_proto && 3 + i < skb->len; i++) {
++			if (skb->data[3 + i] == NCI_RF_PROTOCOL_MIFARE) {
++				ndev->ese_nfcee_id = nfcee_id;
++				break;
++			}
++		}
++	}
++
+ 	/* NFCForum NCI 9.2.1 HCI Network Specific Handling
+ 	 * If the NFCC supports the HCI Network, it SHALL return one,
+ 	 * and only one, NFCEE_DISCOVER_NTF with a Protocol type of
+--- a/net/nfc/nci/core.c	2026-09-02 00:58:13.502372006 +0000
++++ b/net/nfc/nci/core.c	2026-09-01 22:58:08.755575000 +0000
+@@ -301,12 +301,13 @@
+ 			NCI_NFC_A_PASSIVE_LISTEN_MODE;
+ 		cmd.disc_configs[cmd.num_disc_configs].frequency = 1;
+ 		cmd.num_disc_configs++;
+-		/* EXP-2: offer NFC-A and NFC-F listen together, even when
+-		 * emulating. NFC-F listen is the one path that does activate on
+-		 * this controller, and offering NFC-A alone never arms the A
+-		 * listener -- the mainline core also never offers A listen on
+-		 * its own. Pairing them may be what makes the firmware arm the
+-		 * A listener. */
++		/* Offer NFC-F listen too. This controller does not light its
++		 * listen front-end for NFC-A alone -- it only wakes when NFC-F
++		 * listen is also offered. The NFC-DEP/Type-3 peer that NFC-F
++		 * would normally present has been neutralised in the emulation
++		 * path (LF_PROTOCOL_TYPE = 0, LF_T3T_FLAGS = 0), so offering it
++		 * here only powers the analog front-end; the NFC-A field then
++		 * reaches the host or the eSE via the routing table. */
+ 		cmd.disc_configs[cmd.num_disc_configs].rf_tech_and_mode =
+ 			NCI_NFC_F_PASSIVE_LISTEN_MODE;
+ 		cmd.disc_configs[cmd.num_disc_configs].frequency = 1;
+@@ -873,12 +874,18 @@
+ 	cmd.more = 0;
+ 	cmd.num_entries = 0;
+ 
+-	/* Route NFC-A technology to the host so the controller answers the
+-	 * anticollision itself and comes up as an NFC-A tag. */
++	/* Route NFC-A technology. If a MIFARE-capable secure element was found,
++	 * route it there so the eSE handles the whole NFC-A layer -- the
++	 * anticollision with its own ATQA/SAK/UID from the provisioned card.
++	 * MIFARE Classic selection happens at the NFC-A technology level (it is
++	 * not an ISO-DEP protocol), so routing the technology to the eSE, not
++	 * just the MIFARE protocol, is what lets the eSE present the real card.
++	 * Without an eSE, route to the host so the host can be a bare NFC-A
++	 * tag. */
+ 	tech = (struct nci_lmrt_tech_entry *)p;
+ 	tech->type = NCI_LMRT_TYPE_TECHNOLOGY;
+ 	tech->len = 3;
+-	tech->nfcee_id = NCI_NFCEE_ID_HOST;
++	tech->nfcee_id = ndev->ese_nfcee_id ? : NCI_NFCEE_ID_HOST;
+ 	tech->power_state = NCI_LMRT_POWER_STATE_ALL;
+ 	tech->technology = NCI_NFC_RF_TECHNOLOGY_A;
+ 	p += sizeof(*tech);
+@@ -894,14 +901,16 @@
+ 	p += sizeof(*proto);
+ 	cmd.num_entries++;
+ 
+-	/* Route the MIFARE Classic protocol (Samsung/NXP proprietary 0x80) to
+-	 * the host as well. A MIFARE Classic card (SAK 0x08) is presented under
+-	 * this protocol, not plain T2T, so without this entry the controller
+-	 * accepts the NFC-A listen config but never activates for MIFARE. */
++	/* Route the MIFARE Classic protocol (Samsung/NXP proprietary 0x80).
++	 * A MIFARE Classic card is presented under this protocol, not plain
++	 * T2T. If an embedded secure element that supports MIFARE was found
++	 * (ese_nfcee_id), route it there: the eSE holds a provisioned MIFARE
++	 * card and answers a reader autonomously, running Crypto1 itself.
++	 * Otherwise fall back to the host. */
+ 	proto = (struct nci_lmrt_proto_entry *)p;
+ 	proto->type = NCI_LMRT_TYPE_PROTOCOL;
+ 	proto->len = 3;
+-	proto->nfcee_id = NCI_NFCEE_ID_HOST;
++	proto->nfcee_id = ndev->ese_nfcee_id ? : NCI_NFCEE_ID_HOST;
+ 	proto->power_state = NCI_LMRT_POWER_STATE_ALL;
+ 	proto->protocol = NCI_RF_PROTOCOL_MIFARE;
+ 	p += sizeof(*proto);
+@@ -990,25 +999,61 @@
+ 		 * here corrupts the high ATQA byte). */
+ 		__u8 dur[2];
+ 
+-		v = 0x04;
+-		nci_set_config(ndev, NCI_LA_BIT_FRAME_SDD, 1, &v);
+-		v = 0x00;
+-		nci_set_config(ndev, NCI_LA_PLATFORM_CONFIG, 1, &v);
+-		nci_set_config(ndev, NCI_LA_NFCID1,
+-			       nfc_dev->emu_nfcid1_len, nfc_dev->emu_nfcid1);
+-		v = nfc_dev->emu_sel_res;
+-		nci_set_config(ndev, NCI_LA_SEL_INFO, 1, &v);
+-
+-		/* EXP-3: give discovery a real total duration (1000 ms, LE) so
+-		 * the controller dwells in the NFC-A listen window long enough
+-		 * to coincide with a reader's field. */
++		/* Host NFC-A identity (LA_*) ONLY when the host is the tag. When
++		 * a MIFARE card in the secure element is being presented, the eSE
++		 * owns the NFC-A identity -- its own ATQA/SAK/UID from the
++		 * provisioned card. Setting LA_NFCID1/LA_SEL_INFO from the host
++		 * here would override that with a wrong UID and a SAK that
++		 * advertises ISO-DEP (0x08) instead of MIFARE, so the reader
++		 * would never see the real card. Skip all LA_* for the eSE. */
++		if (!ndev->ese_nfcee_id) {
++			v = 0x04;
++			nci_set_config(ndev, NCI_LA_BIT_FRAME_SDD, 1, &v);
++			v = 0x00;
++			nci_set_config(ndev, NCI_LA_PLATFORM_CONFIG, 1, &v);
++			nci_set_config(ndev, NCI_LA_NFCID1,
++				       nfc_dev->emu_nfcid1_len,
++				       nfc_dev->emu_nfcid1);
++			v = nfc_dev->emu_sel_res;
++			nci_set_config(ndev, NCI_LA_SEL_INFO, 1, &v);
++		}
++
++		/* Give discovery a real total duration (1000 ms, LE) so the
++		 * controller dwells in the NFC-A listen window long enough to
++		 * coincide with a reader's field. */
+ 		dur[0] = 0xe8;
+ 		dur[1] = 0x03;
+ 		nci_set_config(ndev, NCI_TOTAL_DURATION, 2, dur);
+ 
+-		/* Program the listen mode routing table so NFC-A / T2T are
+-		 * routed to the host; without this the controller accepts the
+-		 * NFC-A listen config but never activates as a tag. */
++		/* This controller does not light its listen front-end for NFC-A
++		 * alone; it only comes up when NFC-F listen is also offered. But
++		 * offering NFC-F with the firmware defaults makes it arm an
++		 * autonomous NFC-DEP (P2P) peer / a Type-3 tag that answers the
++		 * reader instead of routing the field to us. Neutralise those:
++		 * clear LF_PROTOCOL_TYPE (no NFC-DEP over NFC-F) and disable all
++		 * Type-3 listen slots (LF_T3T_FLAGS = 0), so NFC-F listen lights
++		 * the analog front-end without presenting anything on F -- and
++		 * the NFC-A field reaches the eSE. */
++		if (ndev->ese_nfcee_id) {
++			__u8 t3t_flags[2] = { 0x00, 0x00 };
++
++			v = 0x00;
++			nci_set_config(ndev, NCI_LF_PROTOCOL_TYPE, 1, &v);
++			nci_set_config(ndev, NCI_LF_T3T_FLAGS, 2, t3t_flags);
++		}
++
++		/* If the embedded secure element that holds a provisioned MIFARE
++		 * card was found, enable it so it can answer over RF. The MIFARE
++		 * listen is then routed to it in the routing table below. */
++		if (ndev->ese_nfcee_id)
++			nci_nfcee_mode_set(ndev, ndev->ese_nfcee_id,
++					   NCI_NFCEE_ENABLE);
++
++		/* Program the listen mode routing table. NFC-A / T2T go to the
++		 * host; the MIFARE protocol goes to the eSE if we have one (see
++		 * nci_rf_set_listen_mode_routing_req). Without this the
++		 * controller accepts the NFC-A listen config but never activates
++		 * as a tag. */
+ 		nci_request(ndev, nci_rf_set_listen_mode_routing_req, NULL,
+ 			    msecs_to_jiffies(NCI_RF_DISC_TIMEOUT));
+ 	} else if (tm_protocols & NFC_PROTO_NFC_DEP_MASK) {

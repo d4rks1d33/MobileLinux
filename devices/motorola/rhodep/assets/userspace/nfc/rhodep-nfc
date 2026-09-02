@@ -1,0 +1,795 @@
+#!/usr/bin/env python3
+# rhodep-nfc -- read every NFC technology the S3NRN4V supports, from a terminal.
+#
+# Talks the kernel's NFC generic-netlink interface directly (family "nfc"),
+# the same one neard and nfcpy use underneath. No third-party modules: this
+# runs on the phone's stock Python. See docs/nfc.md in the port repo for the
+# full story and for how to write your own software against the controller.
+
+HELP = r"""rhodep-nfc -- read NFC tags from a terminal on the Moto G82 (rhodep)
+
+Usage:
+    sudo rhodep-nfc [command]
+
+Commands:
+    read            poll, print the first card, and exit         (default)
+    watch           keep polling, print every card presented
+    raw [file.pcap] capture every NCI frame to/from the controller: hex live,
+                    and, if a path is given, a pcap for Wireshark. This is the
+                    whole wire conversation with a presented tag -- every
+                    command, response and APDU -- for analysing an unknown
+                    protocol
+    attrs           keep polling and dump every activation attribute
+                    uninterpreted -- a quick look at just the handshake fields
+    info            show the adapter and the protocols it advertises
+    listen [uid [sak]]  card emulation: enter listen mode so an external reader
+                    sees the phone as an NFC-A tag. With no uid, a random
+                    NFCID1 (proves listen works). With a uid, e.g.
+                    listen 04:35:3d:6a:f7:54:80, ask the controller to answer
+                    with that UID. An optional sak (SEL_RES) hex picks the tag
+                    type the reader sees: 08 = MIFARE Classic, 20 = ISO-DEP,
+                    00 = bare NFC-A. Answering the tag protocol (Type 2 READ)
+                    is still later work; see docs/nfc.md
+    help, --help    this text
+
+Notes:
+    Root is required: the NFC netlink commands are privileged.
+
+    Only one program may drive the adapter at a time. Stop neard first:
+        sudo systemctl stop neard        (or: sudo pkill -f neard)
+
+    Present the card to the upper back of the phone, near the camera.
+
+What each read shows:
+    For NFC-A (MIFARE, ISO-DEP Type 4) the UID, ATQA (SENS_RES), SAK
+    (SEL_RES) and, when present, the ATS; for NFC-B the SENSB_RES; for NFC-F
+    (FeliCa) the SENSF_RES; for NFC-V (ISO 15693) the DSFID and UID. The card
+    is then named from SAK and protocol the way a reader would.
+
+Raw frame capture:
+    'raw' taps the kernel's NFC raw socket, which receives a copy of every NCI
+    frame exchanged with the controller in both directions, and prints each as
+    direction + type + hex, with a short name for common NCI messages. Give it
+    a path and it also writes a pcap:
+
+        sudo rhodep-nfc raw /tmp/card.pcap
+
+    Open the pcap in Wireshark; each record is [dev][dir|type<<1] then the NCI
+    frame. The link type is USER0, so use 'Decode As' to point the NCI
+    dissector at it, or just read the hex. This is the ground truth for
+    analysing an unknown protocol: it is the actual conversation with the tag.
+
+    What it can NOT do: sniff RF between two other devices. The chip is not a
+    passive RF sniffer; it only reports what it itself transacts. For that you
+    need a Proxmark, not this phone.
+
+    'attrs' is the lighter option: it prints just the parsed activation
+    attributes (SENS/SEL/NFCID for Type A, SENSB/SENSF for B/F, the ISO15693
+    fields for V), including any this tool has no name for (as "attr <N>").
+
+Adding a new protocol or technology:
+    1. Poll it with 'raw' and note which attributes come back and their bytes.
+    2. If the technology is a new NFC protocol the chip can discover, add its
+       bit to the PROTO dict (bit positions are enum nfc_prot in the kernel's
+       include/uapi/linux/nfc.h). ALL_PROTOS is rebuilt from PROTO, so poll
+       will start asking for it automatically.
+    3. If it is a new activation attribute, add its number to the NFC_ATTR_*
+       constants (same header, enum nfc_attrs) and to ATTR_NAMES so raw labels
+       it, then read it in print_target() to show it in the named output.
+    4. To name a new card, extend name_card(): match on SAK, on the protocol,
+       or on the technology-specific bytes you captured with raw.
+    5. If the kernel itself drops the card with "not the desired protocol" in
+       dmesg, the controller is reporting a vendor protocol value the NCI core
+       does not map. That is a driver change, not a change here: see
+       s3fwrn5_nci_get_rfprotocol() (patch 0105) and add the value there.
+"""
+
+import socket
+import struct
+import sys
+import os
+import errno
+
+# Unbuffered stdout: this program is often run under `timeout`, which kills it
+# with a signal, and any line still sitting in the buffer would be lost -- so
+# every card read would vanish exactly when the run ends. Flush as we go.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
+
+# ---- generic netlink plumbing -------------------------------------------
+
+NETLINK_GENERIC = 16
+GENL_ID_CTRL = 0x10
+
+CTRL_CMD_GETFAMILY = 3
+CTRL_ATTR_FAMILY_ID = 1
+CTRL_ATTR_FAMILY_NAME = 2
+CTRL_ATTR_MCAST_GROUPS = 7
+CTRL_ATTR_MCAST_GRP_NAME = 1
+CTRL_ATTR_MCAST_GRP_ID = 2
+
+NLM_F_REQUEST = 0x01
+NLM_F_ACK = 0x04
+NLM_F_DUMP = 0x300  # ROOT|MATCH
+
+NLMSG_ERROR = 0x2
+NLMSG_DONE = 0x3
+
+# ---- NFC subsystem constants (verified against this kernel's uapi) -------
+
+NFC_CMD_GET_DEVICE = 1
+NFC_CMD_DEV_UP = 2
+NFC_CMD_START_POLL = 6
+NFC_CMD_STOP_POLL = 7
+NFC_CMD_GET_TARGET = 8
+NFC_EVENT_TARGETS_FOUND = 9
+NFC_EVENT_TARGET_LOST = 12
+NFC_EVENT_TM_ACTIVATED = 11
+NFC_EVENT_TM_DEACTIVATED = 13
+EVENT_NAMES = {
+    9: "TARGETS_FOUND",
+    11: "TM_ACTIVATED (a reader activated us as a tag)",
+    12: "TARGET_LOST",
+    13: "TM_DEACTIVATED",
+}
+
+NFC_ATTR_DEVICE_INDEX = 1
+NFC_ATTR_DEVICE_NAME = 2
+NFC_ATTR_PROTOCOLS = 3
+NFC_ATTR_TARGET_INDEX = 4
+NFC_ATTR_TARGET_SENS_RES = 5
+NFC_ATTR_TARGET_SEL_RES = 6
+NFC_ATTR_TARGET_NFCID1 = 7
+NFC_ATTR_TARGET_SENSB_RES = 8
+NFC_ATTR_TARGET_SENSF_RES = 9
+NFC_ATTR_DEVICE_POWERED = 12
+NFC_ATTR_IM_PROTOCOLS = 13
+NFC_ATTR_TM_PROTOCOLS = 14
+NFC_ATTR_TARGET_ISO15693_DSFID = 26
+NFC_ATTR_TARGET_ISO15693_UID = 27
+NFC_ATTR_TARGET_ATS = 32
+
+# PF_NFC raw socket -- a passive tap that receives a copy of every NCI frame
+# the kernel exchanges with the controller, both directions. This is the wire
+# between the driver and the chip, not the RF between the chip and a third
+# party: the S3NRN4V is not an RF sniffer, it only reports what it itself
+# transacts. But that is the whole real conversation with a presented tag --
+# every command, every response, every APDU -- which is exactly what you
+# analyse to work out an unknown protocol.
+AF_NFC = 39
+NFC_SOCKPROTO_RAW = 0
+NFC_RAW_HEADER_SIZE = 2       # [dev_index][direction|payload_type<<1]
+NFC_DIRECTION_RX = 0x00
+NFC_DIRECTION_TX = 0x01
+RAW_PAYLOAD_NAMES = {0: "LLCP", 1: "NCI", 2: "HCI", 3: "DIGITAL",
+                     4: "PROPRIETARY"}
+
+# Names for the attributes an activation can carry, so 'attrs' can label what
+# it knows and still print what it does not. Extend this when the kernel gains
+# a new NFC_ATTR_TARGET_* -- see enum nfc_attrs in include/uapi/linux/nfc.h.
+ATTR_NAMES = {
+    NFC_ATTR_PROTOCOLS: "PROTOCOLS",
+    NFC_ATTR_TARGET_INDEX: "TARGET_INDEX",
+    NFC_ATTR_TARGET_SENS_RES: "SENS_RES (ATQA)",
+    NFC_ATTR_TARGET_SEL_RES: "SEL_RES (SAK)",
+    NFC_ATTR_TARGET_NFCID1: "NFCID1 (UID)",
+    NFC_ATTR_TARGET_SENSB_RES: "SENSB_RES",
+    NFC_ATTR_TARGET_SENSF_RES: "SENSF_RES",
+    NFC_ATTR_TARGET_ISO15693_DSFID: "ISO15693_DSFID",
+    NFC_ATTR_TARGET_ISO15693_UID: "ISO15693_UID",
+    NFC_ATTR_TARGET_ATS: "ATS",
+}
+
+# protocol bit positions, from enum nfc_prot in the uapi
+PROTO = {
+    1: "NFC-A / Jewel (Type 1)",
+    2: "MIFARE (Type 2)",
+    3: "FeliCa (Type 3)",
+    4: "ISO-DEP (ISO 14443)",
+    5: "NFC-DEP (peer to peer)",
+    6: "ISO 15693 (Type 5)",
+}
+# a mask covering everything the chip advertised
+ALL_PROTOS = sum(1 << b for b in PROTO)
+# NFC-DEP is the only target protocol the mainline NCI core wires up for
+# listen mode, so it is the mask that makes the controller enter listen.
+NFC_PROTO_NFC_DEP_MASK = 1 << 5
+
+
+def align4(n):
+    return (n + 3) & ~3
+
+
+def nla(attr_type, data):
+    ln = 4 + len(data)
+    return struct.pack("HH", ln, attr_type) + data + b"\0" * (align4(ln) - ln)
+
+
+def nla_u32(attr_type, value):
+    return nla(attr_type, struct.pack("I", value))
+
+
+def parse_attrs(buf):
+    out = {}
+    off = 0
+    while off + 4 <= len(buf):
+        ln, atype = struct.unpack_from("HH", buf, off)
+        if ln < 4:
+            break
+        out[atype & 0x3FFF] = buf[off + 4: off + ln]
+        off += align4(ln)
+    return out
+
+
+class Netlink:
+    def __init__(self):
+        self.seq = 0
+        self.sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW,
+                                  NETLINK_GENERIC)
+        self.sock.bind((0, 0))
+        self.family, self.event_grp = self._resolve_family(b"nfc")
+        if self.family is None:
+            raise SystemExit("kernel has no 'nfc' netlink family -- is the "
+                             "driver loaded? (modprobe s3fwrn5_i2c)")
+
+    def _next_seq(self):
+        self.seq += 1
+        return self.seq
+
+    def _msg(self, mtype, flags, cmd, payload):
+        genl = struct.pack("BBH", cmd, 1, 0) + payload
+        hdr = struct.pack("IHHII", 16 + len(genl), mtype, flags,
+                          self._next_seq(), 0)
+        return hdr + genl
+
+    def _resolve_family(self, name):
+        req = self._msg(GENL_ID_CTRL, NLM_F_REQUEST, CTRL_CMD_GETFAMILY,
+                        nla(CTRL_ATTR_FAMILY_NAME, name + b"\0"))
+        self.sock.send(req)
+        data = self.sock.recv(16384)
+        # skip nlmsghdr(16) + genlmsghdr(4)
+        attrs = parse_attrs(data[20:])
+        fam = None
+        grp = None
+        if CTRL_ATTR_FAMILY_ID in attrs:
+            fam = struct.unpack("H", attrs[CTRL_ATTR_FAMILY_ID][:2])[0]
+        if CTRL_ATTR_MCAST_GROUPS in attrs:
+            # nested: each entry is an nla wrapping name+id
+            blob = attrs[CTRL_ATTR_MCAST_GROUPS]
+            off = 0
+            while off + 4 <= len(blob):
+                ln, _ = struct.unpack_from("HH", blob, off)
+                if ln < 4:
+                    break
+                inner = parse_attrs(blob[off + 4: off + ln])
+                gname = inner.get(CTRL_ATTR_MCAST_GRP_NAME, b"").rstrip(b"\0")
+                if gname == b"events" and CTRL_ATTR_MCAST_GRP_ID in inner:
+                    grp = struct.unpack("I", inner[CTRL_ATTR_MCAST_GRP_ID][:4])[0]
+                off += align4(ln)
+        return fam, grp
+
+    def request(self, cmd, payload=b"", dump=False):
+        """Send a command and collect replies until DONE/ACK."""
+        flags = NLM_F_REQUEST | (NLM_F_DUMP if dump else NLM_F_ACK)
+        self.sock.send(self._msg(self.family, flags, cmd, payload))
+        replies = []
+        while True:
+            data = self.sock.recv(65536)
+            off = 0
+            done = False
+            while off + 16 <= len(data):
+                ln, mtype, flg, seq, pid = struct.unpack_from("IHHII", data, off)
+                if ln < 16:
+                    break
+                body = data[off + 16: off + ln]
+                if mtype == NLMSG_ERROR:
+                    err = struct.unpack("i", body[:4])[0]
+                    if err != 0:
+                        raise OSError(-err, os.strerror(-err))
+                    done = True  # ACK
+                elif mtype == NLMSG_DONE:
+                    done = True
+                elif mtype == self.family:
+                    replies.append(parse_attrs(body[4:]))  # skip genlmsghdr
+                off += align4(ln)
+            if done:
+                break
+        return replies
+
+    def join_events(self):
+        NETLINK_ADD_MEMBERSHIP = 1
+        SOL_NETLINK = 270
+        if self.event_grp is None:
+            raise SystemExit("could not find the 'events' multicast group")
+        self.sock.setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                             self.event_grp)
+
+    def _parse_events(self, data):
+        off = 0
+        out = []
+        while off + 16 <= len(data):
+            ln, mtype, flg, seq, pid = struct.unpack_from("IHHII", data, off)
+            if ln < 16:
+                break
+            if mtype == self.family:
+                genl_cmd = data[off + 16]
+                out.append((genl_cmd, parse_attrs(data[off + 20: off + ln])))
+            off += align4(ln)
+        return out
+
+    def recv_event(self):
+        return self._parse_events(self.sock.recv(65536))
+
+    def recv_event_nonblock(self):
+        """Events if any are waiting, else raise BlockingIOError. Lets the
+        raw-capture loop poll the event socket without stalling on it."""
+        self.sock.setblocking(False)
+        try:
+            data = self.sock.recv(65536)
+        finally:
+            self.sock.setblocking(True)
+        return self._parse_events(data)
+
+
+# ---- the NFC side --------------------------------------------------------
+
+def find_device(nl):
+    devs = nl.request(NFC_CMD_GET_DEVICE, dump=True)
+    for d in devs:
+        if NFC_ATTR_DEVICE_INDEX in d:
+            idx = struct.unpack("I", d[NFC_ATTR_DEVICE_INDEX][:4])[0]
+            name = d.get(NFC_ATTR_DEVICE_NAME, b"").rstrip(b"\0").decode()
+            protos = 0
+            if NFC_ATTR_PROTOCOLS in d:
+                protos = struct.unpack("I", d[NFC_ATTR_PROTOCOLS][:4])[0]
+            powered = bool(d.get(NFC_ATTR_DEVICE_POWERED, b"\0")[0])
+            return idx, name, protos, powered
+    return None
+
+
+def ensure_up(nl, idx, powered):
+    if not powered:
+        try:
+            nl.request(NFC_CMD_DEV_UP, nla_u32(NFC_ATTR_DEVICE_INDEX, idx))
+        except OSError as e:
+            if e.errno != errno.EALREADY:
+                raise
+
+
+def hexs(b):
+    return " ".join("%02x" % x for x in b)
+
+
+def name_card(sel_res, protos_seen, has_sensf, has_sensb, has_v):
+    """Best-effort human name, the way a reader labels a card."""
+    if has_v:
+        return "ISO 15693 tag (NFC-V)"
+    if has_sensf:
+        return "FeliCa (NFC-F)"
+    if has_sensb:
+        return "ISO 14443-B card"
+    if sel_res is None:
+        return "NFC-A target"
+    s = sel_res
+    if s & 0x20:
+        return "ISO-DEP (ISO 14443-4) -- e.g. a bank/EMV card or passport"
+    table = {
+        0x00: "MIFARE Ultralight / NTAG (Type 2)",
+        0x08: "MIFARE Classic 1K",
+        0x09: "MIFARE Mini",
+        0x18: "MIFARE Classic 4K",
+        0x10: "MIFARE Plus 2K",
+        0x11: "MIFARE Plus 4K",
+        0x20: "ISO 14443-4 (DESFire / EMV)",
+        0x28: "JCOP / SmartMX",
+    }
+    return table.get(s, "NFC-A card (SAK 0x%02x)" % s)
+
+
+def print_target(t):
+    idx = struct.unpack("I", t[NFC_ATTR_TARGET_INDEX][:4])[0] \
+        if NFC_ATTR_TARGET_INDEX in t else "?"
+    sens = t.get(NFC_ATTR_TARGET_SENS_RES)
+    sel = t.get(NFC_ATTR_TARGET_SEL_RES)
+    uid = t.get(NFC_ATTR_TARGET_NFCID1)
+    sensb = t.get(NFC_ATTR_TARGET_SENSB_RES)
+    sensf = t.get(NFC_ATTR_TARGET_SENSF_RES)
+    ats = t.get(NFC_ATTR_TARGET_ATS)
+    v_uid = t.get(NFC_ATTR_TARGET_ISO15693_UID)
+    v_dsfid = t.get(NFC_ATTR_TARGET_ISO15693_DSFID)
+
+    sel_val = sel[0] if sel else None
+    label = name_card(sel_val, None, sensf is not None,
+                      sensb is not None, v_uid is not None)
+
+    print("  target #%s: %s" % (idx, label))
+    if uid:
+        print("    UID (NFCID1):  %s  (%d bytes)" % (hexs(uid), len(uid)))
+    if sens and len(sens) >= 2:
+        atqa = struct.unpack("<H", sens[:2])[0]
+        print("    ATQA (SENS):   %04x" % atqa)
+    if sel:
+        print("    SAK  (SEL):    %02x" % sel[0])
+    if ats:
+        print("    ATS:           %s" % hexs(ats))
+    if sensb:
+        print("    SENSB_RES:     %s" % hexs(sensb))
+    if sensf:
+        print("    SENSF_RES:     %s" % hexs(sensf))
+    if v_uid:
+        print("    ISO15693 UID:  %s" % hexs(v_uid))
+    if v_dsfid:
+        print("    DSFID:         %02x" % v_dsfid[0])
+
+
+def get_targets(nl, idx):
+    payload = nla_u32(NFC_ATTR_DEVICE_INDEX, idx)
+    try:
+        return nl.request(NFC_CMD_GET_TARGET, payload, dump=True)
+    except OSError:
+        return []
+
+
+def start_poll(nl, idx):
+    payload = (nla_u32(NFC_ATTR_DEVICE_INDEX, idx)
+               + nla_u32(NFC_ATTR_IM_PROTOCOLS, ALL_PROTOS)
+               + nla_u32(NFC_ATTR_PROTOCOLS, ALL_PROTOS))
+    nl.request(NFC_CMD_START_POLL, payload)
+
+
+def start_listen(nl, idx, uid=None, sak=None):
+    # Target mode. The kernel's start_poll takes tm_protocols the same way it
+    # takes im_protocols; passing only tm makes the controller listen instead
+    # of poll. NFC-DEP is the only tm protocol the NCI core acts on, and it is
+    # enough to get the chip into NFC-A passive listen -- the anticollision is
+    # done in hardware, so a reader sees a card.
+    #
+    # If a uid (NFCID1) is given, pass it as NFC_ATTR_TARGET_NFCID1; the kernel
+    # feeds it to LA_NFCID1 so the controller answers with that UID. If a sak
+    # (SEL_RES) is given, it goes to LA_SEL_INFO -- which tag type the reader
+    # sees (0x00 bare NFC-A, 0x08 MIFARE Classic, 0x20 ISO-DEP). Needs the
+    # "set NFCID1 and SEL_RES for listen" patch.
+    payload = (nla_u32(NFC_ATTR_DEVICE_INDEX, idx)
+               + nla_u32(NFC_ATTR_TM_PROTOCOLS, NFC_PROTO_NFC_DEP_MASK))
+    if uid:
+        payload += nla(NFC_ATTR_TARGET_NFCID1, uid)
+    if sak is not None:
+        payload += nla(NFC_ATTR_TARGET_SEL_RES, bytes([sak & 0xff]))
+    nl.request(NFC_CMD_START_POLL, payload)
+
+
+def stop_poll(nl, idx):
+    try:
+        nl.request(NFC_CMD_STOP_POLL, nla_u32(NFC_ATTR_DEVICE_INDEX, idx))
+    except OSError:
+        pass
+
+
+# ---- commands ------------------------------------------------------------
+
+def cmd_info(nl, args):
+    dev = find_device(nl)
+    if not dev:
+        raise SystemExit("no NFC device found")
+    idx, name, protos, powered = dev
+    print("adapter:   %s (index %d)" % (name, idx))
+    print("powered:   %s" % ("yes" if powered else "no"))
+    print("protocols:")
+    for bit, human in PROTO.items():
+        if protos & (1 << bit):
+            print("    - %s" % human)
+
+
+def print_target_raw(t):
+    """Every attribute the kernel returned, uninterpreted: label + hex.
+
+    This is the ground truth for a card whose protocol is not yet named. What
+    it cannot label it still prints, as "attr <N>", so a new technology's
+    bytes are never lost.
+    """
+    idx = struct.unpack("I", t[NFC_ATTR_TARGET_INDEX][:4])[0] \
+        if NFC_ATTR_TARGET_INDEX in t else "?"
+    print("  raw target #%s -- %d attribute(s):" % (idx, len(t)))
+    for atype in sorted(t):
+        data = t[atype]
+        name = ATTR_NAMES.get(atype, "attr %d" % atype)
+        line = "    %-18s %s" % (name + ":", hexs(data) if data else "(empty)")
+        # For short fixed-width fields, also show the integer value.
+        if data and len(data) <= 4:
+            val = int.from_bytes(data, "little")
+            line += "   (= 0x%x, %d)" % (val, val)
+        print(line)
+
+
+def _poll_loop(nl, idx, once, printer):
+    nl.join_events()
+    start_poll(nl, idx)
+    print("polling -- present a card to the upper back of the phone "
+          "(Ctrl-C to stop)")
+    seen = set()
+    have_target = False
+    try:
+        while True:
+            for cmd, attrs in nl.recv_event():
+                if cmd == NFC_EVENT_TARGETS_FOUND:
+                    for t in get_targets(nl, idx):
+                        uid = t.get(NFC_ATTR_TARGET_NFCID1, b"")
+                        key = bytes(uid) or repr(sorted(t.items()))
+                        if once or key not in seen:
+                            seen.add(key)
+                            printer(t)
+                            print()
+                    if once:
+                        return
+                    # The chip stops polling once it activates a target and
+                    # holds it. Do NOT re-poll now, or it churns through the
+                    # same card thousands of times. Wait for it to be lifted.
+                    have_target = True
+                elif cmd == NFC_EVENT_TARGET_LOST:
+                    if have_target:
+                        have_target = False
+                        seen.clear()  # let the same card be reported again
+                        stop_poll(nl, idx)
+                        start_poll(nl, idx)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        stop_poll(nl, idx)
+
+
+def _run(nl, once, printer):
+    dev = find_device(nl)
+    if not dev:
+        raise SystemExit("no NFC device found")
+    idx, name, protos, powered = dev
+    ensure_up(nl, idx, powered)
+    _poll_loop(nl, idx, once, printer)
+
+
+def cmd_read(nl, args):
+    _run(nl, once=True, printer=print_target)
+
+
+def cmd_watch(nl, args):
+    _run(nl, once=False, printer=print_target)
+
+
+def cmd_attrs(nl, args):
+    _run(nl, once=False, printer=print_target_raw)
+
+
+def parse_uid(s):
+    # accept 04:35:3d:6a:f7:54:80 or 04353d6af75480
+    h = s.replace(":", "").replace(" ", "")
+    try:
+        b = bytes.fromhex(h)
+    except ValueError:
+        raise SystemExit("bad UID %r: give hex, e.g. 04:35:3d:6a:f7:54:80" % s)
+    if not 1 <= len(b) <= 10:
+        raise SystemExit("UID must be 1..10 bytes, got %d" % len(b))
+    return b
+
+
+def cmd_listen(nl, args):
+    # Card emulation: put the controller into listen mode so an external reader
+    # sees the phone as an NFC-A card. The chip does the NFC-A anticollision in
+    # hardware. Without a UID this is milestone 1 (a random NFCID1, just proves
+    # listen works); with `listen <uid>` the controller is asked to answer with
+    # that UID (LA_NFCID1) -- milestone 2, to emulate a specific card. Whether
+    # the chip honours a fixed 7-byte UID is what this tests. Answering the tag
+    # protocol (Type 2 READ) is still later work -- see docs/nfc.md. Watch
+    # `rhodep-nfc raw` in another shell to see the NCI.
+    uid = parse_uid(args[0]) if args else None
+    sak = None
+    if len(args) > 1:
+        try:
+            sak = int(args[1], 16) if args[1].lower().startswith("0x") \
+                else int(args[1], 16)
+        except ValueError:
+            raise SystemExit("bad SAK %r: give hex, e.g. 08 or 0x08" % args[1])
+    dev = find_device(nl)
+    if not dev:
+        raise SystemExit("no NFC device found")
+    idx, name, protos, powered = dev
+    if not (protos & NFC_PROTO_NFC_DEP_MASK):
+        print("warning: this device does not advertise NFC-DEP; the kernel "
+              "will likely reject listen (needs the s3fwrn5 NFC-DEP patch)")
+    ensure_up(nl, idx, powered)
+    nl.join_events()
+    try:
+        start_listen(nl, idx, uid, sak)
+    except OSError as e:
+        raise SystemExit("kernel rejected listen (%s). The driver must "
+                         "advertise a target protocol and the firmware must "
+                         "allow listen -- see docs/nfc.md." % e)
+    if uid:
+        print("listening as NFC-A tag with UID %s -- present a reader to the "
+              "upper back of the phone and check the UID it reports. (Ctrl-C "
+              "to stop)" % ":".join("%02x" % b for b in uid))
+    else:
+        print("listening -- the phone should now look like an NFC-A tag. Bring "
+              "another phone/reader up to the upper back of the phone. (Ctrl-C "
+              "to stop)")
+    try:
+        while True:
+            for cmd, attrs in nl.recv_event():
+                name = EVENT_NAMES.get(cmd, "event 0x%x" % cmd)
+                print("  kernel event: %s" % name)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        stop_poll(nl, idx)
+
+
+# ---- raw frame capture ---------------------------------------------------
+
+class PcapWriter:
+    """Minimal pcap file for the captured frames.
+
+    Link type is LINKTYPE_USER0 (147): Wireshark has no built-in dissector
+    keyed to it, so the bytes land as data you can read by hand or point a
+    dissector at. Each record is [dev][dir|type<<1] then the NCI frame, i.e.
+    exactly what the kernel put on the raw socket, so nothing is lost. To have
+    Wireshark decode NCI, in 'Decode As' map DLT_USER0 to the NCI dissector.
+    """
+
+    LINKTYPE_USER0 = 147
+
+    def __init__(self, path):
+        self.f = open(path, "wb")
+        # global header: magic, ver 2.4, no tz, no sigfigs, snaplen, linktype
+        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0,
+                                 65535, self.LINKTYPE_USER0))
+
+    def write(self, when, raw):
+        sec = int(when)
+        usec = int((when - sec) * 1_000_000)
+        self.f.write(struct.pack("<IIII", sec, usec, len(raw), len(raw)))
+        self.f.write(raw)
+        self.f.flush()
+
+    def close(self):
+        self.f.close()
+
+
+def open_raw_socket():
+    try:
+        s = socket.socket(AF_NFC, socket.SOCK_RAW, NFC_SOCKPROTO_RAW)
+    except OSError as e:
+        raise SystemExit("cannot open the NFC raw socket (%s). Need root and "
+                         "CAP_NET_RAW." % e)
+    s.settimeout(0.5)
+    return s
+
+
+def decode_frame(raw):
+    """Split the kernel's raw record into (dev, direction, type_name, body)."""
+    if len(raw) < NFC_RAW_HEADER_SIZE:
+        return None
+    dev = raw[0]
+    flags = raw[1]
+    direction = "TX" if (flags & 1) else "RX"
+    ptype = (flags >> 1) & 0x7
+    return dev, direction, RAW_PAYLOAD_NAMES.get(ptype, "type%d" % ptype), \
+        raw[NFC_RAW_HEADER_SIZE:]
+
+
+def name_nci(body):
+    """A short human tag for common NCI frames, for the live view only."""
+    if len(body) < 1:
+        return ""
+    mt = (body[0] >> 5) & 0x7          # message type
+    gid = body[0] & 0x0F
+    oid = body[1] & 0x3F if len(body) > 1 else 0
+    kinds = {0: "DATA", 1: "CMD", 2: "RSP", 3: "NTF"}
+    if mt == 0:
+        return "data conn %d" % gid
+    label = {
+        (0x0, 0x00): "CORE_RESET", (0x0, 0x01): "CORE_INIT",
+        (0x0, 0x02): "CORE_SET_CONFIG", (0x0, 0x03): "CORE_GET_CONFIG",
+        (0x1, 0x00): "RF_DISCOVER_MAP", (0x1, 0x03): "RF_DISCOVER",
+        (0x1, 0x04): "RF_DISCOVER_SELECT", (0x1, 0x05): "RF_INTF_ACTIVATED",
+        (0x1, 0x06): "RF_DEACTIVATE",
+    }.get((gid, oid), "GID=%x OID=%02x" % (gid, oid))
+    return "%s %s" % (kinds.get(mt, "?"), label)
+
+
+def cmd_raw(nl, args):
+    """Capture every NCI frame to/from the controller: hex live, and pcap.
+
+    The kernel's raw socket is a passive tap; it does not itself drive
+    discovery. So we start polling too, exactly like watch, and then print
+    the traffic that flows while a tag is present.
+    """
+    out = None
+    pcap = None
+    if args:
+        out = args[0]
+        pcap = PcapWriter(out)
+
+    dev = find_device(nl)
+    if not dev:
+        raise SystemExit("no NFC device found")
+    idx, name, protos, powered = dev
+    ensure_up(nl, idx, powered)
+
+    raw = open_raw_socket()
+    nl.join_events()
+    start_poll(nl, idx)
+    print("capturing NCI frames -- present a tag to the upper back of the "
+          "phone (Ctrl-C to stop)")
+    if out:
+        print("writing pcap to %s" % out)
+
+    import time as _time
+    n = 0
+    have_target = False
+    try:
+        while True:
+            # Drain any activation events so we can re-poll after a lift.
+            try:
+                for cmd, attrs in nl.recv_event_nonblock():
+                    if cmd == NFC_EVENT_TARGETS_FOUND:
+                        have_target = True
+                    elif cmd == NFC_EVENT_TARGET_LOST and have_target:
+                        have_target = False
+                        stop_poll(nl, idx)
+                        start_poll(nl, idx)
+            except BlockingIOError:
+                pass
+
+            try:
+                data = raw.recv(4096)
+            except socket.timeout:
+                continue
+            d = decode_frame(data)
+            if not d:
+                continue
+            dv, direction, ptype, body = d
+            n += 1
+            note = name_nci(body) if ptype == "NCI" else ""
+            print("  #%-4d %s %-4s len=%-3d %s   %s" % (
+                n, direction, ptype, len(body),
+                " ".join("%02x" % b for b in body),
+                note))
+            if pcap:
+                pcap.write(_time.time(), data)
+    except KeyboardInterrupt:
+        print("\nstopped -- %d frame(s) captured" % n)
+    finally:
+        stop_poll(nl, idx)
+        raw.close()
+        if pcap:
+            pcap.close()
+            print("pcap closed: %s" % out)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "read"
+    if cmd in ("help", "--help", "-h"):
+        print(HELP)
+        return
+    commands = {
+        "info": cmd_info,
+        "read": cmd_read,
+        "watch": cmd_watch,
+        "attrs": cmd_attrs,
+        "raw": cmd_raw,
+        "listen": cmd_listen,
+    }
+    if cmd not in commands:
+        # Reject before asking for root, so a typo does not look like a
+        # permission problem.
+        sys.stderr.write("unknown command: %s\n\n" % cmd)
+        raise SystemExit(HELP)
+    if os.geteuid() != 0:
+        raise SystemExit("run as root (the NFC netlink commands are "
+                         "privileged): sudo rhodep-nfc ...")
+    nl = Netlink()
+    commands[cmd](nl, sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

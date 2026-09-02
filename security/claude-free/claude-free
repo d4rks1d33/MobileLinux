@@ -1,0 +1,422 @@
+#!/bin/sh
+# Run Claude Code on the models your opencode providers give you.
+#
+# Claude Code speaks one API and lets you move it with ANTHROPIC_BASE_URL. A
+# translating proxy sits there and routes by provider, reusing the keys opencode
+# already holds - so whatever you have logged into with `opencode auth login` is
+# available here, plus Zen's free models, which need no key at all.
+#
+#   claude-free [claude arguments...]
+#   claude-free --model                 pick one interactively (type to filter,
+#                                       arrows to move, enter to select). Falls
+#                                       back to a plain listing when not on a tty.
+#   claude-free --model <provider/name>  use that from now on
+#   claude-free --small-model <name>     the one used for background work
+#   claude-free --trust                  trust this directory without being asked
+#   claude-free --untrust                ask again next time
+#   claude-free --doctor                 check everything this depends on
+#   claude-free --status | --stop        the proxy
+set -u
+
+PROXY=/usr/local/libexec/rhodep/anthropic-proxy.mjs
+PICKER=/usr/local/libexec/rhodep/claude-free-pick.mjs
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/rhodep/claude-free.conf
+STATE=${XDG_CACHE_HOME:-$HOME/.cache}/claude-free
+LOG=$STATE/proxy.log
+CATALOG=${XDG_CACHE_HOME:-$HOME/.cache}/opencode/models.json
+AUTH=${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json
+
+# In a root shell none of the above exists: opencode's catalog, its keys and
+# Claude Code itself all live in the desktop user's home. Fall back to that user
+# rather than pretending there is nothing configured. This is a single-user
+# machine and root can read those files anyway.
+DESKTOP_HOME=""
+if [ -n "${SUDO_USER:-}" ]; then
+	DESKTOP_HOME=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+fi
+[ -n "$DESKTOP_HOME" ] || DESKTOP_HOME=$(getent passwd 1000 2>/dev/null | cut -d: -f6)
+
+if [ -n "$DESKTOP_HOME" ] && [ "$DESKTOP_HOME" != "$HOME" ]; then
+	[ -r "$CATALOG" ] || CATALOG=$DESKTOP_HOME/.cache/opencode/models.json
+	[ -r "$AUTH" ] || AUTH=$DESKTOP_HOME/.local/share/opencode/auth.json
+	# Sharing the config means one model choice for both shells, which is what a
+	# single user expects; --model then edits the file both of them read.
+	[ -r "$CONF" ] || {
+		alt=$DESKTOP_HOME/.config/rhodep/claude-free.conf
+		[ -r "$alt" ] && CONF=$alt
+	}
+fi
+
+# Anything set in the environment wins over the file, so a one-off
+# "CLAUDE_FREE_MODEL=... claude-free" works without editing the config.
+env_model=${CLAUDE_FREE_MODEL:-}
+env_small=${CLAUDE_FREE_SMALL_MODEL:-}
+env_port=${CLAUDE_FREE_PORT:-}
+[ -r "$CONF" ] && . "$CONF"
+[ -n "$env_model" ] && CLAUDE_FREE_MODEL=$env_model
+[ -n "$env_small" ] && CLAUDE_FREE_SMALL_MODEL=$env_small
+[ -n "$env_port" ] && CLAUDE_FREE_PORT=$env_port
+
+# Claude Code installs itself into a home directory and updates itself there, so
+# it is not on root's PATH. Resolve it at run time rather than hardcoding a
+# version-specific path.
+find_claude() {
+	for candidate in \
+		"$HOME/.local/bin/claude" \
+		"${DESKTOP_HOME:-/home/kali}/.local/bin/claude" \
+		"$HOME/.claude/local/claude" \
+		"${DESKTOP_HOME:-/home/kali}/.claude/local/claude"
+	do
+		[ -x "$candidate" ] && { echo "$candidate"; return 0; }
+	done
+	# PATH last: /usr/local/bin/claude may be the shim that calls this back.
+	command -v claude 2>/dev/null | grep -v '^/usr/local/bin/claude$' | head -1
+}
+
+PORT=${CLAUDE_FREE_PORT:-8787}
+MODEL=${CLAUDE_FREE_MODEL:-opencode/nemotron-3-ultra-free}
+SMALL_MODEL=${CLAUDE_FREE_SMALL_MODEL:-opencode/ling-3.0-tiny-free}
+
+mkdir -p "$STATE"
+export CATALOG AUTH
+
+# A model spec is provider/model. A bare name means opencode, which is where the
+# free models live, so older configs keep working.
+py() { python3 - "$@"; }
+
+model_query() {
+	CF_SPEC=${1:-} CF_MODE=${2:-exists} py <<-'PY'
+	import json, os, sys
+
+	def load(path):
+	    try:
+	        with open(os.path.expanduser(path)) as handle:
+	            return json.load(handle)
+	    except Exception:
+	        return {}
+
+	catalog = load(os.environ["CATALOG"])
+	spec = os.environ.get("CF_SPEC", "")
+	mode = os.environ.get("CF_MODE", "exists")
+	provider, _, model = spec.partition("/")
+	if not model:
+	    provider, model = "opencode", spec
+	elif provider not in catalog:
+	    provider, model = "opencode", spec
+	entry = (catalog.get(provider) or {}).get("models", {}).get(model)
+	if mode == "exists":
+	    raise SystemExit(0 if entry else 1)
+	if mode == "context":
+	    print((entry or {}).get("limit", {}).get("context") or "", end="")
+	PY
+}
+
+model_exists() { [ -r "$CATALOG" ] || return 0; model_query "$1" exists; }
+context_of() { model_query "$1" context; }
+
+list_models() {
+	[ -r "$CATALOG" ] || { echo "no model catalog at $CATALOG; run opencode once" >&2; exit 1; }
+	CF_CURRENT=$MODEL CF_SMALL=$SMALL_MODEL py <<-'PY'
+	import json, os
+
+	def load(path):
+	    try:
+	        with open(os.path.expanduser(path)) as handle:
+	            return json.load(handle)
+	    except Exception:
+	        return {}
+
+	catalog = load(os.environ["CATALOG"])
+	auth = load(os.environ["AUTH"])
+	current = os.environ.get("CF_CURRENT", "")
+	small = os.environ.get("CF_SMALL", "")
+
+	def normalise(spec):
+	    provider, _, model = spec.partition("/")
+	    return spec if model else f"opencode/{spec}"
+
+	current, small = normalise(current), normalise(small)
+
+	# Zen's free models first: they cost nothing and need no credential, which is
+	# the whole reason this exists.
+	groups = [("opencode", "free, no credential needed", True)]
+	for provider in sorted(auth):
+	    if provider == "opencode":
+	        groups.append((provider, "your opencode credential", False))
+	    else:
+	        groups.append((provider, "your key, held by opencode", False))
+
+	unsupported = {"amazon-bedrock", "azure", "vertex", "google-vertex"}
+	for provider, note, free_only in groups:
+	    models = (catalog.get(provider) or {}).get("models") or {}
+	    rows = []
+	    for name, model in models.items():
+	        if free_only and "free" not in name:
+	            continue
+	        limit = model.get("limit") or {}
+	        rows.append((limit.get("context") or 0, limit.get("output") or 0,
+	                     bool(model.get("tool_call")), f"{provider}/{name}"))
+	    if not rows:
+	        continue
+	    rows.sort(reverse=True)
+	    warn = "  [cannot be reached from here]" if provider in unsupported else ""
+	    print(f"\n{provider} - {note}{warn}")
+	    print(f"{'':3}{'context':>10} {'output':>9}  tools  model")
+	    for context, output, tools, spec in rows[:40]:
+	        mark = "*" if spec == current else ("s" if spec == small else " ")
+	        print(f"{mark:3}{context:>10} {output:>9}  {'yes' if tools else 'NO ':5}  {spec}")
+	    if len(rows) > 40:
+	        print(f"{'':3}... and {len(rows) - 40} more")
+
+	print("\n* in use    s background work")
+	print("set with: claude-free --model <provider/name>")
+	if not auth:
+	    print("only the free models are available; `opencode auth login` adds more")
+	PY
+}
+
+# Interactive picker: prints the chosen "provider/model" on stdout, or nothing
+# if cancelled. A small node picker (using @inquirer/prompts' search) ships next
+# to this script and gives type-to-filter with arrow keys. It only runs on a
+# terminal; piped or non-interactive callers fall back to the plain listing.
+# The interactive picker (node + @inquirer/search) draws on the terminal, reads
+# keypresses directly (so TERM=unknown is fine), and does its own saving: it
+# writes CLAUDE_FREE_MODEL into $CONF and kills the proxy so the next run picks
+# it up. So this just decides whether to run it -- only on a terminal, with node
+# and the picker present and the catalog readable -- and returns non-zero to let
+# the caller fall back to the static listing otherwise.
+can_pick() {
+	[ -t 0 ] && [ -t 1 ] || return 1
+	[ -r "$CATALOG" ] || return 1
+	[ -r "$PICKER" ] && command -v node >/dev/null 2>&1 || return 1
+	return 0
+}
+
+set_conf() {
+	key=$1
+	value=$2
+	mkdir -p "$(dirname "$CONF")"
+	touch "$CONF"
+	tmp=$CONF.tmp.$$
+	grep -v "^$key=" "$CONF" > "$tmp" 2>/dev/null || :
+	echo "$key=$value" >> "$tmp"
+	mv "$tmp" "$CONF"
+}
+
+# Claude Code asks once per directory and remembers the answer itself, which
+# works. This exists for the case where the stored value is false and the question
+# will not go away, and for pre-approving a directory deliberately.
+set_trust() {
+	wanted=$1
+	command -v python3 >/dev/null 2>&1 || return 0
+	CF_DIR=$PWD CF_TRUST=$wanted py <<-'PY' 2>/dev/null
+	import json, os, tempfile
+	path = os.path.expanduser("~/.claude.json")
+	directory = os.environ["CF_DIR"]
+	wanted = os.environ["CF_TRUST"] == "yes"
+	try:
+	    with open(path) as handle:
+	        config = json.load(handle)
+	except FileNotFoundError:
+	    config = {}
+	except Exception:
+	    raise SystemExit(0)   # not ours to repair
+	entry = config.setdefault("projects", {}).setdefault(directory, {})
+	if entry.get("hasTrustDialogAccepted") is wanted:
+	    raise SystemExit(0)
+	entry["hasTrustDialogAccepted"] = wanted
+	if wanted:
+	    entry.setdefault("hasCompletedProjectOnboarding", True)
+	# Atomic and 0600, like the original: that file holds account state.
+	fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+	try:
+	    with os.fdopen(fd, "w") as handle:
+	        json.dump(config, handle, indent=2)
+	    os.chmod(tmp, 0o600)
+	    os.replace(tmp, path)
+	except Exception:
+	    os.unlink(tmp)
+	PY
+}
+
+proxy_up() {
+	command -v curl >/dev/null 2>&1 || return 1
+	curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
+}
+
+start_proxy() {
+	proxy_up && return 0
+	[ -r "$PROXY" ] || { echo "claude-free: $PROXY is missing; run install.sh" >&2; return 1; }
+	command -v node >/dev/null 2>&1 || { echo "claude-free: node is not installed" >&2; return 1; }
+	# The proxy gets the same paths, or a root-started proxy would find no keys.
+	ZEN_PROXY_PORT=$PORT ZEN_MODEL=$MODEL ZEN_SMALL_MODEL=$SMALL_MODEL \
+		OPENCODE_AUTH=$AUTH OPENCODE_CATALOG=$CATALOG \
+		nohup node "$PROXY" >>"$LOG" 2>&1 &
+	# Waited for rather than raced: a refused first request looks exactly like a
+	# broken proxy.
+	i=0
+	while [ $i -lt 40 ]; do
+		proxy_up && return 0
+		i=$((i + 1))
+		sleep 0.25
+	done
+	echo "claude-free: the proxy did not come up; last lines of $LOG:" >&2
+	tail -5 "$LOG" >&2
+	return 1
+}
+
+# Free models are promotional and get retired without notice, which would
+# otherwise surface as every request failing upstream.
+resolve_model() {
+	model_exists "$MODEL" && return 0
+	replacement=$(py <<-'PY' 2>/dev/null
+	import json, os
+	try:
+	    with open(os.path.expanduser(os.environ["CATALOG"])) as handle:
+	        catalog = json.load(handle)
+	except Exception:
+	    raise SystemExit(0)
+	best, best_context = "", -1
+	for name, model in (catalog.get("opencode") or {}).get("models", {}).items():
+	    if "free" not in name or not model.get("tool_call"):
+	        continue
+	    context = (model.get("limit") or {}).get("context") or 0
+	    if context > best_context:
+	        best, best_context = f"opencode/{name}", context
+	print(best, end="")
+	PY
+	)
+	if [ -n "$replacement" ]; then
+		echo "claude-free: $MODEL is no longer offered; using $replacement" >&2
+		echo "claude-free: make it permanent with: claude-free --model $replacement" >&2
+		MODEL=$replacement
+	else
+		echo "claude-free: $MODEL is not in the catalog and no replacement was found" >&2
+	fi
+}
+
+case "${1:-}" in
+--trust)
+	set_trust yes
+	echo "trusted: $PWD"
+	exit 0
+	;;
+--untrust)
+	set_trust no
+	echo "will ask again for: $PWD"
+	exit 0
+	;;
+--doctor)
+	echo "node          $(command -v node || echo MISSING) $(node --version 2>/dev/null)"
+	echo "python3       $(command -v python3 || echo MISSING)"
+	claude_bin=$(find_claude)
+	echo "claude        ${claude_bin:-MISSING} $([ -n "$claude_bin" ] && "$claude_bin" --version 2>/dev/null | head -1)"
+	echo "running as    $(id -un)$([ -n "$DESKTOP_HOME" ] && [ "$DESKTOP_HOME" != "$HOME" ] && echo ", using $DESKTOP_HOME for opencode's files and config")"
+	echo "proxy file    $([ -r "$PROXY" ] && echo "$PROXY" || echo MISSING)"
+	echo "catalog       $([ -r "$CATALOG" ] && echo "$CATALOG" || echo "missing - --model cannot list")"
+	echo "credentials   $(py <<-'PY' 2>/dev/null
+	import json, os
+	try:
+	    with open(os.path.expanduser(os.environ["AUTH"])) as handle:
+	        print(", ".join(sorted(json.load(handle))) or "none", end="")
+	except Exception:
+	    print("none", end="")
+	PY
+	) (plus opencode/*-free, which needs none)"
+	printf "model         %s" "$MODEL"
+	if model_exists "$MODEL"; then echo " (in the catalog)"; else echo " (NOT in the catalog any more)"; fi
+	printf "background    %s" "$SMALL_MODEL"
+	if model_exists "$SMALL_MODEL"; then echo " (in the catalog)"; else echo " (NOT in the catalog any more)"; fi
+	if proxy_up; then echo "proxy         up on $PORT"; else echo "proxy         down (starts on demand)"; fi
+	echo "this dir      trusted: $(CF_DIR=$PWD py <<-'PY' 2>/dev/null
+	import json, os
+	try:
+	    with open(os.path.expanduser("~/.claude.json")) as handle:
+	        data = json.load(handle)
+	except Exception:
+	    print("not recorded (no ~/.claude.json for this user yet)", end="")
+	    raise SystemExit(0)
+	entry = (data.get("projects") or {}).get(os.environ["CF_DIR"]) or {}
+	print(entry.get("hasTrustDialogAccepted", "not recorded"), end="")
+	PY
+	)"
+	exit 0
+	;;
+--model|--models|--small-model)
+	which=$1
+	name=${2:-}
+	if [ -z "$name" ]; then
+		# No name given. For --model/--models on a terminal, launch the
+		# interactive picker, which saves the choice and restarts the proxy
+		# itself; it inherits this terminal so the search UI renders. If we are
+		# not on a terminal, or the picker/node are missing, fall back to the
+		# plain listing. (--small-model has no interactive picker; it lists.)
+		if [ "$which" != "--small-model" ] && can_pick; then
+			CLAUDE_FREE_MODEL=$MODEL CLAUDE_FREE_CONF=$CONF \
+				OPENCODE_CATALOG=$CATALOG OPENCODE_AUTH=$AUTH \
+				node "$PICKER"
+			exit $?
+		fi
+		list_models
+		exit 0
+	fi
+	if ! model_exists "$name"; then
+		echo "claude-free: $name is not in the catalog. See: claude-free --model" >&2
+		exit 1
+	fi
+	if [ "$which" = "--small-model" ]; then
+		set_conf CLAUDE_FREE_SMALL_MODEL "$name"
+		echo "background model set to $name"
+	else
+		set_conf CLAUDE_FREE_MODEL "$name"
+		echo "model set to $name"
+	fi
+	# The proxy holds the model names in its environment, so it restarts to pick
+	# them up. It comes back on the next run.
+	pkill -f "anthropic-proxy.mjs" 2>/dev/null && echo "proxy restarted on next run"
+	exit 0
+	;;
+--stop)
+	pkill -f "anthropic-proxy.mjs" 2>/dev/null && echo "proxy stopped" || echo "proxy was not running"
+	exit 0
+	;;
+--status)
+	if proxy_up; then
+		echo "proxy up on port $PORT"
+		curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null; echo
+	else
+		echo "proxy down"
+	fi
+	exit 0
+	;;
+esac
+
+resolve_model
+start_proxy || exit 1
+[ "${CLAUDE_FREE_AUTO_TRUST:-0}" = "1" ] && set_trust yes
+
+window=$(context_of "$MODEL")
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+# Claude Code refuses to start without credentials of some kind. The proxy
+# ignores this one and uses opencode's.
+export ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-opencode}
+export ANTHROPIC_MODEL=$MODEL
+export ANTHROPIC_SMALL_FAST_MODEL=$SMALL_MODEL
+export ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL
+# Puts the current model in Claude Code's own /model picker. Only one entry can
+# be added this way, so it is the one in use; any other is reachable by typing
+# "/model provider/name", which the proxy resolves.
+export ANTHROPIC_CUSTOM_MODEL_OPTION=$MODEL
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="$MODEL (claude-free)"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="routed through opencode's providers"
+[ -n "${window:-}" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS=$window
+export CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=${CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT:-1}
+
+CLAUDE_BIN=$(find_claude)
+[ -n "$CLAUDE_BIN" ] || {
+	echo "claude-free: cannot find the claude binary." >&2
+	echo "  looked in $HOME/.local/bin, ${DESKTOP_HOME:-/home/kali}/.local/bin and \$PATH" >&2
+	exit 1
+}
+exec "$CLAUDE_BIN" "$@"

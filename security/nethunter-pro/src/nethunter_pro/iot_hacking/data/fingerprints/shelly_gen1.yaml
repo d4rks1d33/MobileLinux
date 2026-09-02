@@ -1,0 +1,34 @@
+id: shelly-gen1
+version: 1
+device_type: smart_switch
+vendor: Allterco / Shelly
+family: shelly-gen1
+threshold: 60
+matchers:
+  - name: http-shelly-endpoint
+    type: http_body
+    path: /shelly
+    regex: '"type":"SHSW-|"type":"SHPLG-|"type":"SHBLB-|"type":"SHIX3-'
+    confidence: 90
+    extract:
+      type: '"type":"([^"]+)"'
+      mac: '"mac":"([^"]+)"'
+      auth: '"auth":(true|false)'
+      fw: '"fw":"([^"]+)"'
+  - name: port-80-open
+    type: port
+    port: 80
+    confidence: 10
+  - name: port-5683-coap
+    type: port
+    port: 5683
+    protocol: udp
+    confidence: 15
+  - name: oui-espressif
+    type: mac_oui
+    values: ["5C:CF:7F", "84:0D:8E", "AC:0F:B7", "A4:CF:12",
+             "F0:08:D1", "24:6F:28", "8C:AA:B5", "3C:71:BF",
+             "24:D7:EB"]
+    confidence: 10
+metadata:
+  playbook: shelly-gen1

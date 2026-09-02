@@ -1,0 +1,17 @@
+ath10k/WCN3990/hw1.0/board-2.bin
+ath10k/WCN3990/hw1.0/firmware-5.bin
+qca/crbtfw21.tlv
+qca/crnv21.bin
+qcom/a619_gmu.bin
+qcom/a630_sqe.fw
+qcom/sm6375/motorola/rhodep/a615_zap.b00
+qcom/sm6375/motorola/rhodep/a615_zap.b01
+qcom/sm6375/motorola/rhodep/a615_zap.b02
+qcom/sm6375/motorola/rhodep/a615_zap.mdt
+qcom/sm6375/motorola/rhodep/adspr.jsn
+qcom/sm6375/motorola/rhodep/adsps.jsn
+qcom/sm6375/motorola/rhodep/adspua.jsn
+qcom/sm6375/motorola/rhodep/cdspr.jsn
+qcom/sm6375/motorola/rhodep/modemr.jsn
+qcom/sm6375/motorola/rhodep/modemuw.jsn
+qcom/sm6375/motorola/rhodep/wlanmdsp.mbn

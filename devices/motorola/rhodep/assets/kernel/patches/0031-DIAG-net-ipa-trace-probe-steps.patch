@@ -1,0 +1,291 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] DIAG: net: ipa: trace probe steps and probe the shared SRAM
+
+Not for upstream. On the Motorola rhodep (SM6375) the SoC resets hard the
+moment the IPA driver binds: no CPU exception, no panic, not a single
+character of output. Markers on every step of ipa_probe()/ipa_config()
+narrowed it down to the very first write into the IPA shared SRAM
+(mem_virt + 0x280, i.e. the canaries before IPA_MEM_V4_FILTER_HASHED).
+Everything before that works, including all of ipa_hardware_config() and
+reading SHARED_MEM_SIZE (= 0x600, so mem_offset 0 and size 0x3000, exactly
+the mapped window).
+
+diag_mode module parameter, to tell apart the remaining possibilities in
+one boot each:
+  1  only read the shared SRAM, then abort the probe
+  2  read, then a single 32-bit write through the driver's memremap(WC)
+  3  the same through a private ioremap() (Device-nGnRE) mapping
+
+--- a/drivers/net/ipa/ipa_main.c
++++ b/drivers/net/ipa/ipa_main.c
+@@ -29,6 +29,16 @@
+ #include "ipa_resource.h"
+ #include "ipa_smp2p.h"
+ #include "ipa_sysfs.h"
++
++/*
++ * DIAG (not for upstream): on the Motorola rhodep (SM6375) the SoC resets
++ * hard, with no CPU exception and no output at all, as soon as the IPA driver
++ * binds. These markers go to the pstore/ramoops console so that the exact step
++ * that kills the SoC can be identified after the reset. KERN_EMERG so that no
++ * loglevel filtering can drop them.
++ */
++#define IPA_DIAG(fmt, ...) \
++	printk(KERN_EMERG "IPA-DIAG: " fmt "\n", ##__VA_ARGS__)
+ #include "ipa_table.h"
+ #include "ipa_uc.h"
+ #include "ipa_version.h"
+@@ -494,14 +504,23 @@
+  */
+ static void ipa_hardware_config(struct ipa *ipa, const struct ipa_data *data)
+ {
++	IPA_DIAG("hardware_config: bcr");
+ 	ipa_hardware_config_bcr(ipa, data);
++	IPA_DIAG("hardware_config: tx");
+ 	ipa_hardware_config_tx(ipa);
++	IPA_DIAG("hardware_config: clkon");
+ 	ipa_hardware_config_clkon(ipa);
++	IPA_DIAG("hardware_config: comp");
+ 	ipa_hardware_config_comp(ipa);
++	IPA_DIAG("hardware_config: qsb");
+ 	ipa_hardware_config_qsb(ipa, data);
++	IPA_DIAG("hardware_config: timing");
+ 	ipa_hardware_config_timing(ipa);
++	IPA_DIAG("hardware_config: hashing");
+ 	ipa_hardware_config_hashing(ipa);
++	IPA_DIAG("hardware_config: dcd");
+ 	ipa_hardware_dcd_config(ipa);
++	IPA_DIAG("hardware_config: done");
+ }
+ 
+ /**
+@@ -527,33 +546,42 @@
+ {
+ 	int ret;
+ 
++	IPA_DIAG("config: hardware_config");
+ 	ipa_hardware_config(ipa, data);
+ 
++	IPA_DIAG("config: mem_config");
+ 	ret = ipa_mem_config(ipa);
+ 	if (ret)
+ 		goto err_hardware_deconfig;
+ 
++	IPA_DIAG("config: interrupt_config");
+ 	ret = ipa_interrupt_config(ipa);
+ 	if (ret)
+ 		goto err_mem_deconfig;
+ 
++	IPA_DIAG("config: uc_config");
+ 	ipa_uc_config(ipa);
+ 
++	IPA_DIAG("config: endpoint_config");
+ 	ret = ipa_endpoint_config(ipa);
+ 	if (ret)
+ 		goto err_uc_deconfig;
+ 
++	IPA_DIAG("config: table_config");
+ 	ipa_table_config(ipa);		/* No deconfig required */
+ 
+ 	/* Assign resource limitation to each group; no deconfig required */
++	IPA_DIAG("config: resource_config");
+ 	ret = ipa_resource_config(ipa, data->resource_data);
+ 	if (ret)
+ 		goto err_endpoint_deconfig;
+ 
++	IPA_DIAG("config: modem_config");
+ 	ret = ipa_modem_config(ipa);
+ 	if (ret)
+ 		goto err_endpoint_deconfig;
+ 
++	IPA_DIAG("config: done");
+ 	return 0;
+ 
+ err_endpoint_deconfig:
+@@ -797,6 +825,7 @@
+ 	struct ipa *ipa;
+ 	int ret;
+ 
++	IPA_DIAG("probe: enter");
+ 	ipa_validate_build();
+ 
+ 	/* Get configuration data early; needed for power initialization */
+@@ -820,6 +849,7 @@
+ 	/* The IPA interrupt might not be ready when we're probed, so this
+ 	 * might return -EPROBE_DEFER.
+ 	 */
++	IPA_DIAG("probe: loader=%d, interrupt_init", (int)loader);
+ 	interrupt = ipa_interrupt_init(pdev);
+ 	if (IS_ERR(interrupt))
+ 		return PTR_ERR(interrupt);
+@@ -827,6 +857,7 @@
+ 	/* The clock and interconnects might not be ready when we're probed,
+ 	 * so this might return -EPROBE_DEFER.
+ 	 */
++	IPA_DIAG("probe: power_init");
+ 	power = ipa_power_init(dev, data->power_data);
+ 	if (IS_ERR(power)) {
+ 		ret = PTR_ERR(power);
+@@ -848,41 +879,50 @@
+ 	ipa->modem_route_count = data->modem_route_count;
+ 	init_completion(&ipa->completion);
+ 
++	IPA_DIAG("probe: reg_init");
+ 	ret = ipa_reg_init(ipa, pdev);
+ 	if (ret)
+ 		goto err_kfree_ipa;
+ 
++	IPA_DIAG("probe: mem_init");
+ 	ret = ipa_mem_init(ipa, pdev, data->mem_data);
+ 	if (ret)
+ 		goto err_reg_exit;
+ 
++	IPA_DIAG("probe: cmd_init");
+ 	ret = ipa_cmd_init(ipa);
+ 	if (ret)
+ 		goto err_mem_exit;
+ 
++	IPA_DIAG("probe: gsi_init");
+ 	ret = gsi_init(&ipa->gsi, pdev, ipa->version, data->endpoint_count,
+ 		       data->endpoint_data);
+ 	if (ret)
+ 		goto err_mem_exit;
+ 
+ 	/* Result is a non-zero mask of endpoints that support filtering */
++	IPA_DIAG("probe: endpoint_init");
+ 	ret = ipa_endpoint_init(ipa, data->endpoint_count, data->endpoint_data);
+ 	if (ret)
+ 		goto err_gsi_exit;
+ 
++	IPA_DIAG("probe: table_init");
+ 	ret = ipa_table_init(ipa);
+ 	if (ret)
+ 		goto err_endpoint_exit;
+ 
++	IPA_DIAG("probe: smp2p_init");
+ 	ret = ipa_smp2p_init(ipa, pdev, loader == IPA_LOADER_MODEM);
+ 	if (ret)
+ 		goto err_table_exit;
+ 
+ 	/* Power needs to be active for config and setup */
++	IPA_DIAG("probe: pm_runtime_get_sync (clock on)");
+ 	ret = pm_runtime_get_sync(dev);
+ 	if (WARN_ON(ret < 0))
+ 		goto err_power_put;
+ 
++	IPA_DIAG("probe: ipa_config");
+ 	ret = ipa_config(ipa, data);
+ 	if (ret)
+ 		goto err_power_put;
+@@ -897,6 +937,7 @@
+ 
+ 	if (loader == IPA_LOADER_SELF) {
+ 		/* The AP is loading GSI firmware; do so now */
++		IPA_DIAG("probe: firmware_load");
+ 		ret = ipa_firmware_load(dev);
+ 		if (ret)
+ 			goto err_deconfig;
+--- a/drivers/net/ipa/ipa_mem.c
++++ b/drivers/net/ipa/ipa_mem.c
+@@ -16,6 +16,24 @@
+ #include "gsi_trans.h"
+ #include "ipa.h"
+ #include "ipa_cmd.h"
++
++/* DIAG (not for upstream) ------------------------------------------------ */
++#include <linux/module.h>
++#include <linux/io.h>
++
++#define IPA_DIAG(fmt, ...) \
++	printk(KERN_EMERG "IPA-DIAG: " fmt "\n", ##__VA_ARGS__)
++
++/*
++ * 0 = normal probe
++ * 1 = only read the IPA shared SRAM, then abort the probe
++ * 2 = read, then do one 32-bit write through the driver's WC mapping
++ * 3 = read/write through a private ioremap() (Device-nGnRE) mapping instead
++ */
++int ipa_diag_mode;
++module_param_named(diag_mode, ipa_diag_mode, int, 0644);
++MODULE_PARM_DESC(diag_mode, "DIAG: IPA shared SRAM access test mode");
++/* ----------------------------------------------------------------------- */
+ #include "ipa_data.h"
+ #include "ipa_mem.h"
+ #include "ipa_reg.h"
+@@ -330,8 +348,10 @@
+ 	u32 i;
+ 
+ 	/* Check the advertised location and size of the shared memory area */
++	IPA_DIAG("mem_config: read SHARED_MEM_SIZE");
+ 	reg = ipa_reg(ipa, SHARED_MEM_SIZE);
+ 	val = ioread32(ipa->reg_virt + reg_offset(reg));
++	IPA_DIAG("mem_config: SHARED_MEM_SIZE=0x%08x", val);
+ 
+ 	/* The fields in the register are in 8 byte units */
+ 	ipa->mem_offset = 8 * reg_decode(reg, MEM_BADDR, val);
+@@ -361,6 +381,49 @@
+ 	ipa->zero_virt = virt;
+ 	ipa->zero_size = IPA_MEM_MAX;
+ 
++	IPA_DIAG("mem_config: mem_offset=0x%x mapped_size=0x%x mem_addr=%pap virt=%px",
++		 ipa->mem_offset, ipa->mem_size, &ipa->mem_addr, ipa->mem_virt);
++
++	if (ipa_diag_mode) {
++		void __iomem *io = NULL;
++		void *base = ipa->mem_virt;
++		u32 r;
++
++		IPA_DIAG("test: mode=%d", ipa_diag_mode);
++
++		if (ipa_diag_mode == 3) {
++			IPA_DIAG("test: ioremap(%pap, 0x%x)",
++				 &ipa->mem_addr, ipa->mem_size);
++			io = ioremap(ipa->mem_addr, ipa->mem_size);
++			IPA_DIAG("test: ioremap -> %px", io);
++			if (!io)
++				goto diag_out;
++			base = (void *)io;
++		}
++
++		IPA_DIAG("test: read +0x000");
++		r = readl(base + 0x000);
++		IPA_DIAG("test: read +0x000 = 0x%08x", r);
++
++		IPA_DIAG("test: read +0x280");
++		r = readl(base + 0x280);
++		IPA_DIAG("test: read +0x280 = 0x%08x", r);
++
++		if (ipa_diag_mode >= 2) {
++			IPA_DIAG("test: writel 0xdeadbeef -> +0x280");
++			writel(0xdeadbeef, base + 0x280);
++			IPA_DIAG("test: write survived");
++			IPA_DIAG("test: readback +0x280 = 0x%08x",
++				 readl(base + 0x280));
++		}
++
++		if (io)
++			iounmap(io);
++diag_out:
++		IPA_DIAG("test: done, aborting probe deliberately");
++		goto err_dma_free;
++	}
++
+ 	/* For each defined region, write "canary" values in the
+ 	 * space prior to the region's base address if indicated.
+ 	 */
+@@ -372,11 +435,15 @@
+ 			continue;
+ 
+ 		/* Write canary values in the space before the region */
++		IPA_DIAG("mem_config: canary i=%u id=%u off=0x%04x count=%u",
++			 i, ipa->mem[i].id, ipa->mem[i].offset, canary_count);
+ 		canary = ipa->mem_virt + ipa->mem_offset + ipa->mem[i].offset;
+ 		do
+ 			*--canary = IPA_MEM_CANARY_VAL;
+ 		while (--canary_count);
++		IPA_DIAG("mem_config: canary i=%u ok", i);
+ 	}
++	IPA_DIAG("mem_config: canaries done");
+ 
+ 	/* Verify the microcontroller ring alignment (if defined) */
+ 	mem = ipa_mem_find(ipa, IPA_MEM_UC_EVENT_RING);

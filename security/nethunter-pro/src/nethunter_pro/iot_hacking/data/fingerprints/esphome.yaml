@@ -1,0 +1,17 @@
+id: esphome
+version: 1
+device_type: smart_switch
+vendor: ESPHome
+family: esphome
+threshold: 60
+matchers:
+  - name: mdns-esphome
+    type: mdns
+    mdns_type: _esphomelib._tcp
+    confidence: 90
+  - name: port-6053
+    type: port
+    port: 6053
+    confidence: 40
+metadata:
+  playbook: esphome

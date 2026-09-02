@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Viking helmet for the Bjorn module: rounded skullcap with two horns
+     sweeping out and up, plus a nose-guard down the front. Single-colour,
+     16x16, symbolic so it recolours with the theme like every other
+     module icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- left horn: sweeps outward, curls up -->
+  <path d="M 3.5,6.5 C 2.2,6.2 1.2,5 1.5,3.5 c 0.6,0.9 1.4,1.4 2.4,1.4 z"/>
+  <!-- right horn: mirror -->
+  <path d="M 12.5,6.5 C 13.8,6.2 14.8,5 14.5,3.5 c -0.6,0.9 -1.4,1.4 -2.4,1.4 z"/>
+  <!-- helmet dome: broad brim + rounded top from x=3 to x=13 -->
+  <path d="M 3,7 C 3,4.5 5,3 8,3 c 3,0 5,1.5 5,4 v 1 H 3 Z"/>
+  <!-- brim / rivet line just below the dome -->
+  <path d="M 2.5,8 h 11 v 1 h -11 z"/>
+  <!-- nose guard: a small vertical strip down the front -->
+  <path d="M 7.4,9 h 1.2 v 3 h -1.2 z"/>
+</svg>

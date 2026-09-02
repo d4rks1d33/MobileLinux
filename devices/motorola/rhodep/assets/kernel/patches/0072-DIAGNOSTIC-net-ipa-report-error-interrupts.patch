@@ -1,0 +1,65 @@
+From: rhodep port <none@example.com>
+Date: Mon, 24 Aug 2026 14:45:00 -0300
+Subject: [PATCH] DIAGNOSTIC: net: ipa: unmask and report the error interrupts
+
+Not for source= beyond the investigation it belongs to.
+
+ipa_interrupt_process() handles UC_0, UC_1 and TX_SUSPEND and sends
+everything else to "silently ignore (and clear) any other condition".
+Nothing ever unmasks the error conditions either, so BAD_SNOC_ACCESS,
+RX_ERR, DEAGGR_ERR, TX_ERR, PROC_ERR and TX_HOLB_DROP cannot be seen at
+all.
+
+The reset being chased takes the SoC down with no CPU exception, no
+backtrace and no SMMU fault, seconds after the modem registers on the
+network with IPA loaded. An access the interconnect refuses is one of the
+few things that looks like that from outside, and BAD_SNOC_ACCESS is
+exactly how IPA reports one from inside.
+
+Unmask them and name whichever arrives.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/net/ipa/ipa_main.c
++++ b/drivers/net/ipa/ipa_main.c
+@@ -154,6 +154,20 @@
+ 
+ 	ipa->setup_complete = true;
+ 
++	/*
++	 * DIAGNOSTIC: the error conditions IPA can raise are never unmasked,
++	 * so ipa_interrupt_process() only ever sees them as "any other
++	 * condition" and clears them without a word. BAD_SNOC_ACCESS in
++	 * particular is what an access the interconnect refuses looks like
++	 * from in here, and that is the shape of the reset being chased.
++	 */
++	ipa_interrupt_enable(ipa, IPA_IRQ_BAD_SNOC_ACCESS);
++	ipa_interrupt_enable(ipa, IPA_IRQ_RX_ERR);
++	ipa_interrupt_enable(ipa, IPA_IRQ_DEAGGR_ERR);
++	ipa_interrupt_enable(ipa, IPA_IRQ_TX_ERR);
++	ipa_interrupt_enable(ipa, IPA_IRQ_PROC_ERR);
++	ipa_interrupt_enable(ipa, IPA_IRQ_TX_HOLB_DROP);
++
+ 	dev_info(dev, "IPA driver setup completed successfully\n");
+ 
+ 	return 0;
+--- a/drivers/net/ipa/ipa_interrupt.c
++++ b/drivers/net/ipa/ipa_interrupt.c
+@@ -100,7 +100,16 @@
+ 		ipa_interrupt_suspend_clear_all(interrupt);
+ 		fallthrough;
+ 
+-	default:	/* Silently ignore (and clear) any other condition */
++	default:	/* DIAGNOSTIC: say which one, then clear as before */
++		dev_err_ratelimited(ipa->dev,
++				    "IPA interrupt %u (%s)\n", irq_id,
++				    irq_id == IPA_IRQ_BAD_SNOC_ACCESS ? "BAD_SNOC_ACCESS" :
++				    irq_id == IPA_IRQ_RX_ERR	     ? "RX_ERR" :
++				    irq_id == IPA_IRQ_DEAGGR_ERR     ? "DEAGGR_ERR" :
++				    irq_id == IPA_IRQ_TX_ERR	     ? "TX_ERR" :
++				    irq_id == IPA_IRQ_PROC_ERR	     ? "PROC_ERR" :
++				    irq_id == IPA_IRQ_TX_HOLB_DROP   ? "TX_HOLB_DROP" :
++				    irq_id == IPA_IRQ_GSI_EE	     ? "GSI_EE" : "other");
+ 		iowrite32(mask, ipa->reg_virt + offset);
+ 		break;
+ 	}

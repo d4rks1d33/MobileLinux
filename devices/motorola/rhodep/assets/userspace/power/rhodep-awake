@@ -1,0 +1,221 @@
+#!/bin/sh
+# Manage the list of things that keep the phone awake with the screen off.
+#
+# rhodep-keep-awake already catches work that burns CPU, and anything you start
+# from a terminal. What it cannot see is a service that spends its time waiting
+# -- on the network, on a device -- because from the outside that looks exactly
+# like a service doing nothing. Those have to be named once:
+#
+#	rhodep-awake add apache2        # then plain `systemctl start apache2` is enough
+#	rhodep-awake list
+#	rhodep-awake rm apache2
+#	rhodep-awake status            # what is holding the phone awake right now
+#
+# The daemon re-reads its config every interval, so nothing needs restarting: an
+# entry added while the service is running takes effect within seconds.
+set -e
+
+CONF=${RHODEP_KEEP_AWAKE_CONF:-/etc/rhodep/keep-awake.conf}
+SELF=$(basename "$0")
+
+usage() {
+	cat <<EOF
+usage: $SELF add|rm <name>
+       $SELF list
+       $SELF status
+
+  <name> can be written any of the ways you already type it:
+
+       $SELF add apache2
+       $SELF add apache2.service
+       $SELF add systemctl start apache2
+       $SELF add sudo systemctl restart apache2.service
+
+  so you can paste the command you would normally run. The verb does not
+  matter: start, stop and restart all name the same unit -- it is only read to
+  find the name.
+
+  This tool NEVER starts, stops, enables or disables anything. It edits one
+  list, and the only systemctl it runs is `cat` and `list-unit-files`, both
+  read-only. Units this port depends on -- the battery cutoff above all -- are
+  not touched.
+
+  Or match a process instead of a unit:
+       proc:tshark      by exact name
+       procf:some-arg   anywhere in the command line (see the warning in
+                        keep-awake.conf -- it also matches a shell that
+                        merely mentions the name)
+EOF
+	exit 2
+}
+
+need_root() {
+	[ "$(id -u)" = 0 ] || { echo "$SELF: needs root" >&2; exit 1; }
+}
+
+# Pull the unit out of whatever the user pasted. People type the command they
+# already know -- "systemctl start apache2", sometimes with sudo in front -- and
+# having to strip it down to the bare unit name by hand is exactly the friction
+# this tool exists to remove.
+unit_from_args() {
+	found=
+	for tok in "$@"; do
+		case "$tok" in
+			-*) continue ;;                       # --now, --user, -q
+			sudo|doas|systemctl|service) continue ;;
+			start|stop|restart|reload|enable|disable|status|try-restart)
+				continue ;;
+		esac
+		case "$tok" in
+			proc:*|procf:*|unit:*) echo "$tok"; return 0 ;;
+		esac
+		if [ -z "$found" ]; then
+			found=$tok
+		else
+			echo "$SELF: more than one name in '$*' -- add them one at a time" >&2
+			return 1
+		fi
+	done
+	[ -n "$found" ] || { echo "$SELF: no unit name in '$*'" >&2; return 1; }
+	echo "$found"
+}
+
+# apache2 -> unit:apache2.service, and refuse a name systemd has never heard of.
+# A typo that is silently accepted is the worst outcome here: the entry looks
+# present, the phone still sleeps, and nothing says why.
+resolve() {
+	arg=$1
+	case "$arg" in
+		--user) ;;
+	esac
+	case "$arg" in
+		proc:*|procf:*|unit:*) echo "$arg"; return 0 ;;
+	esac
+	unit=$arg
+	case "$unit" in
+		*.service|*.timer|*.socket|*.target|*.mount|*.path|*.scope) ;;
+		*) unit="$unit.service" ;;
+	esac
+	if systemctl cat "$unit" >/dev/null 2>&1; then
+		echo "unit:$unit"
+		return 0
+	fi
+	echo "$SELF: systemd does not know a unit called '$unit'" >&2
+	near=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null \
+		| awk '{print $1}' | grep -i -- "$arg" | head -5)
+	if [ -n "$near" ]; then
+		echo "did you mean:" >&2
+		echo "$near" | sed 's/^/  /' >&2
+	fi
+	echo "(if it is a plain program rather than a unit, use proc:$arg)" >&2
+	return 1
+}
+
+# The config may carry the immutable bit, because the port protects the files it
+# installs. Take it off for the edit and put it back exactly as it was.
+locked=no
+unlock() {
+	if lsattr "$CONF" 2>/dev/null | cut -c1-20 | grep -q i; then
+		locked=yes
+		chattr -i "$CONF" 2>/dev/null || true
+	fi
+}
+relock() {
+	[ "$locked" = yes ] && chattr +i "$CONF" 2>/dev/null || true
+}
+
+cmd=${1:-}
+[ -n "$cmd" ] || usage
+
+case "$cmd" in
+add)
+	shift
+	[ -n "${1:-}" ] || usage
+	need_root
+	case " $* " in
+		*" --user "*)
+			echo "$SELF: user units are not supported -- rhodep-keep-awake runs as root and only sees system units" >&2
+			exit 1 ;;
+	esac
+	name=$(unit_from_args "$@") || exit 1
+	entry=$(resolve "$name") || exit 1
+	[ -e "$CONF" ] || { install -d "$(dirname "$CONF")"; : > "$CONF"; }
+	if grep -qxF "$entry" "$CONF" 2>/dev/null; then
+		echo "already there: $entry"
+		exit 0
+	fi
+	unlock
+	{
+		echo ""
+		echo "# added by $SELF on $(date +%Y-%m-%d)"
+		echo "$entry"
+	} >> "$CONF"
+	relock
+	echo "added: $entry"
+	echo "the phone will now stay awake while it is running; no restart needed"
+	echo "(this only edits the list -- nothing was started, stopped, enabled or disabled)"
+	;;
+rm|remove|del)
+	shift
+	[ -n "${1:-}" ] || usage
+	need_root
+	name=$(unit_from_args "$@") || exit 1
+	entry=$(resolve "$name" 2>/dev/null) || entry="unit:$name"
+	if ! grep -qxF "$entry" "$CONF" 2>/dev/null; then
+		echo "$SELF: not in the list: $entry" >&2
+		exit 1
+	fi
+	unlock
+	tmp=$(mktemp)
+	# Drop the entry, the "added by" comment above it, and the blank line
+	# above that -- i.e. exactly what `add` wrote. Buffering the whole file
+	# first is what keeps blank lines elsewhere intact; a streaming version
+	# of this ate every one of them.
+	awk -v e="$entry" '
+		{ line[NR] = $0 }
+		END {
+			for (i = 1; i <= NR; i++)
+				if (line[i] == e) {
+					drop[i] = 1
+					if (i > 1 && line[i-1] ~ /^# added by/) {
+						drop[i-1] = 1
+						if (i > 2 && line[i-2] == "")
+							drop[i-2] = 1
+					}
+				}
+			for (i = 1; i <= NR; i++)
+				if (!(i in drop)) print line[i]
+		}
+	' "$CONF" > "$tmp"
+	cat "$tmp" > "$CONF"
+	rm -f "$tmp"
+	relock
+	echo "removed: $entry"
+	;;
+list)
+	echo "things named in $CONF:"
+	grep -hE "^(unit|proc|procf):" "$CONF" 2>/dev/null | sed 's/^/  /' || true
+	echo ""
+	echo "caught automatically, without being listed:"
+	echo "  anything above $(grep -E '^cpu_percent:' "$CONF" 2>/dev/null | awk '{print $2}')% CPU"
+	if grep -qE "^terminal_work:[[:space:]]*(yes|1|true|on)" "$CONF" 2>/dev/null; then
+		echo "  anything you start from a terminal"
+	else
+		echo "  (terminal detection is OFF -- terminal_work in $CONF)"
+	fi
+	;;
+status)
+	if systemd-inhibit --list --no-legend 2>/dev/null | grep -q keep-awake; then
+		echo "HOLDING the phone awake:"
+		journalctl -u rhodep-keep-awake -n 20 --no-pager 2>/dev/null \
+			| grep -o "holding the phone awake: .*" | tail -1 | sed 's/^/  /'
+	else
+		echo "not holding; the phone may suspend with the screen off"
+		journalctl -u rhodep-keep-awake -n 5 --no-pager 2>/dev/null \
+			| grep -o "letting it sleep: .*" | tail -1 | sed 's/^/  /'
+	fi
+	;;
+*)
+	usage
+	;;
+esac

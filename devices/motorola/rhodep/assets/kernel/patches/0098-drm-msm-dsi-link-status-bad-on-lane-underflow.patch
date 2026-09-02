@@ -1,0 +1,321 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/msm/dsi: ask userspace for a modeset after a lane FIFO
+ underflow
+
+Moving the backlight while the compositor repaints makes the DSI controller
+run out of bytes mid packet: all four data lanes underflow, the panel is
+left decoding a truncated stream, and it stays wrong. The screen fills with
+corrupted lines and then a solid colour, and it does not come back.
+
+Measured, with the state left in place and inspected rather than cleared:
+the error count freezes the instant the screen goes bad -- 22 to 22 over
+eight seconds in one run, 17 to 17 over six in another -- while the
+compositor keeps drawing and the framebuffer index keeps advancing. The
+link is healthy and the controller has recovered on its own. It is the
+panel that is stuck.
+
+Nothing in this driver notices. dsi_err_worker() resets the controller for
+DSI_ERR_STATE_MDP_FIFO_UNDERFLOW, which does not help a panel, and there is
+no notion anywhere of the panel being desynchronised while the controller
+is fine. Neither has the vendor driver, incidentally: downstream recovers
+the panel from its ESD check, not from the FIFO path.
+
+What does bring it back is re-running the panel's power on sequence, DSC
+PPS included. Changing the refresh rate through kscreen-doctor -- a full
+modeset, nothing else -- restores it immediately, with no lock/unlock and
+no user interaction. So flag the link bad and let userspace do the modeset,
+which is what i915 (intel_connector.c) and cdns-mhdp8546 do after failed
+link training, and what the kernel-doc for the property explicitly allows:
+"the reason for adding this property is to handle link training failures,
+but it is not limited to DP or link training".
+
+Three details worth stating, because each was a decision:
+
+DSI_ERR_STATE_FIFO is not usable as the trigger. dsi_fifo_status() raises
+it for any non-zero bit of REG_DSI_FIFO_STATUS, and most of that register
+is level rather than error -- DLN*_HS_FIFO_EMPTY reads 1 whenever the link
+is idle. A new state bit is added for the four DLN*_HS_FIFO_UNDERFLOW bits,
+which is what the hardware actually reports here (fifo=88881010 in the
+diagnostic snapshots).
+
+The connector is not refcounted. i915 does drm_connector_get()/put() around
+its work, but msm's connector comes from drm_bridge_connector_init(), which
+allocates with drmm_kzalloc() and rejects a .destroy hook, so the i915
+pattern would set up a put() that has nothing to call. cdns-mhdp8546 keeps
+a plain pointer and cancel_work_sync()s on teardown; that is what fits here.
+
+And it will not ask twice for the same link. Sixty underflows in six
+seconds has been measured, so without a latch userspace would be asked to
+redo a modeset while it is still doing the previous one. The latch clears
+in msm_dsi_host_power_on(), the equivalent of i915 clearing its flag in
+intel_dp_set_link_params(). A retry interval and a cap sit on top so a
+genuinely dead panel settles on one dead screen rather than a modeset loop
+costing a quarter second of black each time round.
+
+This is recovery, not prevention. The underflow still happens; the vendor
+avoids it by programming a command DMA window that mainline never writes,
+which is a separate and so far unsuccessful line of work documented in
+docs/display-cmd-dma-window-wip/.
+
+Two things about the retry policy, both of which were wrong in the first
+version of this patch and both of which produced a panel that stopped
+recovering after the third fault of the boot:
+
+The count is forgotten after a quiet minute. Otherwise DSI_LINK_RETRY_MAX
+is not a guard against a modeset loop, it is a limit on how many times the
+panel is ever allowed to come back -- two recoveries during boot plus one
+under test used it up, and the next real fault was met with "link keeps
+failing" and a permanently corrupt screen.
+
+And the latch is taken last, once the request is certain. Taken before the
+interval and cap checks, an early return leaves it held by a request that
+was never sent; since only msm_dsi_host_power_on() clears it, and that runs
+on the modeset the request would have caused, nothing ever clears it again.
+
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -22,7 +22,9 @@
+ #include <video/mipi_display.h>
+ 
+ #include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_connector.h>
+ #include <drm/drm_of.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "dsi.h"
+ #include "dsi.xml.h"
+@@ -93,6 +95,39 @@
+ #define DSI_ERR_STATE_MDP_FIFO_UNDERFLOW	0x0008
+ #define DSI_ERR_STATE_INTERLEAVE_OP_CONTENTION	0x0010
+ #define DSI_ERR_STATE_PLL_UNLOCKED		0x0020
++#define DSI_ERR_STATE_LANE_FIFO_UNDERFLOW	0x0040
++
++/*
++ * The data lane HS FIFO underflow bits of REG_DSI_FIFO_STATUS.
++ *
++ * DSI_ERR_STATE_FIFO on its own is not usable for this: dsi_fifo_status()
++ * raises it for *any* non-zero bit of that register, and most of the register
++ * is level rather than error -- DLN*_HS_FIFO_EMPTY reads 1 while the link is
++ * idle. These four bits are the real fault, and they are what the panel does
++ * not survive: the controller runs out of bytes mid packet and the panel is
++ * left decoding a truncated stream.
++ */
++#define DSI_FIFO_STATUS_LANE_UNDERFLOW					\
++		(DSI_FIFO_STATUS_DLN0_HS_FIFO_UNDERFLOW |		\
++		 DSI_FIFO_STATUS_DLN1_HS_FIFO_UNDERFLOW |		\
++		 DSI_FIFO_STATUS_DLN2_HS_FIFO_UNDERFLOW |		\
++		 DSI_FIFO_STATUS_DLN3_HS_FIFO_UNDERFLOW)
++
++/*
++ * Do not rebuild the link faster than this, and give up after this many tries,
++ * so that a panel which is genuinely broken settles on one dead screen instead
++ * of a modeset loop. Each modeset costs the panel's power on sequence, which is
++ * a quarter of a second of black.
++ */
++#define DSI_LINK_RETRY_INTERVAL_MS	5000
++#define DSI_LINK_RETRY_MAX		3
++/*
++ * How long the link has to behave before the retry count is forgotten. Without
++ * this the count is a lifetime cap rather than a storm guard: the panel stops
++ * recovering after the third underflow the phone ever sees, which is not what
++ * "keeps failing" is supposed to mean.
++ */
++#define DSI_LINK_QUIET_MS		60000
+ 
+ #define DSI_CLK_CTRL_ENABLE_CLKS	\
+ 		(DSI_CLK_CTRL_AHBS_HCLK_ON | DSI_CLK_CTRL_AHBM_SCLK_ON | \
+@@ -151,6 +186,21 @@
+ 	struct work_struct err_work;
+ 	struct workqueue_struct *workqueue;
+ 
++	/*
++	 * Recovering from a lane FIFO underflow. The controller comes out of
++	 * one healthy and stops reporting errors, but the panel is left
++	 * desynchronised and stays that way -- only its power on sequence, DSC
++	 * PPS included, brings it back. So flag the link bad and let userspace
++	 * do the modeset, the way i915 and cdns-mhdp8546 do after a failed link
++	 * training.
++	 */
++	struct drm_connector *connector;
++	struct work_struct link_status_work;
++	unsigned long link_flags;
++#define DSI_LINK_STATUS_BAD_PENDING	0
++	unsigned long link_retry_last;
++	unsigned int link_retry_count;
++
+ 	/* DSI 6G TX buffer*/
+ 	struct drm_gem_object *tx_gem_obj;
+ 	struct drm_gpuvm *vm;
+@@ -1612,6 +1662,85 @@
+ 	return len;
+ }
+ 
++/*
++ * Modelled on cdns_mhdp_modeset_retry_fn() rather than on i915's version: msm's
++ * connector comes from drm_bridge_connector_init(), which allocates it with
++ * drmm_kzalloc() and forbids a .destroy hook, so it must not be refcounted the
++ * way intel_connector_queue_modeset_retry_work() does. A plain pointer plus
++ * cancel_work_sync() on teardown is the pattern that fits.
++ */
++static void dsi_link_status_worker(struct work_struct *work)
++{
++	struct msm_dsi_host *msm_host =
++		container_of(work, struct msm_dsi_host, link_status_work);
++	struct drm_connector *conn = msm_host->connector;
++
++	if (!conn || !conn->dev)
++		return;
++
++	DRM_DEV_INFO(&msm_host->pdev->dev,
++		     "lane FIFO underflow: flagging [CONNECTOR:%d:%s] bad so userspace re-runs the modeset\n",
++		     conn->base.id, conn->name);
++
++	/* Grab the locks before changing connector property */
++	mutex_lock(&conn->dev->mode_config.mutex);
++	drm_connector_set_link_status_property(conn, DRM_MODE_LINK_STATUS_BAD);
++	mutex_unlock(&conn->dev->mode_config.mutex);
++
++	/*
++	 * Must be sent with no modesetting locks held, which is why the
++	 * property is set and released above first.
++	 */
++	drm_kms_helper_connector_hotplug_event(conn);
++}
++
++static void dsi_queue_link_status_bad(struct msm_dsi_host *msm_host)
++{
++	if (!msm_host->connector || !msm_host->enabled)
++		return;
++
++	/*
++	 * A quiet spell means the previous bout is over and the count starts
++	 * again. This has to come first: without it DSI_LINK_RETRY_MAX stops
++	 * being a guard against a modeset loop and becomes a limit on how many
++	 * times the panel is ever allowed to recover.
++	 */
++	if (msm_host->link_retry_count &&
++	    time_after(jiffies, msm_host->link_retry_last +
++			       msecs_to_jiffies(DSI_LINK_QUIET_MS)))
++		msm_host->link_retry_count = 0;
++
++	if (msm_host->link_retry_count >= DSI_LINK_RETRY_MAX) {
++		DRM_DEV_ERROR_RATELIMITED(&msm_host->pdev->dev,
++					  "link failing repeatedly, not asking again for %u s\n",
++					  DSI_LINK_QUIET_MS / 1000);
++		return;
++	}
++
++	if (msm_host->link_retry_count &&
++	    time_before(jiffies, msm_host->link_retry_last +
++			        msecs_to_jiffies(DSI_LINK_RETRY_INTERVAL_MS)))
++		return;
++
++	/*
++	 * The latch goes last, once the request is certain to be made. Setting
++	 * it before the checks above would leave it held by a request that was
++	 * never sent, and only msm_dsi_host_power_on() clears it -- so a
++	 * modeset that never happens would mean it is never cleared, and the
++	 * panel never recovers again.
++	 *
++	 * One request per link bring-up: sixty underflows in six seconds has
++	 * been measured, and userspace must not be asked to redo the modeset
++	 * while it is still doing the last one.
++	 */
++	if (test_and_set_bit(DSI_LINK_STATUS_BAD_PENDING, &msm_host->link_flags))
++		return;
++
++	msm_host->link_retry_last = jiffies;
++	msm_host->link_retry_count++;
++	schedule_work(&msm_host->link_status_work);
++}
++
+ static void dsi_err_worker(struct work_struct *work)
+ {
+ 	struct msm_dsi_host *msm_host =
+@@ -1622,6 +1751,13 @@
+ 	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+ 		dsi_sw_reset(msm_host);
+ 
++	/*
++	 * Deliberately not DSI_ERR_STATE_FIFO, which is raised by idle level
++	 * bits as well; see DSI_FIFO_STATUS_LANE_UNDERFLOW above.
++	 */
++	if (status & DSI_ERR_STATE_LANE_FIFO_UNDERFLOW)
++		dsi_queue_link_status_bad(msm_host);
++
+ 	/* It is safe to clear here because error irq is disabled. */
+ 	msm_host->err_work_state = 0;
+ 
+@@ -1684,6 +1820,9 @@
+ 		if (status & DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW)
+ 			msm_host->err_work_state |=
+ 					DSI_ERR_STATE_MDP_FIFO_UNDERFLOW;
++		if (status & DSI_FIFO_STATUS_LANE_UNDERFLOW)
++			msm_host->err_work_state |=
++					DSI_ERR_STATE_LANE_FIFO_UNDERFLOW;
+ 	}
+ }
+ 
+@@ -2147,6 +2286,7 @@
+ 		return -ENOMEM;
+ 
+ 	INIT_WORK(&msm_host->err_work, dsi_err_worker);
++	INIT_WORK(&msm_host->link_status_work, dsi_link_status_worker);
+ 
+ 	msm_dsi->id = msm_host->id;
+ 
+@@ -2160,6 +2300,7 @@
+ 
+ 	DBG("");
+ 	if (msm_host->workqueue) {
++		cancel_work_sync(&msm_host->link_status_work);
+ 		destroy_workqueue(msm_host->workqueue);
+ 		msm_host->workqueue = NULL;
+ 	}
+@@ -2592,6 +2733,8 @@
+ 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
+ 
+ 	msm_host->power_on = true;
++	/* The link is up again: allow one more recovery request. */
++	clear_bit(DSI_LINK_STATUS_BAD_PENDING, &msm_host->link_flags);
+ 	mutex_unlock(&msm_host->dev_mutex);
+ 
+ 	return 0;
+@@ -2768,3 +2911,9 @@
+ 
+ 	return msm_host->dsc;
+ }
++
++void msm_dsi_host_set_connector(struct mipi_dsi_host *host,
++				struct drm_connector *connector)
++{
++	to_msm_dsi_host(host)->connector = connector;
++}
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -485,6 +485,14 @@
+ 		return PTR_ERR(connector);
+ 	}
+ 
++	/*
++	 * Remember it: the error worker needs a connector to flag when a lane
++	 * FIFO underflow leaves the panel desynchronised. drm_bridge_connector
++	 * allocates with drmm, so this pointer lives as long as the device and
++	 * must not be refcounted.
++	 */
++	msm_dsi_host_set_connector(msm_dsi->host, connector);
++
+ 	return 0;
+ }
+ 
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -120,6 +120,8 @@
+ int dsi_calc_clk_rate_v2(struct msm_dsi_host *msm_host, bool is_bonded_dsi);
+ int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi);
+ void msm_dsi_host_snapshot(struct msm_disp_state *disp_state, struct mipi_dsi_host *host);
++void msm_dsi_host_set_connector(struct mipi_dsi_host *host,
++				struct drm_connector *connector);
+ void msm_dsi_host_test_pattern_en(struct mipi_dsi_host *host);
+ struct drm_dsc_config *msm_dsi_host_get_dsc_config(struct mipi_dsi_host *host);
+ bool msm_dsi_host_is_wide_bus_enabled(struct mipi_dsi_host *host);

@@ -1,0 +1,60 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/msm/dsi: use the DSC model pre-SCR range_max_qp[0] for 8bpp/10bpc
+
+Qualcomm's DSC encoder, and the panels validated against it, use the RC
+range parameters from the DSC model's pre-SCR configuration, which sets
+range_max_qp[0] = 8 for the 8bpp / 10bpc case.
+
+The shared helper table rc_parameters_pre_scr[] deliberately deviates
+there and uses 4, following VESA DSC 1.1 Table E-5 -- see the comment
+already present in drm_dsc_helper.c:
+
+	/*
+	 * DSC model/pre-SCR-cfg has 8 for range_max_qp[0], however
+	 * VESA DSC 1.1 Table E-5 sets it to 4.
+	 */
+
+For a panel whose DDIC has the rate-control tables hardwired and does not
+take them from the PPS, the encoder (4) and the decoder (8) then disagree
+on the bit-consumption model. Decoding desyncs a few slices into the
+frame: the top of the image is correct and the rest is garbage.
+
+This is the only entry in the whole pre-SCR table that differs from
+Qualcomm's downstream tables (sde_dsc_rc_range_max_qp[DSC_V11_10BPC_8BPP]
+in techpack/display). The 8bpp/8bpc and 10bpp/10bpc rows already match,
+as do rc_buf_thresh, range_min_qp and range_bpg_offset for every row.
+
+Fix it locally in the msm DSI driver rather than in the shared table,
+since DRM_DSC_1_1_PRE_SCR is also used by i915.
+
+Found on the Motorola Moto G82 5G (SM6375, DPU 6.9) with a CSOT NT37701
+1080x2400 DSC 1.1 command mode panel (slice 1080x12, 10bpc, 8bpp): a full
+register dump showed every DPU, DSC, PINGPONG, INTF and DSI register
+matching the vendor driver exactly, with this single parameter as the
+only remaining difference.
+
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-08-04 18:54:38.378604000 +0000
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-08-04 18:54:38.390604000 +0000
+@@ -1926,6 +1926,22 @@
+ 		return ret;
+ 	}
+ 
++	/*
++	 * Qualcomm's DSC encoder is validated against the DSC model's pre-SCR
++	 * configuration, which uses range_max_qp[0] = 8 for 8bpp/10bpc, while
++	 * the shared table follows VESA DSC 1.1 Table E-5 and uses 4 (see the
++	 * comment in rc_parameters_pre_scr[]). A panel whose decoder has the
++	 * RC tables hardwired instead of taking them from the PPS then
++	 * disagrees with the encoder and the picture desyncs partway into the
++	 * frame.
++	 *
++	 * This is the only entry that differs from the downstream tables, so
++	 * override just that one instead of touching the shared helper, which
++	 * is also used by i915.
++	 */
++	if (dsc->bits_per_pixel == 8 << 4 && dsc->bits_per_component == 10)
++		dsc->rc_range_params[0].range_max_qp = 8;
++
+ 	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
+ 	dsc->line_buf_depth = dsc->bits_per_component + 1;
+ 

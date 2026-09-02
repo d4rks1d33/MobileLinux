@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Arm the APSS watchdog with a pretimeout, then keep petting it.
+
+The port has a reset that takes the SoC down a few seconds after the modem
+attaches to LTE, with nothing in the log: no exception, no backtrace, nothing
+from the softlockup detector. Patch 0068 describes the watchdog so qcom-wdt can
+bind; this puts it to work.
+
+With a pretimeout set, the hardware barks before it bites. The bark arrives as
+an interrupt, the panic governor turns it into a panic, and the panic prints
+every CPU's backtrace -- which survives the reset now that ramoops has ECC.
+
+If the reset is an AP watchdog timeout, this catches it. If the log comes back
+empty anyway, that is worth knowing too: it means nothing on the AP side timed
+out and the reset came from somewhere else, TrustZone or the modem.
+
+CONFIG_WATCHDOG_SYSFS is off in this kernel, so everything goes through ioctl.
+Opening /dev/watchdog starts the countdown, so this has to stay running; on a
+clean exit it writes the magic 'V' to disarm rather than leaving a live
+watchdog behind.
+
+usage: rhodep-wdt-arm [timeout_s] [pretimeout_s]
+"""
+
+import fcntl
+import os
+import signal
+import struct
+import sys
+import time
+
+DEV = "/dev/watchdog0"
+
+# _IOWR('W', nr, int) for a 4 byte argument
+WDIOC_SETTIMEOUT = 0xC0045706
+WDIOC_GETTIMEOUT = 0x80045707
+WDIOC_SETPRETIMEOUT = 0xC0045708
+WDIOC_GETPRETIMEOUT = 0x80045709
+WDIOC_KEEPALIVE = 0x80045705
+
+running = True
+
+
+def stop(_sig, _frm):
+    global running
+    running = False
+
+
+def main() -> int:
+    timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+    pre = int(sys.argv[2]) if len(sys.argv) > 2 else 15
+
+    if os.geteuid() != 0:
+        print("run as root", file=sys.stderr)
+        return 1
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    fd = os.open(DEV, os.O_RDWR)   # this starts the watchdog
+    try:
+        fcntl.ioctl(fd, WDIOC_SETTIMEOUT, struct.pack("i", timeout))
+        fcntl.ioctl(fd, WDIOC_SETPRETIMEOUT, struct.pack("i", pre))
+
+        got_t = struct.unpack("i", fcntl.ioctl(fd, WDIOC_GETTIMEOUT,
+                                               struct.pack("i", 0)))[0]
+        got_p = struct.unpack("i", fcntl.ioctl(fd, WDIOC_GETPRETIMEOUT,
+                                               struct.pack("i", 0)))[0]
+        print("armed: timeout=%ds pretimeout=%ds (bark at %ds without a pet)"
+              % (got_t, got_p, got_t - got_p), flush=True)
+
+        # Pet at a third of the bark interval, so a single missed round does
+        # not trip it but a wedged kernel does.
+        interval = max(1, (got_t - got_p) // 3)
+        while running:
+            fcntl.ioctl(fd, WDIOC_KEEPALIVE, struct.pack("i", 0))
+            time.sleep(interval)
+    finally:
+        try:
+            os.write(fd, b"V")     # magic close: disarm instead of leaving it live
+        except OSError:
+            pass
+        os.close(fd)
+        print("disarmed", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

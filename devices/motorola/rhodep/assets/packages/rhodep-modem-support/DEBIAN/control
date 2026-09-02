@@ -1,0 +1,18 @@
+Package: rhodep-modem-support
+Version: 4
+Architecture: arm64
+Depends: qcom-support-common
+Maintainer: rhodep port
+Description: Modem/ADSP/CDSP + WiFi (WCN3990) support for Motorola rhodep
+ Mounts modem_a firmware partition, symlinks .mbn->.mdt for the remoteprocs
+ and the protection-domain .jsn files into the firmware directory pd-mapper
+ looks in, sets rmtfs flags, brings up remoteprocs, and loads ath10k_snoc late
+ (after the WLAN protection domain / QMI wlfw appears). Enables WiFi and BT.
+ .
+ The .jsn symlinks are what let pd-mapper publish the SERVREG locator, without
+ which no protection domain starts: WLAN's wlan_pd and the sensor core's
+ sensor_pd both depend on it.
+ .
+ Also delays ModemManager until the modem has registered its QMI services, and
+ puts an apt hold on the packages this port depends on being exactly as
+ validated (see the postinst).

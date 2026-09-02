@@ -1,0 +1,21 @@
+[Unit]
+Description=bettercap for pwnagotchi (rhodep, external wlan1 only)
+Documentation=https://bettercap.org
+Wants=network.target
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rhodep-pwn-bettercap-launcher
+# bettercap-launcher runs monstart (wlan1 -> monitor). On stop, undo it: put
+# the external adapter back to a normal managed wlan1, by name. monstop only
+# ever touches wlan1, never the internal wlan0.
+ExecStopPost=/usr/local/sbin/rhodep-pwn-monstop
+Restart=always
+RestartSec=15
+LimitNOFILE=65535
+StandardOutput=append:/etc/pwnagotchi/log/bettercap.log
+StandardError=append:/etc/pwnagotchi/log/bettercap.log
+
+[Install]
+WantedBy=multi-user.target

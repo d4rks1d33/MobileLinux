@@ -1,0 +1,8 @@
+[Unit]
+Description=NetHunter Pro privileged helper
+# Started on demand by dbus activation; exits after idle.
+
+[Service]
+Type=dbus
+BusName=org.kali.NetHunterPro.Helper
+ExecStart=/usr/libexec/nethunter-pro-helper

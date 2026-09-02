@@ -1,0 +1,22 @@
+id: qnap
+version: 1
+device_type: nas
+vendor: QNAP
+family: qnap
+threshold: 60
+matchers:
+  - name: http-title
+    type: http_body
+    path: /
+    regex: 'QNAP|QTS'
+    confidence: 70
+  - name: port-8080
+    type: port
+    port: 8080
+    confidence: 15
+  - name: mdns-qnap
+    type: mdns
+    mdns_type: _qnap-nvr._tcp
+    confidence: 50
+metadata:
+  playbook: qnap

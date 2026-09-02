@@ -1,0 +1,91 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: battery thermal zone
+
+Wire the CW2217 up as the sensor and the SGM41542 as the cooling device, so
+charging is throttled at 45 C and stopped at 50 C by the kernel, with no
+userspace involvement. The thresholds come from the vendor's software JEITA
+table (jeita_temp_* in discrete_charging_rhodep.dtsi).
+
+The gauge has no interrupt wired here, hence the polling delays.
+
+The cold side of JEITA cannot be expressed this way, since the thermal
+framework only acts on rising temperature. That stays in userspace.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -148,6 +148,53 @@
+ 	 * battery profile, and the low/high voltage alarm points that
+ 	 * downstream programs into the gauge.
+ 	 */
++	/*
++	 * Hot side JEITA, handled by the kernel. The CW2217 gauge is the sensor
++	 * and the charger the cooling device, so the protection does not depend
++	 * on anything in userspace.
++	 *
++	 * Thresholds taken from the vendor table (jeita_temp_* in
++	 * discrete_charging_rhodep.dtsi): a 45 C baja la corriente, a 50 C corta.
++	 * The sensor has no interrupt wired, hence the polling.
++	 *
++	 * The cold side (below 0 C) cannot be expressed here: the thermal
++	 * framework only acts on rising temperature. That stays in the
++	 * servicio rhodep-battery-jeita.
++	 */
++	thermal-zones {
++		battery-thermal {
++			polling-delay-passive = <5000>;
++			polling-delay = <15000>;
++			thermal-sensors = <&fuel_gauge>;
++
++			trips {
++				battery_warm: trip-point0 {
++					temperature = <45000>;
++					hysteresis = <3000>;
++					type = "passive";
++				};
++
++				battery_hot: trip-point1 {
++					temperature = <50000>;
++					hysteresis = <3000>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&battery_warm>;
++					cooling-device = <&charger 1 1>;
++				};
++
++				map1 {
++					trip = <&battery_hot>;
++					cooling-device = <&charger 3 3>;
++				};
++			};
++		};
++	};
++
+ 	battery: battery {
+ 		compatible = "simple-battery";
+ 		charge-full-design-microamp-hours = <5000000>;
+@@ -241,8 +288,9 @@
+ 	 * Also on this bus, not yet supported: an SGM41542 charger at 0x3b
+ 	 * and an SGM7220 Type-C controller at 0x47.
+ 	 */
+-	fuel-gauge@64 {
++	fuel_gauge: fuel-gauge@64 {
+ 		compatible = "cellwise,cw2217";
++		#thermal-sensor-cells = <0>;
+ 		reg = <0x64>;
+ 		monitored-battery = <&battery>;
+ 		shunt-resistor-micro-ohms = <5000>;
+@@ -263,8 +311,9 @@
+ 	 * optional in bq256xx and without it the driver reads the registers on
+ 	 * demand. It can be added later.
+ 	 */
+-	charger@3b {
++	charger: charger@3b {
+ 		compatible = "sgm,sgm41542";
++		#cooling-cells = <2>;
+ 		reg = <0x3b>;
+ 		monitored-battery = <&battery>;
+ 		input-current-limit-microamp = <1000000>;

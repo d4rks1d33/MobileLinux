@@ -1,0 +1,13 @@
+id: rtsp-generic
+version: 1
+device_type: camera
+vendor: Generic
+family: rtsp
+threshold: 55
+matchers:
+  - name: port-554
+    type: port
+    port: 554
+    confidence: 55
+metadata:
+  playbook: rtsp-camera

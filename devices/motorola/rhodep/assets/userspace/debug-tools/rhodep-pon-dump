@@ -1,0 +1,9 @@
+#!/bin/bash
+# Full PON peripheral dump (0x800-0x8ff) via regmap debugfs, tagged with the
+# boot reason so two dumps can be diffed.
+R=/sys/kernel/debug/regmap/0-00/registers
+BR=$(tr ' ' '\n' < /proc/cmdline | grep -o 'bootreason=.*' | cut -d= -f2)
+PR=$(tr ' ' '\n' < /proc/cmdline | grep -o 'powerup_reason=.*' | cut -d= -f2)
+echo "# bootreason=$BR powerup_reason=$PR uptime=$(cut -d' ' -f1 /proc/uptime)"
+awk -v lo=$((0x800)) -v hi=$((0x8ff)) '
+{ split($0,a,":"); v=strtonum("0x" a[1]); if (v>=lo && v<=hi) print $0 }' "$R"

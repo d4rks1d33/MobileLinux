@@ -1,0 +1,18 @@
+id: openevse
+version: 1
+device_type: ev_charger
+vendor: OpenEVSE
+family: openevse
+threshold: 60
+matchers:
+  - name: http-status
+    type: http_body
+    path: /status
+    regex: 'openevse|amp_hour|charge_time'
+    confidence: 85
+  - name: mdns-openevse
+    type: mdns
+    mdns_type: _openevse._tcp
+    confidence: 80
+metadata:
+  playbook: openevse

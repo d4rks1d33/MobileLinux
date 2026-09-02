@@ -1,0 +1,14 @@
+[Unit]
+Description=Activate the modem carrier configuration (PERSONAL_ARG)
+After=rmtfs.service qrtr-ns.service
+Before=ModemManager.service
+Wants=rmtfs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-pdc-activate
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

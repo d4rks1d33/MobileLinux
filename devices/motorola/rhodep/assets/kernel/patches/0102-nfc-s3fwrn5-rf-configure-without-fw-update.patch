@@ -1,0 +1,83 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] nfc: s3fwrn5: apply the RF configuration without a firmware
+ update
+
+The controller on this phone enumerates, reports its protocols and accepts
+RF_DISCOVER with status 0, and then finds nothing. Its RF registers have
+never been programmed.
+
+s3fwrn5_nci_rf_configure() is the only thing in this driver that programs
+them, and it is reachable from exactly one place: after a firmware download
+inside s3fwrn5_firmware_update(). If the firmware image is absent,
+post_setup returns early; if it is present but the chip is already at that
+version, firmware_update takes its `goto out` and skips the RF
+configuration as well. Either way a chip with current firmware and blank RF
+registers stays blank.
+
+That is fine on a phone whose vendor stack configures RF from userspace,
+which is what Android does here -- android.hardware.nfc-service.sec plus
+libnfc-sec-vendor.conf, which names the blobs and the clock parameters. It
+is not fine when the kernel is the only thing driving the part.
+
+So try the RF configuration on its own when there is no firmware image. It
+costs one request_firmware() that fails harmlessly when the file is absent,
+which is the situation on every board that does not ship one, and the log
+line says plainly that the chip was left as it was.
+
+This does not touch the firmware download path, deliberately. Writing the
+wrong image to an NFC controller is the one failure here that is not
+recoverable in software, and programming RF registers is not.
+
+Worth recording for whoever takes this further: the part is an S3NRN4V, not
+an S3FWRN5, and its blobs are sec_s3nrn4v_firmware.bin plus *two* register
+files, sec_s3nrn4v_hwreg.bin and sec_s3nrn4v_swreg.bin, where this driver
+knows one rfreg. The firmware container is the same -- a 12 byte date, the
+version at 0x10, signature and image offsets after it, all parsing cleanly
+against S3FWRN5_FW_IMAGE_HEADER_SIZE. And the vendor configures the clock
+with FW_CFG_CLK_SPEED=0x11 where this driver hardcodes clk_speed = 0xff,
+which is the next thing to look at if the registers go in and nothing
+changes.
+
+Two things were tried here and removed, both recorded so nobody adds them
+back. Applying a second register file, which the vendor stack does -- its
+config names RF_HW_FILE_NAME and RF_SW_FILE_NAME -- makes the chip stop
+answering PROP_STOP_RFREG, and the same happens with the two files
+concatenated into one image. And calling nci_core_reset() afterwards, which
+the firmware-update path does, is not safe from post_setup(): it runs
+inside nci_open_device()'s own init sequence, and re-entering the request
+machinery there returns -EPROTO and leaves the adapter refusing to power on
+at all.
+
+--- a/drivers/nfc/s3fwrn5/core.c
++++ b/drivers/nfc/s3fwrn5/core.c
+@@ -128,7 +128,29 @@
+ 	int ret;
+ 
+ 	if (s3fwrn5_firmware_init(info)) {
+-		//skip bootloader mode
++		/*
++		 * No firmware image. The chip keeps its own, so this is not
++		 * fatal -- but the RF registers still have to be programmed, and
++		 * the only path that did that was the one this skips. Try it on
++		 * its own before giving up.
++		 *
++		 * Deliberately nothing else. An earlier version of this also
++		 * called nci_core_reset() here, on the reasoning that the
++		 * firmware-update path ends that way and transferring registers
++		 * is not the same as running on them. It is not safe from here:
++		 * post_setup() is called from inside nci_open_device()'s own
++		 * init sequence, and re-entering the request machinery from
++		 * there fails -- observed as -EPROTO, with the adapter then
++		 * refusing to power on at all, even with no rfreg file present.
++		 */
++		s3fwrn5_set_mode(info, S3FWRN5_MODE_NCI);
++		s3fwrn5_set_wake(info, true);
++		ret = s3fwrn5_nci_rf_configure(info, "sec_s3fwrn5_rfreg.bin");
++		s3fwrn5_set_wake(info, false);
++		if (ret < 0)
++			dev_info(&ndev->nfc_dev->dev,
++				 "no rfreg applied (%d); the chip keeps whatever it has\n",
++				 ret);
+ 		return 0;
+ 	}
+ 

@@ -1,0 +1,106 @@
+#!/bin/bash
+# airmon-safe — use airmon-ng WITHOUT taking Phosh down.
+#
+# Problem: `airmon-ng check kill` stops NetworkManager/wpa_supplicant and, on a
+# phone port running Phosh, that network churn ends up stopping phosh.service;
+# phoc (the Wayland compositor) then takes >90s to tear down, so systemd SIGKILLs
+# it and triggers OnFailure=getty@tty1 -> black screen with no auto-recovery.
+#
+# This wrapper kills the processes that interfere with monitor mode BUT keeps the
+# phoc/phosh tree alive, and restores the network afterwards.
+#
+# Usage:
+#   airmon-safe start   <iface>   # kill interference + enable monitor mode
+#   airmon-safe stop    <iface>   # back to managed + restore NetworkManager
+#   airmon-safe kill              # just the protected "check kill" (no iface)
+#   airmon-safe restore           # bring NetworkManager/wpa_supplicant back
+#
+# Requires root.
+set -u
+
+need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run with sudo."; exit 1; }; }
+
+# Network services we DO stop (they interfere with monitor mode).
+NET_SERVICES=(NetworkManager wpa_supplicant)
+# Processes airmon kills; the same set, minus anything graphical.
+KILL_PROCS='wpa_supplicant|wpa_action|wpa_cli|dhclient|dhcpcd|dhcdbd|udhcpc|ifplugd|avahi-autoipd|avahi-daemon|iwd'
+
+protect_graphics() {
+  # Clear any stale failed state so the auto-restart override can act, and never
+  # stop the shell ourselves. KILL_PROCS already excludes anything graphical;
+  # this is just an extra safeguard. Both units are cleared because Phosh may be
+  # started either by phosh.service (autologin) or by a display manager.
+  systemctl reset-failed phosh.service 2>/dev/null
+  systemctl reset-failed display-manager.service 2>/dev/null
+  :
+}
+
+# Bring the graphical session back, whichever way it is started on this install:
+#   - phosh.service autologin      -> restart phosh.service
+#   - display manager (gdm3, ...)  -> restart the display manager; it shows the
+#                                     login screen again and the user logs back in
+restart_graphics() {
+  if systemctl is-active --quiet display-manager.service; then
+    echo "[!] Graphical session gone; restarting the display manager..."
+    systemctl restart display-manager.service
+  elif [ "$(systemctl is-enabled phosh.service 2>/dev/null)" != "masked" ]; then
+    echo "[!] Phosh is not active; restarting phosh.service..."
+    systemctl restart phosh.service
+  else
+    echo "[!] Phosh is gone and there is no display manager to restart."
+  fi
+}
+
+do_kill() {
+  need_root
+  protect_graphics
+  echo "[*] Stopping network services that interfere with monitor mode..."
+  for s in "${NET_SERVICES[@]}"; do
+    if systemctl is-active --quiet "$s"; then
+      systemctl stop "$s" && echo "    stopped: $s"
+    fi
+  done
+  echo "[*] Killing leftover processes (protecting phosh/phoc)..."
+  # PIDs of the graphical tree we must never touch.
+  local gfx_pids
+  gfx_pids="$(pgrep -x phoc; pgrep -f /usr/libexec/phosh; pgrep -x phosh-session)"
+  for pid in $(pgrep -f "$KILL_PROCS"); do
+    if echo "$gfx_pids" | grep -qw "$pid"; then continue; fi
+    kill "$pid" 2>/dev/null && echo "    kill $pid ($(cat /proc/$pid/comm 2>/dev/null))"
+  done
+  # Check the process, not the unit: under a display manager phosh.service is
+  # masked and `is-active phosh.service` would always say "inactive".
+  if pgrep -x phoc >/dev/null 2>&1 || systemctl is-active --quiet phosh.service; then
+    echo "[OK] Phosh is still active."
+  else
+    restart_graphics
+  fi
+}
+
+do_restore() {
+  need_root
+  echo "[*] Restoring network services..."
+  for s in "${NET_SERVICES[@]}"; do
+    systemctl start "$s" && echo "    started: $s"
+  done
+}
+
+case "${1:-}" in
+  start)
+    iface="${2:?usage: airmon-safe start <iface>}"
+    do_kill
+    echo "[*] Putting $iface into monitor mode..."
+    airmon-ng start "$iface"
+    ;;
+  stop)
+    iface="${2:?usage: airmon-safe stop <iface>}"
+    need_root
+    echo "[*] Taking $iface out of monitor mode..."
+    airmon-ng stop "$iface"
+    do_restore
+    ;;
+  kill)    do_kill ;;
+  restore) do_restore ;;
+  *)
+    echo "usage: airmon-safe {start <iface>|stop <iface>|kill|restore}"; exit 1 ;;
+esac

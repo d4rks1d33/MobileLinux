@@ -1,0 +1,16 @@
+[Unit]
+Description=Switch the Moto G82 audio output when the headset jack changes
+# The jack input device only exists once the card is up, and the initial state
+# is read from an ALSA control, so the route unit has to have run first.
+After=rhodep-audio-route.service
+Requires=rhodep-audio-route.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rhodep-jack-watch
+# The card can disappear and come back with the ADSP, so do not give up.
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,115 @@
+#!/bin/sh
+# rhodep: lay down the file tree the ADSP sensor framework reads off the AP.
+#
+# The sensors live on the SSC inside the ADSP, on buses Linux does not own, and
+# every SSC driver reads its bus, address, interrupt and calibration out of a
+# registry that lives on the application processor.  The ADSP fetches it over
+# FastRPC (apps_std), using the Android paths compiled into its own firmware:
+#
+#   /vendor/etc/sensors/sns_reg_config      what and where the registry is
+#   /vendor/etc/sensors/config/*.json       per-part sensor descriptions
+#   /mnt/vendor/persist/sensors/registry/   the registry itself, read AND written
+#
+# None of that exists on a Kali rootfs.  Without it the registry sensor asserts
+# (sns_registry_sensor.c:154) and takes the whole ADSP down with it, which also
+# kills audio -- that is the first thing that happened here.
+#
+# Everything is copied into one directory and reached through two symlinks, so
+# undoing this is `rm -rf /var/lib/rhodep-ssc /vendor /mnt/vendor`.
+#
+# Runs once at first boot and is a no-op afterwards.
+set -e
+
+ROOT=/var/lib/rhodep-ssc
+STAMP="$ROOT/.populated"
+
+# vendor is a logical partition inside super; extents from the liblp metadata.
+# Same numbers scripts/extract-aw88261-acf.sh uses.
+VENDOR_OFF=$((6789120 * 512))
+VENDOR_SZ=$((1235440 * 512))
+
+say() { echo "rhodep-ssc: $*"; }
+
+if [ -f "$STAMP" ]; then
+	say "already populated, nothing to do"
+	exit 0
+fi
+
+# ------------------------------------------------------------------ vendor
+# dmsetup cannot be used here: dm_mod will not load on this kernel ("Exec
+# format error"), so map the extent with a plain loop device instead.
+VLOOP=$(losetup -f)
+mkdir -p /run/rhodep-ssc/vendor
+losetup -r -o "$VENDOR_OFF" --sizelimit "$VENDOR_SZ" "$VLOOP" \
+	/dev/disk/by-partlabel/super
+mount -o ro "$VLOOP" /run/rhodep-ssc/vendor
+
+cleanup() {
+	umount /run/rhodep-ssc/vendor 2>/dev/null || true
+	umount /run/rhodep-ssc/persist 2>/dev/null || true
+	losetup -d "$VLOOP" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+if [ ! -f /run/rhodep-ssc/vendor/etc/sensors/sns_reg_config ]; then
+	echo "rhodep-ssc: vendor partition has no etc/sensors, refusing" >&2
+	exit 1
+fi
+
+mkdir -p "$ROOT/vendor/etc"
+rm -rf "$ROOT/vendor/etc/sensors"
+cp -a /run/rhodep-ssc/vendor/etc/sensors "$ROOT/vendor/etc/sensors"
+chmod -R u+w "$ROOT/vendor/etc/sensors"
+say "vendor/etc/sensors: $(ls "$ROOT/vendor/etc/sensors/config" | wc -l) json configs"
+
+# ----------------------------------------------------------------- persist
+# Copied, not bind mounted: the DSP writes calibration back into the registry
+# (fac_cal, orientation) and the stock persist partition must stay untouched.
+# Exactly the reasoning userspace/modem uses for the modem's RFS tree.
+mkdir -p /run/rhodep-ssc/persist
+mount -o ro /dev/disk/by-partlabel/persist /run/rhodep-ssc/persist
+mkdir -p "$ROOT/persist"
+rm -rf "$ROOT/persist/sensors"
+cp -a /run/rhodep-ssc/persist/sensors "$ROOT/persist/sensors"
+chmod -R u+w "$ROOT/persist/sensors"
+say "persist/sensors: $(ls "$ROOT/persist/sensors/registry/registry" | wc -l) registry entries"
+
+# ------------------------------------------------- platform identity files
+# sns_reg_config points the registry sensor at six sysfs files under
+# /sys/devices/soc0.  Mainline's socinfo exposes soc_id, revision, family,
+# machine and serial_number but none of hw_platform, platform_subtype,
+# platform_subtype_id or platform_version, which are downstream-only.  Rather
+# than patch socinfo, the values are written out here and sns_reg_config -- our
+# file, on our filesystem -- is pointed at them.
+SOC="$ROOT/vendor/etc/sensors/socinfo"
+mkdir -p "$SOC"
+sysfs_or() {	# $1 sysfs attr, $2 fallback, $3 output name
+	if [ -r "/sys/devices/soc0/$1" ]; then
+		cat "/sys/devices/soc0/$1" > "$SOC/$3"
+	else
+		printf '%s\n' "$2" > "$SOC/$3"
+	fi
+}
+sysfs_or hw_platform         QRD    hw_platform
+sysfs_or platform_subtype    0      platform_subtype
+sysfs_or platform_subtype_id 0      platform_subtype_id
+sysfs_or platform_version    0      platform_version
+sysfs_or soc_id              507    soc_id
+sysfs_or revision            1.0    revision
+
+cat > "$ROOT/vendor/etc/sensors/sns_reg_config" <<EOF
+version=9
+file=hw_platform=/vendor/etc/sensors/socinfo/hw_platform
+file=platform_subtype=/vendor/etc/sensors/socinfo/platform_subtype
+file=platform_subtype_id=/vendor/etc/sensors/socinfo/platform_subtype_id
+file=platform_version=/vendor/etc/sensors/socinfo/platform_version
+file=soc_id=/vendor/etc/sensors/socinfo/soc_id
+file=revision=/vendor/etc/sensors/socinfo/revision
+file=output=/mnt/vendor/persist/sensors/registry/registry
+property=persist.vendor.sensors.enable.property=/mnt/vendor/persist/sensors/registry/file1
+property=persist.vendor.sensors.enable.property1=/mnt/vendor/persist/sensors/registry/file2
+EOF
+say "socinfo: hw_platform=$(cat "$SOC/hw_platform") soc_id=$(cat "$SOC/soc_id") revision=$(cat "$SOC/revision")"
+
+touch "$STAMP"
+say "populated"

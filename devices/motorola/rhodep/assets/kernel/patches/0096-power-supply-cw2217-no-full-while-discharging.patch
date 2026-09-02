@@ -1,0 +1,79 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: cw2217: do not report FULL while discharging
+
+At 100% with the charger unplugged the gauge reports `Full` rather than
+`Discharging`. UPower turns that into `on-battery: no`, PowerDevil keeps
+the plugged-in policy, and a locked screen never leads to a suspend. Every
+attempt to measure the phone's locked-screen behaviour at 100% therefore
+measured nothing at all; the run that finally worked did so only because
+the battery had drifted down to 95% first.
+
+The cause is the order of the tests:
+
+	if (cw->soc >= 100)
+		return POWER_SUPPLY_STATUS_FULL;
+	...
+	cur = CW2217_CURRENT_TO_UA(cw->current_raw, cw->shunt_mohm);
+
+The state of charge is checked before the current is looked at, so a pack
+at 100% reads FULL whether or not it is being drained. FULL is meant to say
+the battery is full *and* not discharging, and it is the only thing
+userspace has to decide whether the machine is running on battery.
+
+Read the current first and let a discharge win. Keep FULL for 100% with
+nothing leaving, which is the case it is for. Note this driver's sign
+convention: positive current is charging.
+
+Below 100% the outcome is unchanged. |cur| under the noise floor is still
+NOT_CHARGING, above it the sign still picks CHARGING or DISCHARGING; the
+boundary is kept exactly where it was by testing against the negated
+threshold rather than abs().
+
+The one case where the state of charge should still decide alone is having
+no shunt value, since then no current can be computed at all, so that path
+keeps returning FULL at 100% and UNKNOWN otherwise.
+
+--- a/drivers/power/supply/cw2217_battery.c
++++ b/drivers/power/supply/cw2217_battery.c
+@@ -187,18 +187,33 @@
+ {
+ 	int cur;
+ 
+-	if (cw->soc >= 100)
+-		return POWER_SUPPLY_STATUS_FULL;
+-
++	/*
++	 * With no shunt value there is no current to compute, so the state of
++	 * charge is all there is to go on. This is the only case where it
++	 * decides on its own.
++	 */
+ 	if (!cw->shunt_mohm)
+-		return POWER_SUPPLY_STATUS_UNKNOWN;
++		return cw->soc >= 100 ? POWER_SUPPLY_STATUS_FULL :
++					POWER_SUPPLY_STATUS_UNKNOWN;
+ 
+ 	cur = CW2217_CURRENT_TO_UA(cw->current_raw, cw->shunt_mohm);
+-	if (abs(cur) < CW2217_CURRENT_NOISE_UA)
+-		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 
+-	return cur > 0 ? POWER_SUPPLY_STATUS_CHARGING :
+-			 POWER_SUPPLY_STATUS_DISCHARGING;
++	/*
++	 * Current leaving the pack means it is discharging, whatever the gauge
++	 * says about the state of charge. This has to be tested before the
++	 * 100% case: a full battery being drained is still being drained, and
++	 * FULL is what userspace reads as "not on battery".
++	 */
++	if (cur <= -CW2217_CURRENT_NOISE_UA)
++		return POWER_SUPPLY_STATUS_DISCHARGING;
++
++	if (cw->soc >= 100)
++		return POWER_SUPPLY_STATUS_FULL;
++
++	if (cur >= CW2217_CURRENT_NOISE_UA)
++		return POWER_SUPPLY_STATUS_CHARGING;
++
++	return POWER_SUPPLY_STATUS_NOT_CHARGING;
+ }
+ 
+ static int cw2217_get_health(struct cw2217 *cw)

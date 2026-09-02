@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Follow /dev/kmsg and fsync every line, so the kernel's last words survive.
+
+ramoops does not survive the reset this port is chasing. The console record is
+there for an Oops, and empty every time the SoC is taken down at modem
+bring-up, so the usual way of reading a kernel's dying messages does not work
+here.
+
+This does it from the other side: read /dev/kmsg as it happens and force each
+line to disk before reading the next. It costs an fsync per message, which is
+far too expensive to leave running, and exactly right for a four second
+window that ends in a reset.
+
+    sudo rhodep-kmsg-tail --out /var/log/rhodep-kmsg.log &
+    sudo rhodep-modem-restart-watch.py --rounds 1
+
+Afterwards the tail of the file is what the kernel managed to say. Compare the
+last timestamp with the reproducer's own log to see which side stopped first.
+
+--grep keeps only matching lines, which makes the fsync cost bearable if you
+need to leave it running longer:
+
+    sudo rhodep-kmsg-tail --grep 'ipa|qmi|gsi|modem|rproc'
+"""
+
+import argparse
+import os
+import re
+import select
+import sys
+
+DEFAULT_OUT = "/var/log/rhodep-kmsg.log"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--grep", default=None,
+                    help="only keep lines matching this regex, case-insensitive")
+    ap.add_argument("--append", action="store_true")
+    args = ap.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit("needs root: /dev/kmsg is root-only")
+
+    pat = re.compile(args.grep, re.I) if args.grep else None
+    out = open(args.out, "a" if args.append else "w")
+
+    # O_NONBLOCK, otherwise a read with nothing pending blocks forever and the
+    # process cannot be interrupted cleanly.
+    fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
+    # Skip what is already in the buffer: seek to the end. SEEK_END on
+    # /dev/kmsg means "the next message", which is what we want.
+    try:
+        os.lseek(fd, 0, os.SEEK_END)
+    except OSError:
+        pass
+
+    out.write("# following /dev/kmsg, one fsync per line\n")
+    out.flush()
+    os.fsync(out.fileno())
+
+    while True:
+        try:
+            r, _, _ = select.select([fd], [], [], 1.0)
+            if not r:
+                continue
+            try:
+                raw = os.read(fd, 8192)
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                # EPIPE means messages were overwritten before we read them.
+                if e.errno == 32:
+                    out.write("# missed messages (buffer overwritten)\n")
+                    out.flush()
+                    os.fsync(out.fileno())
+                    continue
+                raise
+            text = raw.decode("utf-8", "replace").rstrip("\n")
+            for line in text.split("\n"):
+                if not line:
+                    continue
+                # prio,seq,usec,flag;message
+                body = line.split(";", 1)[-1]
+                head = line.split(";", 1)[0].split(",")
+                stamp = ""
+                if len(head) > 2 and head[2].isdigit():
+                    stamp = "[%12.6f] " % (int(head[2]) / 1e6)
+                if pat and not pat.search(body):
+                    continue
+                out.write(stamp + body + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+        except KeyboardInterrupt:
+            break
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

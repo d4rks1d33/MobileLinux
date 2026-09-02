@@ -1,0 +1,262 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] interconnect: sm6375: do not program QoS, let the boot values stand
+
+Loading the provider with the QoS programming enabled wedges a CPU outright.
+Not a fault, not an oops: CPU 3 stops answering, including to an NMI, and the
+rest of the machine unravels behind it.
+
+	rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
+	rcu:  3-...0: (0 ticks this GP)
+	Sending NMI from CPU 5 to CPUs 3:
+	After 10 seconds, these CPUS still haven't responded to the NMI: 3
+	watchdog: BUG: soft lockup - CPU#5 stuck for 11s! [rcu_preempt:15]
+
+A core that will not take an NMI is a core parked on a bus transaction that
+never completes, which is what writing a NoC QoS register belonging to a port
+that is not clocked looks like from the CPU side.
+
+The QoS port numbers here are the weakest part of this driver and were flagged
+as such when it was written. The vendor holi.c expresses QoS as absolute
+register offsets inside the qosbox; mainline wants a port index, and
+PROGRESS.md in docs/interconnect-sm6375-wip/ has the conversion written down
+under a heading that starts with "CRITICAL". One wrong port and the write lands
+on a neighbour's register.
+
+None of it is needed for what this port wants from the interconnect. QoS is
+priority and arbitration tuning; the bandwidth votes that keep a path alive go
+to the RPM over SMD and do not touch these registers at all. The bootloader has
+already programmed QoS by the time Linux starts, and every value here was
+transcribed from the vendor tree anyway, so leaving those registers alone means
+keeping the settings the device shipped with.
+
+So drop ap_owned on every node, which is exactly what icc-rpm.c keys the QoS
+programming off:
+
+	if (!qn->qos.ap_owned)
+		return 0;
+
+and the provider comes up without writing a single QoS register. If someone
+later wants QoS under Linux, the port numbers have to be verified one by one
+against holi_qos_dump.txt first, on a device that can be recovered.
+
+This supersedes the 0030 DIAG patch mentioned in HANDOFF-SESSION3, which did
+the same thing and was lost.
+
+--- a/drivers/interconnect/qcom/sm6375.c
++++ b/drivers/interconnect/qcom/sm6375.c
+@@ -140,7 +140,7 @@
+ 	.id = SM6375_MASTER_AMPSS_M0,
+ 	.channels = 1,
+ 	.buswidth = 16,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 0,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -174,7 +174,7 @@
+ 	.id = SM6375_MASTER_SNOC_BIMC_RT,
+ 	.channels = 1,
+ 	.buswidth = 16,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 2,
+ 	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
+ 	.qos.areq_prio = 0,
+@@ -208,7 +208,7 @@
+ 	.id = SM6375_MASTER_SNOC_BIMC_NRT,
+ 	.channels = 1,
+ 	.buswidth = 16,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 3,
+ 	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
+ 	.qos.areq_prio = 0,
+@@ -227,7 +227,7 @@
+ 	.id = SM6375_SNOC_BIMC_MAS,
+ 	.channels = 1,
+ 	.buswidth = 16,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 6,
+ 	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
+ 	.qos.areq_prio = 0,
+@@ -246,7 +246,7 @@
+ 	.id = SM6375_MASTER_GRAPHICS_3D,
+ 	.channels = 1,
+ 	.buswidth = 32,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 1,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -265,7 +265,7 @@
+ 	.id = SM6375_MASTER_CDSP_PROC,
+ 	.channels = 1,
+ 	.buswidth = 32,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 6,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -284,7 +284,7 @@
+ 	.id = SM6375_MASTER_TCU_0,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 4,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 6,
+@@ -378,7 +378,7 @@
+ 	.id = SM6375_MASTER_CAMNOC_SF_SNOC,
+ 	.channels = 1,
+ 	.buswidth = 256,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 25,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 3,
+@@ -412,7 +412,7 @@
+ 	.id = SM6375_MASTER_CAMNOC_HF_SNOC,
+ 	.channels = 1,
+ 	.buswidth = 256,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 31,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -447,7 +447,7 @@
+ 	.id = SM6375_MASTER_MDP_PORT0_SNOC,
+ 	.channels = 1,
+ 	.buswidth = 256,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 26,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -482,7 +482,7 @@
+ 	.id = SM6375_MASTER_VIDEO_P0_SNOC,
+ 	.channels = 1,
+ 	.buswidth = 256,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 30,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 0,
+@@ -517,7 +517,7 @@
+ 	.id = SM6375_MASTER_VIDEO_PROC_SNOC,
+ 	.channels = 1,
+ 	.buswidth = 256,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 34,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 4,
+@@ -596,7 +596,7 @@
+ 	.id = SM6375_BIMC_SNOC_MAS,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 29,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -615,7 +615,7 @@
+ 	.id = SM6375_MASTER_PIMEM,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 20,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -634,7 +634,7 @@
+ 	.id = SM6375_MASTER_QUP_0,
+ 	.channels = 1,
+ 	.buswidth = 4,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 0,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -653,7 +653,7 @@
+ 	.id = SM6375_MASTER_QUP_1,
+ 	.channels = 1,
+ 	.buswidth = 4,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 22,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -672,7 +672,7 @@
+ 	.id = SM6375_MASTER_EMMC,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 38,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -691,7 +691,7 @@
+ 	.id = SM6375_MASTER_SDCC_2,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 23,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -710,7 +710,7 @@
+ 	.id = SM6375_MASTER_UFS_MEM,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 46,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -729,7 +729,7 @@
+ 	.id = SM6375_MASTER_USB3_0,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 24,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -748,7 +748,7 @@
+ 	.id = SM6375_MASTER_CRYPTO_CORE0,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 22,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -767,7 +767,7 @@
+ 	.id = SM6375_MASTER_QDSS_BAM,
+ 	.channels = 1,
+ 	.buswidth = 4,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 2,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -786,7 +786,7 @@
+ 	.id = SM6375_MASTER_IPA,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 3,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,
+@@ -805,7 +805,7 @@
+ 	.id = SM6375_MASTER_QDSS_ETR,
+ 	.channels = 1,
+ 	.buswidth = 8,
+-	.qos.ap_owned = true,
++	.qos.ap_owned = false,	/* QoS left to the bootloader, see patch 0046 */
+ 	.qos.qos_port = 12,
+ 	.qos.qos_mode = NOC_QOS_MODE_FIXED,
+ 	.qos.areq_prio = 2,

@@ -1,0 +1,102 @@
+#!/bin/sh
+# Put back any apt hold, or any piece of the purge guard, that has gone missing.
+#
+# `apt-mark hold` protects a package. Nothing protects the hold. One
+# `apt-mark unhold`, one script, one distracted afternoon, and the port's
+# defences are gone with no record that anything happened — and the next
+# upgrade quietly replaces the kernel, the WiFi firmware or the audio stack.
+#
+# This restores the intended state and says so loudly in the journal. It is
+# deliberately not a lock: a package listed in the exceptions file is left
+# alone, which is how you remove a hold on purpose. See rhodep-hold-override.
+#
+# Runs at boot, after every apt transaction (60rhodep-enforce-holds) and on a
+# timer as a backstop.
+#
+# Fails open, always. A phone whose package management is wedged by its own
+# guard rail is worse off than one with a missing hold, so every failure path
+# here logs and exits 0.
+set -u
+
+# apt runs us from DPkg::Post-Invoke while it still holds the dpkg lock, so the
+# dpkg status edit must not happen there. It passes --in-apt; the boot service
+# and the timer do not.
+IN_APT=0
+[ "${1:-}" = "--in-apt" ] && IN_APT=1
+
+CANON=/usr/local/share/rhodep/apt-holds.txt
+EXCEPT=/etc/rhodep/apt-holds-exceptions
+GUARD=/usr/local/sbin/rhodep-apt-guard
+GUARD_SRC=/usr/local/share/rhodep/rhodep-apt-guard
+HOOK=/etc/apt/apt.conf.d/50rhodep-protect-holds
+HOOK_SRC=/usr/local/share/rhodep/50rhodep-protect-holds
+
+log() { logger -t rhodep-holds-enforce -p daemon.warning -- "$*" 2>/dev/null; echo "rhodep-holds-enforce: $*"; }
+
+[ -r "$CANON" ] || { log "no canonical list at $CANON, nothing to enforce"; exit 0; }
+
+# --- the guard's own files ---------------------------------------------------
+# Restored before the holds, because a hold with no guard behind it is only
+# half the protection.
+restore() {
+	src=$1; dst=$2; mode=$3
+	[ -r "$src" ] || return 0
+	if [ -e "$dst" ] && cmp -s "$src" "$dst"; then
+		return 0
+	fi
+	if [ -e "$dst" ]; then
+		chattr -i "$dst" 2>/dev/null
+		log "ALERT: $dst had been modified, restoring it"
+	else
+		log "ALERT: $dst had been deleted, restoring it"
+	fi
+	install -D -m "$mode" "$src" "$dst" 2>/dev/null || { log "could not restore $dst"; return 0; }
+	chattr +i "$dst" 2>/dev/null
+}
+restore "$GUARD_SRC" "$GUARD" 0755
+restore "$HOOK_SRC"  "$HOOK"  0644
+
+# --- the holds ---------------------------------------------------------------
+current=$(apt-mark showhold 2>/dev/null) || { log "apt-mark unavailable, giving up quietly"; exit 0; }
+
+missing=""
+while IFS= read -r pkg; do
+	case "$pkg" in ''|\#*) continue ;; esac
+
+	# Deliberately released? Leave it alone.
+	if [ -r "$EXCEPT" ] && grep -qx "$pkg" "$EXCEPT" 2>/dev/null; then
+		continue
+	fi
+
+	# Not installed at all: the hold cannot be applied and something removed
+	# the package. That is exactly what the guard exists to prevent, so it is
+	# worth shouting about, but there is nothing to re-apply.
+	if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed'; then
+		log "ALERT: held package '$pkg' is NOT INSTALLED. Something removed it, most likely a raw dpkg -r/-P, which bypasses apt and therefore the guard. Reinstall it: apt-get install --reinstall $pkg"
+		continue
+	fi
+
+	echo "$current" | grep -qx "$pkg" || missing="$missing $pkg"
+done < "$CANON"
+
+if [ -n "$missing" ]; then
+	log "ALERT: holds had been removed, putting them back:$missing"
+	# shellcheck disable=SC2086
+	apt-mark hold $missing >/dev/null 2>&1 || log "could not re-apply:$missing"
+fi
+
+# --- the port's own files ----------------------------------------------------
+# Nothing in dpkg owns them, so nothing else would ever put them back.
+if [ -x /usr/local/sbin/rhodep-protect-files ]; then
+	/usr/local/sbin/rhodep-protect-files enforce || true
+fi
+
+# --- dpkg's own protection ---------------------------------------------------
+# apt holds do nothing against `dpkg -r` / `dpkg -P`. dpkg's Protected field
+# does, and dpkg drops it whenever it rewrites a package's entry, so it has to
+# be reapplied. Never from inside an apt transaction: apt holds the lock there.
+if [ "$IN_APT" = 0 ] && [ -x /usr/local/sbin/rhodep-dpkg-protect ]; then
+	/usr/local/sbin/rhodep-dpkg-protect apply || true
+fi
+
+exit 0

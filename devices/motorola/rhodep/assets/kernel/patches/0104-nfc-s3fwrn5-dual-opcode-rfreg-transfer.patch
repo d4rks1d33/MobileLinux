@@ -1,0 +1,353 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] nfc: s3fwrn5: support the single-opcode RF register transfer
+
+The controller on this phone loads its RF registers through a different
+protocol than the one this driver implements, and answers the one it does
+implement with silence -- which surfaces as a five second command timeout
+rather than an error, and looks exactly like a part that is not there.
+
+The vendor HAL picks between two forms by the chip code the part reports:
+
+	legacy   code < 0x84 and != 0x74   START 0x26, SET 0x22, STOP 0x27
+	dual     code == 0x74 or >= 0x84   everything through opcode 0x2a
+
+with a sub-command byte leading each payload -- 0x01 to start, 0x02 with an
+index for each chunk, 0x03 with the checksum to stop. The S3FWRN5 this
+driver was written for is 0x82, legacy. The S3NRN4V here is 0x86.
+
+Two more differences come with it. The dual form sends **both** register
+images as one transfer, concatenated, where the legacy form sends one; the
+vendor merges them before it opens the session and never opens two. And the
+opcode has to be registered in s3fwrn5_nci_prop_ops[] or the core has no
+.rsp for it, never calls nci_req_complete(), and times out every command
+even when the part answered perfectly.
+
+The checksum is unchanged: a sum of little endian u32 over everything sent,
+truncated to 16 bits. Chunks are still 252 bytes. The 16 byte trailer each
+image carries is part of the data and part of the checksum, as before.
+
+Which form to use is a module parameter rather than something read from the
+part, because this driver does not look at the chip code today. Reading it
+from the CORE_INIT response and choosing automatically is the right end
+state and is a separate change.
+
+Worked out by disassembling the vendor's own HAL from this phone's vendor
+image -- nfc_hal_vs_sm() and hal_vs_rfreg_update_dual_option() -- after
+sending the merged image with the legacy framing failed the same way as
+sending the two images separately. The bytes were right both times; the
+framing was not.
+
+The transfer also has to happen from setup() rather than post_setup(). The
+vendor loads the registers while opening the device, before the NFC stack
+initialises on top; setup() is the callback in that same position, between
+CORE_RESET and CORE_INIT. Done from post_setup(), after CORE_INIT, the
+registers transfer perfectly and the part then answers nothing at all --
+not even RF_DISCOVER -- because nothing re-initialises it afterwards, and
+resetting from post_setup() is not possible since it runs inside that very
+sequence.
+
+--- a/drivers/nfc/s3fwrn5/nci.h
++++ b/drivers/nfc/s3fwrn5/nci.h
+@@ -38,6 +38,37 @@
+ 	__u8 status;
+ };
+ 
++/*
++ * Newer parts in this family do the whole RF register transfer through one
++ * opcode with a sub-command byte, instead of the three separate ones above.
++ * The vendor HAL picks between the two by the chip code the part reports:
++ * legacy for 0x80-0x83 (which is the S3FWRN5 this driver was written for),
++ * and this one for 0x74 and anything from 0x84 up -- the S3NRN4V is 0x86.
++ *
++ * A part that wants this will answer the legacy opcodes with nothing at all,
++ * which surfaces as a five second command timeout rather than an error.
++ */
++#define NCI_PROP_RFREG_DUAL	0x2a
++
++#define NCI_PROP_RFREG_DUAL_START	0x01
++#define NCI_PROP_RFREG_DUAL_SET		0x02
++#define NCI_PROP_RFREG_DUAL_STOP	0x03
++
++struct nci_prop_rfreg_dual_start_cmd {
++	__u8 sub;
++};
++
++struct nci_prop_rfreg_dual_set_cmd {
++	__u8 sub;
++	__u8 index;
++	__u8 data[252];
++};
++
++struct nci_prop_rfreg_dual_stop_cmd {
++	__u8 sub;
++	__le16 checksum;
++} __packed;
++
+ #define NCI_PROP_FW_CFG		0x28
+ 
+ struct nci_prop_fw_cfg_cmd {
+@@ -50,7 +81,9 @@
+ 	__u8 status;
+ };
+ 
+-extern const struct nci_driver_ops s3fwrn5_nci_prop_ops[4];
++extern const struct nci_driver_ops s3fwrn5_nci_prop_ops[5];
+ int s3fwrn5_nci_rf_configure(struct s3fwrn5_info *info, const char *fw_name);
++int s3fwrn5_nci_rf_configure_dual(struct s3fwrn5_info *info,
++				  const char *hw_name, const char *sw_name);
+ 
+ #endif /* __LOCAL_S3FWRN5_NCI_H_ */
+--- a/drivers/nfc/s3fwrn5/nci.c
++++ b/drivers/nfc/s3fwrn5/nci.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/completion.h>
++#include <linux/unaligned.h>
+ #include <linux/firmware.h>
+ 
+ #include "s3fwrn5.h"
+@@ -20,7 +21,17 @@
+ 	return 0;
+ }
+ 
+-const struct nci_driver_ops s3fwrn5_nci_prop_ops[4] = {
++const struct nci_driver_ops s3fwrn5_nci_prop_ops[5] = {
++	{
++		/*
++		 * Without this the core has no .rsp for the opcode and never
++		 * completes the request, so every command in the dual sequence
++		 * ends in a five second timeout even when the part answered.
++		 */
++		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
++				NCI_PROP_RFREG_DUAL),
++		.rsp = s3fwrn5_nci_prop_rsp,
++	},
+ 	{
+ 		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
+ 				NCI_PROP_SET_RFREG),
+@@ -49,6 +60,9 @@
+ module_param(clk_type, int, 0644);
+ MODULE_PARM_DESC(clk_type, "NCI_PROP_FW_CFG clock type (default 0x01, external crystal)");
+ 
++/* What this phone's vendor stack configures, from its own NFC settings. */
++#define S3FWRN5_CLK_SPEED_DUAL	0x11
++
+ static int clk_speed = 0xff;
+ module_param(clk_speed, int, 0644);
+ MODULE_PARM_DESC(clk_speed, "NCI_PROP_FW_CFG clock speed (default 0xff; this phone's vendor stack uses 0x11)");
+@@ -57,6 +71,128 @@
+ module_param(clk_req, int, 0644);
+ MODULE_PARM_DESC(clk_req, "NCI_PROP_FW_CFG clock request (default 0xff)");
+ 
++/*
++ * The dual-opcode form of the transfer, for the parts that want it.
++ *
++ * Same shape as the legacy one -- start, chunks of 252, stop with a 16 bit
++ * checksum of everything sent -- but every step goes out as NCI_PROP_RFREG_DUAL
++ * with a leading sub-command byte, and the two register images are concatenated
++ * into a single transfer rather than being sent one after the other. The vendor
++ * merges them before it opens the session and never sends two.
++ */
++int s3fwrn5_nci_rf_configure_dual(struct s3fwrn5_info *info,
++				  const char *hw_name, const char *sw_name)
++{
++	struct device *dev = &info->ndev->nfc_dev->dev;
++	struct nci_prop_rfreg_dual_start_cmd start;
++	struct nci_prop_rfreg_dual_stop_cmd stop;
++	struct nci_prop_rfreg_dual_set_cmd set;
++	const struct firmware *hw = NULL, *sw = NULL;
++	u32 checksum = 0;
++	size_t total, off;
++	u8 index = 0;
++	u8 speed;
++	int i, ret;
++
++	/*
++	 * Clock configuration first, and as a single byte. The parts that take
++	 * this transfer want only the speed here, not the three fields the
++	 * older ones are given -- the vendor stack picks the short form by the
++	 * same revision check that picks this transfer, and sends it while
++	 * opening the device rather than alongside the registers. Without it
++	 * the part answers everything asked of it over the bus and still never
++	 * sees a card, which is what a wrong clock looks like from up here.
++	 */
++	speed = (clk_speed == 0xff) ? S3FWRN5_CLK_SPEED_DUAL : clk_speed;
++	ret = nci_prop_cmd(info->ndev, NCI_PROP_FW_CFG, sizeof(speed), &speed);
++	if (ret < 0)
++		dev_info(dev, "clock configuration refused (%d)\n", ret);
++
++	ret = request_firmware(&hw, hw_name, dev);
++	if (ret < 0)
++		return ret;
++
++	/* The second image is optional; some boards ship only the first. */
++	if (sw_name && request_firmware(&sw, sw_name, dev) < 0)
++		sw = NULL;
++
++	total = hw->size + (sw ? sw->size : 0);
++
++	/*
++	 * Checksum covers the concatenation, as a sum of little endian u32s
++	 * truncated to 16 bits, exactly as the legacy path does. Both images
++	 * are a multiple of four in practice; a short tail is zero padded,
++	 * which is what the vendor does too.
++	 */
++	for (i = 0; i + 4 <= hw->size; i += 4)
++		checksum += get_unaligned_le32(hw->data + i);
++	if (sw)
++		for (i = 0; i + 4 <= sw->size; i += 4)
++			checksum += get_unaligned_le32(sw->data + i);
++
++	dev_info(dev, "rfreg configuration update: %s%s%s (%zu bytes)\n",
++		 hw_name, sw ? " + " : "", sw ? sw_name : "", total);
++
++	start.sub = NCI_PROP_RFREG_DUAL_START;
++	ret = nci_prop_cmd(info->ndev, NCI_PROP_RFREG_DUAL,
++			   sizeof(start), (__u8 *)&start);
++	if (ret < 0) {
++		dev_err(dev, "unable to start rfreg update\n");
++		goto out;
++	}
++
++	for (off = 0; off < total; off += S3FWRN5_RFREG_SECTION_SIZE) {
++		size_t len = min_t(size_t, total - off,
++				   S3FWRN5_RFREG_SECTION_SIZE);
++		size_t done = 0;
++
++		/* The chunk may straddle the join between the two images. */
++		while (done < len) {
++			size_t pos = off + done;
++			const u8 *src;
++			size_t avail;
++
++			if (pos < hw->size) {
++				src = hw->data + pos;
++				avail = hw->size - pos;
++			} else {
++				src = sw->data + (pos - hw->size);
++				avail = sw->size - (pos - hw->size);
++			}
++			avail = min(avail, len - done);
++			memcpy(set.data + done, src, avail);
++			done += avail;
++		}
++
++		set.sub = NCI_PROP_RFREG_DUAL_SET;
++		set.index = index++;
++		ret = nci_prop_cmd(info->ndev, NCI_PROP_RFREG_DUAL,
++				   len + 2, (__u8 *)&set);
++		if (ret < 0) {
++			dev_err(dev, "rfreg update error at index %u (%d)\n",
++				set.index, ret);
++			goto out;
++		}
++	}
++
++	stop.sub = NCI_PROP_RFREG_DUAL_STOP;
++	stop.checksum = cpu_to_le16(checksum & 0xffff);
++	ret = nci_prop_cmd(info->ndev, NCI_PROP_RFREG_DUAL,
++			   sizeof(stop), (__u8 *)&stop);
++	if (ret < 0) {
++		dev_err(dev, "unable to stop rfreg update\n");
++		goto out;
++	}
++
++	dev_info(dev, "rfreg configuration update: success (checksum 0x%04x)\n",
++		 checksum & 0xffff);
++out:
++	if (sw)
++		release_firmware(sw);
++	release_firmware(hw);
++	return ret;
++}
++
+ int s3fwrn5_nci_rf_configure(struct s3fwrn5_info *info, const char *fw_name)
+ {
+ 	struct device *dev = &info->ndev->nfc_dev->dev;
+--- a/drivers/nfc/s3fwrn5/core.c
++++ b/drivers/nfc/s3fwrn5/core.c
+@@ -6,6 +6,7 @@
+  * Robert Baldyga <r.baldyga@samsung.com>
+  */
+ 
++#include <linux/delay.h>
+ #include <linux/module.h>
+ #include <net/nfc/nci_core.h>
+ 
+@@ -122,6 +123,57 @@
+ 	return 0;
+ }
+ 
++/*
++ * Which form of the RF register transfer the part wants. The vendor decides it
++ * from the chip code the part reports -- legacy below 0x84, this one for 0x74
++ * and 0x84 up -- but that code is not something this driver reads today, so it
++ * is a parameter until something does.
++ */
++/* How long to hold the part down for after writing its registers. */
++#define S3FWRN5_RFREG_SETTLE_MS	100
++
++static bool rfreg_dual;
++module_param(rfreg_dual, bool, 0644);
++MODULE_PARM_DESC(rfreg_dual, "use the single-opcode RF register transfer (S3NRN4V and newer)");
++
++/*
++ * Runs between CORE_RESET and CORE_INIT, which is where the vendor's own stack
++ * loads the RF registers: it does it while opening the device, before the NFC
++ * stack initialises on top. Doing it from post_setup() instead -- after
++ * CORE_INIT -- transfers the registers successfully and then leaves the part
++ * answering nothing, not even RF_DISCOVER, because nothing re-initialises it
++ * afterwards. There is no safe way to reset from post_setup() either: it runs
++ * inside this same sequence.
++ */
++static int s3fwrn5_nci_setup(struct nci_dev *ndev)
++{
++	struct s3fwrn5_info *info = nci_get_drvdata(ndev);
++	int ret;
++
++	if (!rfreg_dual)
++		return 0;
++
++	/*
++	 * Do not touch the wake line here. s3fwrn5_nci_open() has already
++	 * raised it and the rest of this sequence is spoken to a part that is
++	 * awake -- dropping it around the transfer, as the firmware update
++	 * path does, puts the part to sleep just before the CORE_INIT that
++	 * nci_open_device() sends next, and that command then times out. It
++	 * looks exactly like the transfer having broken something, and it is
++	 * not: with the register files removed and nothing sent at all, the
++	 * same wake toggle alone is enough to hang the init.
++	 */
++	ret = s3fwrn5_nci_rf_configure_dual(info, "sec_s3fwrn5_rfreg.bin",
++					    "sec_s3fwrn5_swreg.bin");
++	if (ret < 0)
++		dev_info(&ndev->nfc_dev->dev,
++			 "no rfreg applied (%d); the chip keeps whatever it has\n",
++			 ret);
++
++	/* Never fail the open over this; the part has its own registers. */
++	return 0;
++}
++
+ static int s3fwrn5_nci_post_setup(struct nci_dev *ndev)
+ {
+ 	struct s3fwrn5_info *info = nci_get_drvdata(ndev);
+@@ -143,6 +195,9 @@
+ 		 * there fails -- observed as -EPROTO, with the adapter then
+ 		 * refusing to power on at all, even with no rfreg file present.
+ 		 */
++		if (rfreg_dual)		/* already done from setup() */
++			return 0;
++
+ 		s3fwrn5_set_mode(info, S3FWRN5_MODE_NCI);
+ 		s3fwrn5_set_wake(info, true);
+ 		ret = s3fwrn5_nci_rf_configure(info, "sec_s3fwrn5_rfreg.bin");
+@@ -174,6 +229,7 @@
+ 	.open = s3fwrn5_nci_open,
+ 	.close = s3fwrn5_nci_close,
+ 	.send = s3fwrn5_nci_send,
++	.setup = s3fwrn5_nci_setup,
+ 	.post_setup = s3fwrn5_nci_post_setup,
+ 	.prop_ops = s3fwrn5_nci_prop_ops,
+ 	.n_prop_ops = ARRAY_SIZE(s3fwrn5_nci_prop_ops),

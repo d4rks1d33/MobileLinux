@@ -1,0 +1,53 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: drop L21 (vdd-3.3-ch1) from the WiFi
+
+The &wifi node's vdd-3.3-ch1-supply = <&pm6125_l21> was copied from
+sm6375-sony-xperia-murray-pdx225.dts, and on this board it is wrong. rhodep's
+own vendor tree does not wire L21A to the WiFi at all: blair-moto-rhodep-base.dts
+does
+
+	&icnss { /delete-property/ vdd-3.3-ch1-supply;
+	         /delete-property/ qcom,vdd-3.3-ch1-config; };
+
+and hands L21A to the front camera's cam_vdig instead -- 1.2 V on EVT/DVT1,
+2.5 V on DVT2. This unit is PVT (androidboot.hwrev=0xC000), which best-matches
+the DVT2 device tree, so L21A physically feeds the front camera at ~2.5 V.
+
+Two things made the stale mapping harmful, not just wrong:
+
+  - vdd-3.3-ch1 is not required for the WCN3990 here. ath10k_snoc bulk-gets it,
+    but the vendor removes it and WiFi works, so it is effectively optional.
+
+  - The rail does not "stay where it is", as a comment once claimed. ath10k
+    only calls regulator_bulk_enable(), true, but the regulator core's
+    machine_constraints_voltage() runs at PMIC-register time regardless of any
+    consumer: with min/max both set (3000000/3312000) apply_uV is armed, it
+    reads the hardware, and if the rail is below 3.0 V it forces it up. The
+    device shows exactly that -- "l21: Bringing 0uV into 3000000-3000000uV" --
+    so with the WiFi holding it enabled the rail sat at 3.0 V, on a load the
+    vendor drives at 2.5 V.
+
+Dropping the supply leaves L21 with no consumer, so nothing enables it and the
+constraint's setpoint is never applied to the output -- the rail stays off, in
+the bootloader's safe state, instead of being pulled to 3.0 V. The pm6125_l21
+node is kept defined for when the front camera is eventually described. WiFi is
+unaffected: the rail was never its, and the vendor runs without it.
+
+Verified on device before this change: WiFi associated on 5 GHz with L21 at
+3.0 V; the check after flashing is that WiFi still associates with L21 now off.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -545,7 +545,11 @@
+ 	vdd-1.8-xo-supply = <&pm6125_l16>;
+ 	vdd-1.3-rfa-supply = <&pm6125_l2>;
+ 	vdd-3.3-ch0-supply = <&pm6125_l23>;
+-	vdd-3.3-ch1-supply = <&pm6125_l21>;
++	/*
++	 * No vdd-3.3-ch1: on this board L21 is the front camera's cam_vdig,
++	 * not a WiFi rail. The vendor deletes this supply for rhodep and the
++	 * WCN3990 runs without it. See the pm6125_l21 node.
++	 */
+ 	status = "okay";
+ };
+ 

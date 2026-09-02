@@ -1,0 +1,2010 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] interconnect: qcom: add SM6375 NoC provider driver
+
+Six providers (bimc, clk_virt, config_noc, mmrt_virt, mmnrt_virt, sys_noc),
+94 nodes, translated from the vendor holi.c (holi is SM6375) against
+mainline's qcm2290.c, which is the same SMD-RPM architecture.
+
+Note the ID split, which is not cosmetic. of_icc_xlate_onecell() uses the ID
+written in the device tree *as an index into that provider's node array*, so
+the binding has to number its nodes densely from 0 within each bus. But
+icc_node_create() registers every node in one global IDR, so the .id field has
+to be unique across all six. mainline qcm2290 solves this with two sets of
+names and so does this driver: bare names in the binding for the array index,
+SM6375_* in an internal enum for .id and .links.
+
+The vendor header numbers all 94 nodes in a single global sequence, which was
+carried over verbatim in the first version of this patch. That produced arrays
+indexed 0..576 with only 9 to 44 real entries - bimc_nodes alone had 505 NULL
+holes - and qnoc_probe() dereferences the first hole it reaches:
+
+	Unable to handle kernel NULL pointer dereference at 0x0000000000000068
+	pc : qnoc_probe+0x2dc/0x47c
+	Call trace: qnoc_probe -> platform_probe -> really_probe
+
+The compatible strings follow mainline's short forms, "qcom,sm6375-snoc" and
+"qcom,sm6375-cnoc", the way qcm2290.c spells them, rather than "-sys-noc" and
+"-config-noc". The device tree nodes were written with the short forms and the
+match table with the long ones, so on the first boot with a matching DT only
+bimc bound and the other five providers were silently never probed.
+
+Add an SMD-RPM interconnect provider for the Qualcomm SM6375 (Snapdragon
+695), needed so the IPA (mobile data) can vote its NoC bandwidth paths.
+Without it, enabling IPA resets the SoC because the GSI hardware is
+configured with the memory/config buses unvoted.
+
+The driver mirrors the mainline sm6115.c driver (same SMD-RPM NoC family)
+and is derived from the downstream Motorola SM6375 (holi) interconnect
+tables. It describes the six buses (bimc, sys_noc, config_noc and the
+clk_virt/mmrt_virt/mmnrt_virt virtual buses) with 104 nodes. QoS ports and
+priorities for shared nodes match the mainline qcm2290/sm6115 drivers
+(verified: qxm_ipa = qos_port 3, FIXED, prio 2). The RPM bus clock
+descriptors and per-bus regmap register windows also match sm6115.
+
+The binding header qcom,sm6375.h is copied from the downstream
+qcom,holi.h (holi == SM6375); the ICBID values are the mainline RPM ids.
+
+--- /dev/null
++++ b/drivers/interconnect/qcom/sm6375.c
+@@ -0,0 +1,1789 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Qualcomm SM6375 interconnect driver
++ *
++ * Tables ported from the downstream 'holi' (SM6375) interconnect driver.
++ * Mirrors the mainline qcm2290 driver (same SMD-RPM architecture).
++ */
++
++#include <linux/device.h>
++#include <linux/interconnect-provider.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++
++#include <dt-bindings/interconnect/qcom,sm6375.h>
++
++#include "icc-rpm.h"
++
++/*
++ * Internal node IDs. These must be unique across every provider, because
++ * icc_node_create() puts them all in one IDR, while the IDs in the binding
++ * restart at 0 for each bus because they double as array indices. Mainline
++ * qcm2290.c makes the same split (QCM2290_* here, bare names there).
++ */
++enum sm6375_icc_id {
++	SM6375_A1NOC_SNOC_MAS = 1,
++	SM6375_A1NOC_SNOC_SLV = 2,
++	SM6375_A2NOC_SNOC_MAS = 3,
++	SM6375_A2NOC_SNOC_SLV = 4,
++	SM6375_BIMC_SNOC_MAS = 5,
++	SM6375_BIMC_SNOC_SLV = 6,
++	SM6375_MASTER_AMPSS_M0 = 7,
++	SM6375_MASTER_CAMNOC_HF = 8,
++	SM6375_MASTER_CAMNOC_HF_SNOC = 9,
++	SM6375_MASTER_CAMNOC_SF = 10,
++	SM6375_MASTER_CAMNOC_SF_SNOC = 11,
++	SM6375_MASTER_CDSP_PROC = 12,
++	SM6375_MASTER_CRYPTO_CORE0 = 13,
++	SM6375_MASTER_EMMC = 14,
++	SM6375_MASTER_GRAPHICS_3D = 15,
++	SM6375_MASTER_IPA = 16,
++	SM6375_MASTER_MDP_PORT0 = 17,
++	SM6375_MASTER_MDP_PORT0_SNOC = 18,
++	SM6375_MASTER_PIMEM = 19,
++	SM6375_MASTER_QDSS_BAM = 20,
++	SM6375_MASTER_QDSS_DAP = 21,
++	SM6375_MASTER_QDSS_ETR = 22,
++	SM6375_MASTER_QUP_0 = 23,
++	SM6375_MASTER_QUP_1 = 24,
++	SM6375_MASTER_QUP_CORE_0 = 25,
++	SM6375_MASTER_QUP_CORE_1 = 26,
++	SM6375_MASTER_SDCC_2 = 27,
++	SM6375_MASTER_SNOC_BIMC_NRT = 28,
++	SM6375_MASTER_SNOC_BIMC_RT = 29,
++	SM6375_MASTER_SNOC_CFG = 30,
++	SM6375_MASTER_SNOC_NRT = 31,
++	SM6375_MASTER_SNOC_RT = 32,
++	SM6375_MASTER_TCU_0 = 33,
++	SM6375_MASTER_TIC = 34,
++	SM6375_MASTER_UFS_MEM = 35,
++	SM6375_MASTER_USB3_0 = 36,
++	SM6375_MASTER_VIDEO_P0 = 37,
++	SM6375_MASTER_VIDEO_P0_SNOC = 38,
++	SM6375_MASTER_VIDEO_PROC = 39,
++	SM6375_MASTER_VIDEO_PROC_SNOC = 40,
++	SM6375_SLAVE_APPSS = 41,
++	SM6375_SLAVE_BIMC_CFG = 42,
++	SM6375_SLAVE_CAMERA_CFG = 43,
++	SM6375_SLAVE_CAMERA_NRT_THROTTLE_CFG = 44,
++	SM6375_SLAVE_CAMERA_RT_THROTTLE_CFG = 45,
++	SM6375_SLAVE_CAMNOC_HF_SNOC = 46,
++	SM6375_SLAVE_CAMNOC_SF_SNOC = 47,
++	SM6375_SLAVE_CLK_CTL = 48,
++	SM6375_SLAVE_CRYPTO_0_CFG = 49,
++	SM6375_SLAVE_DCC_CFG = 50,
++	SM6375_SLAVE_DDR_PHY_CFG = 51,
++	SM6375_SLAVE_DDR_SS_CFG = 52,
++	SM6375_SLAVE_DISPLAY_CFG = 53,
++	SM6375_SLAVE_DISPLAY_THROTTLE_CFG = 54,
++	SM6375_SLAVE_DSP_CFG = 55,
++	SM6375_SLAVE_EBI = 56,
++	SM6375_SLAVE_EMMC_CFG = 57,
++	SM6375_SLAVE_GRAPHICS_3D_CFG = 58,
++	SM6375_SLAVE_HWKM = 59,
++	SM6375_SLAVE_IMEM_CFG = 60,
++	SM6375_SLAVE_IPA_CFG = 61,
++	SM6375_SLAVE_LPASS = 62,
++	SM6375_SLAVE_MAPSS = 63,
++	SM6375_SLAVE_MDP_PORT0_SNOC = 64,
++	SM6375_SLAVE_MESSAGE_RAM = 65,
++	SM6375_SLAVE_OCIMEM = 66,
++	SM6375_SLAVE_PDM = 67,
++	SM6375_SLAVE_PIMEM = 68,
++	SM6375_SLAVE_PIMEM_CFG = 69,
++	SM6375_SLAVE_PKA_CORE = 70,
++	SM6375_SLAVE_PMIC_ARB = 71,
++	SM6375_SLAVE_QDSS_CFG = 72,
++	SM6375_SLAVE_QDSS_STM = 73,
++	SM6375_SLAVE_QM_CFG = 74,
++	SM6375_SLAVE_QM_MPU_CFG = 75,
++	SM6375_SLAVE_QUP_0 = 76,
++	SM6375_SLAVE_QUP_1 = 77,
++	SM6375_SLAVE_QUP_CORE_0 = 78,
++	SM6375_SLAVE_QUP_CORE_1 = 79,
++	SM6375_SLAVE_RBCPR_CX_CFG = 80,
++	SM6375_SLAVE_RBCPR_MX_CFG = 81,
++	SM6375_SLAVE_RPM = 82,
++	SM6375_SLAVE_SDCC_2 = 83,
++	SM6375_SLAVE_SECURITY = 84,
++	SM6375_SLAVE_SERVICE_SNOC = 85,
++	SM6375_SLAVE_SNOC_BIMC_NRT = 86,
++	SM6375_SLAVE_SNOC_BIMC_RT = 87,
++	SM6375_SLAVE_SNOC_CFG = 88,
++	SM6375_SLAVE_SNOC_NRT = 89,
++	SM6375_SLAVE_SNOC_RT = 90,
++	SM6375_SLAVE_TCSR = 91,
++	SM6375_SLAVE_TCU = 92,
++	SM6375_SLAVE_TLMM = 93,
++	SM6375_SLAVE_UFS_MEM_CFG = 94,
++	SM6375_SLAVE_USB3 = 95,
++	SM6375_SLAVE_VENUS_CFG = 96,
++	SM6375_SLAVE_VENUS_THROTTLE_CFG = 97,
++	SM6375_SLAVE_VIDEO_P0_SNOC = 98,
++	SM6375_SLAVE_VIDEO_PROC_SNOC = 99,
++	SM6375_SLAVE_VSENSE_CTRL_CFG = 100,
++	SM6375_SNOC_BIMC_MAS = 101,
++	SM6375_SNOC_BIMC_SLV = 102,
++	SM6375_SNOC_CNOC_MAS = 103,
++	SM6375_SNOC_CNOC_SLV = 104,
++};
++
++
++static const u16 apps_proc_links[] = {
++	SM6375_SLAVE_EBI, SM6375_BIMC_SNOC_SLV,
++};
++
++static struct qcom_icc_node apps_proc = {
++	.name = "apps_proc",
++	.id = SM6375_MASTER_AMPSS_M0,
++	.channels = 1,
++	.buswidth = 16,
++	.qos.ap_owned = true,
++	.qos.qos_port = 0,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(apps_proc_links),
++	.links = apps_proc_links,
++};
++
++static const u16 mas_snoc_rt_links[] = {
++	SM6375_SLAVE_SNOC_BIMC_RT,
++};
++
++static struct qcom_icc_node mas_snoc_rt = {
++	.name = "mas_snoc_rt",
++	.id = SM6375_MASTER_SNOC_RT,
++	.channels = 1,
++	.buswidth = 256,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_rt_links),
++	.links = mas_snoc_rt_links,
++};
++
++static const u16 mas_snoc_bimc_rt_links[] = {
++	SM6375_SLAVE_EBI,
++};
++
++static struct qcom_icc_node mas_snoc_bimc_rt = {
++	.name = "mas_snoc_bimc_rt",
++	.id = SM6375_MASTER_SNOC_BIMC_RT,
++	.channels = 1,
++	.buswidth = 16,
++	.qos.ap_owned = true,
++	.qos.qos_port = 2,
++	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_bimc_rt_links),
++	.links = mas_snoc_bimc_rt_links,
++};
++
++static const u16 mas_snoc_nrt_links[] = {
++	SM6375_SLAVE_SNOC_BIMC_NRT,
++};
++
++static struct qcom_icc_node mas_snoc_nrt = {
++	.name = "mas_snoc_nrt",
++	.id = SM6375_MASTER_SNOC_NRT,
++	.channels = 1,
++	.buswidth = 256,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_nrt_links),
++	.links = mas_snoc_nrt_links,
++};
++
++static const u16 mas_snoc_bimc_nrt_links[] = {
++	SM6375_SLAVE_EBI,
++};
++
++static struct qcom_icc_node mas_snoc_bimc_nrt = {
++	.name = "mas_snoc_bimc_nrt",
++	.id = SM6375_MASTER_SNOC_BIMC_NRT,
++	.channels = 1,
++	.buswidth = 16,
++	.qos.ap_owned = true,
++	.qos.qos_port = 3,
++	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_bimc_nrt_links),
++	.links = mas_snoc_bimc_nrt_links,
++};
++
++static const u16 mas_snoc_bimc_links[] = {
++	SM6375_SLAVE_EBI,
++};
++
++static struct qcom_icc_node mas_snoc_bimc = {
++	.name = "mas_snoc_bimc",
++	.id = SM6375_SNOC_BIMC_MAS,
++	.channels = 1,
++	.buswidth = 16,
++	.qos.ap_owned = true,
++	.qos.qos_port = 6,
++	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = 3,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_bimc_links),
++	.links = mas_snoc_bimc_links,
++};
++
++static const u16 qnm_gpu_links[] = {
++	SM6375_SLAVE_EBI, SM6375_BIMC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qnm_gpu = {
++	.name = "qnm_gpu",
++	.id = SM6375_MASTER_GRAPHICS_3D,
++	.channels = 1,
++	.buswidth = 32,
++	.qos.ap_owned = true,
++	.qos.qos_port = 1,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_gpu_links),
++	.links = qnm_gpu_links,
++};
++
++static const u16 qnm_cdsp_links[] = {
++	SM6375_SLAVE_EBI, SM6375_BIMC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qnm_cdsp = {
++	.name = "qnm_cdsp",
++	.id = SM6375_MASTER_CDSP_PROC,
++	.channels = 1,
++	.buswidth = 32,
++	.qos.ap_owned = true,
++	.qos.qos_port = 6,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_cdsp_links),
++	.links = qnm_cdsp_links,
++};
++
++static const u16 tcu_0_links[] = {
++	SM6375_SLAVE_EBI, SM6375_BIMC_SNOC_SLV,
++};
++
++static struct qcom_icc_node tcu_0 = {
++	.name = "tcu_0",
++	.id = SM6375_MASTER_TCU_0,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 4,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 6,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(tcu_0_links),
++	.links = tcu_0_links,
++};
++
++static const u16 qup0_core_master_links[] = {
++	SM6375_SLAVE_QUP_CORE_0,
++};
++
++static struct qcom_icc_node qup0_core_master = {
++	.name = "qup0_core_master",
++	.id = SM6375_MASTER_QUP_CORE_0,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = 170,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qup0_core_master_links),
++	.links = qup0_core_master_links,
++};
++
++static const u16 qup1_core_master_links[] = {
++	SM6375_SLAVE_QUP_CORE_1,
++};
++
++static struct qcom_icc_node qup1_core_master = {
++	.name = "qup1_core_master",
++	.id = SM6375_MASTER_QUP_CORE_1,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = 171,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qup1_core_master_links),
++	.links = qup1_core_master_links,
++};
++
++static const u16 mas_snoc_cnoc_links[] = {
++	SM6375_SLAVE_BIMC_CFG, SM6375_SLAVE_APPSS, SM6375_SLAVE_CAMERA_NRT_THROTTLE_CFG, SM6375_SLAVE_CAMERA_RT_THROTTLE_CFG, SM6375_SLAVE_CAMERA_CFG, SM6375_SLAVE_CLK_CTL, SM6375_SLAVE_DSP_CFG, SM6375_SLAVE_RBCPR_CX_CFG, SM6375_SLAVE_RBCPR_MX_CFG, SM6375_SLAVE_CRYPTO_0_CFG, SM6375_SLAVE_DCC_CFG, SM6375_SLAVE_DDR_PHY_CFG, SM6375_SLAVE_DDR_SS_CFG, SM6375_SLAVE_DISPLAY_CFG, SM6375_SLAVE_DISPLAY_THROTTLE_CFG, SM6375_SLAVE_EMMC_CFG, SM6375_SLAVE_GRAPHICS_3D_CFG, SM6375_SLAVE_HWKM, SM6375_SLAVE_IMEM_CFG, SM6375_SLAVE_IPA_CFG, SM6375_SLAVE_LPASS, SM6375_SLAVE_MAPSS, SM6375_SLAVE_MESSAGE_RAM, SM6375_SLAVE_PDM, SM6375_SLAVE_PIMEM_CFG, SM6375_SLAVE_PKA_CORE, SM6375_SLAVE_PMIC_ARB, SM6375_SLAVE_QDSS_CFG, SM6375_SLAVE_QM_CFG, SM6375_SLAVE_QM_MPU_CFG, SM6375_SLAVE_QUP_0, SM6375_SLAVE_QUP_1, SM6375_SLAVE_RPM, SM6375_SLAVE_SDCC_2, SM6375_SLAVE_SECURITY, SM6375_SLAVE_SNOC_CFG, SM6375_SLAVE_TCSR, SM6375_SLAVE_TLMM, SM6375_SLAVE_UFS_MEM_CFG, SM6375_SLAVE_USB3, SM6375_SLAVE_VENUS_CFG, SM6375_SLAVE_VENUS_THROTTLE_CFG, SM6375_SLAVE_VSENSE_CTRL_CFG,
++};
++
++static struct qcom_icc_node mas_snoc_cnoc = {
++	.name = "mas_snoc_cnoc",
++	.id = SM6375_SNOC_CNOC_MAS,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_cnoc_links),
++	.links = mas_snoc_cnoc_links,
++};
++
++static const u16 xm_qdss_dap_links[] = {
++	SM6375_SLAVE_BIMC_CFG, SM6375_SLAVE_APPSS, SM6375_SLAVE_CAMERA_NRT_THROTTLE_CFG, SM6375_SLAVE_CAMERA_RT_THROTTLE_CFG, SM6375_SLAVE_CAMERA_CFG, SM6375_SLAVE_CLK_CTL, SM6375_SLAVE_DSP_CFG, SM6375_SLAVE_RBCPR_CX_CFG, SM6375_SLAVE_RBCPR_MX_CFG, SM6375_SLAVE_CRYPTO_0_CFG, SM6375_SLAVE_DCC_CFG, SM6375_SLAVE_DDR_PHY_CFG, SM6375_SLAVE_DDR_SS_CFG, SM6375_SLAVE_DISPLAY_CFG, SM6375_SLAVE_DISPLAY_THROTTLE_CFG, SM6375_SLAVE_EMMC_CFG, SM6375_SLAVE_GRAPHICS_3D_CFG, SM6375_SLAVE_HWKM, SM6375_SLAVE_IMEM_CFG, SM6375_SLAVE_IPA_CFG, SM6375_SLAVE_LPASS, SM6375_SLAVE_MAPSS, SM6375_SLAVE_MESSAGE_RAM, SM6375_SLAVE_PDM, SM6375_SLAVE_PIMEM_CFG, SM6375_SLAVE_PKA_CORE, SM6375_SLAVE_PMIC_ARB, SM6375_SLAVE_QDSS_CFG, SM6375_SLAVE_QM_CFG, SM6375_SLAVE_QM_MPU_CFG, SM6375_SLAVE_QUP_0, SM6375_SLAVE_QUP_1, SM6375_SLAVE_RPM, SM6375_SLAVE_SDCC_2, SM6375_SLAVE_SECURITY, SM6375_SLAVE_SNOC_CFG, SM6375_SLAVE_TCSR, SM6375_SLAVE_TLMM, SM6375_SLAVE_UFS_MEM_CFG, SM6375_SLAVE_USB3, SM6375_SLAVE_VENUS_CFG, SM6375_SLAVE_VENUS_THROTTLE_CFG, SM6375_SLAVE_VSENSE_CTRL_CFG,
++};
++
++static struct qcom_icc_node xm_qdss_dap = {
++	.name = "xm_qdss_dap",
++	.id = SM6375_MASTER_QDSS_DAP,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_qdss_dap_links),
++	.links = xm_qdss_dap_links,
++};
++
++static const u16 qnm_camera_nrt_links[] = {
++	SM6375_SLAVE_CAMNOC_SF_SNOC,
++};
++
++static struct qcom_icc_node qnm_camera_nrt = {
++	.name = "qnm_camera_nrt",
++	.id = SM6375_MASTER_CAMNOC_SF,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_camera_nrt_links),
++	.links = qnm_camera_nrt_links,
++};
++
++static const u16 qnm_camera_nrt_snoc_links[] = {
++	SM6375_SLAVE_SNOC_NRT,
++};
++
++static struct qcom_icc_node qnm_camera_nrt_snoc = {
++	.name = "qnm_camera_nrt_snoc",
++	.id = SM6375_MASTER_CAMNOC_SF_SNOC,
++	.channels = 1,
++	.buswidth = 256,
++	.qos.ap_owned = true,
++	.qos.qos_port = 25,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 3,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_camera_nrt_snoc_links),
++	.links = qnm_camera_nrt_snoc_links,
++};
++
++static const u16 qnm_camera_rt_links[] = {
++	SM6375_SLAVE_CAMNOC_HF_SNOC,
++};
++
++static struct qcom_icc_node qnm_camera_rt = {
++	.name = "qnm_camera_rt",
++	.id = SM6375_MASTER_CAMNOC_HF,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_camera_rt_links),
++	.links = qnm_camera_rt_links,
++};
++
++static const u16 qnm_camera_rt_snoc_links[] = {
++	SM6375_SLAVE_SNOC_RT,
++};
++
++static struct qcom_icc_node qnm_camera_rt_snoc = {
++	.name = "qnm_camera_rt_snoc",
++	.id = SM6375_MASTER_CAMNOC_HF_SNOC,
++	.channels = 1,
++	.buswidth = 256,
++	.qos.ap_owned = true,
++	.qos.qos_port = 31,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.qos.urg_fwd_en = true,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qnm_camera_rt_snoc_links),
++	.links = qnm_camera_rt_snoc_links,
++};
++
++static const u16 qxm_mdp0_links[] = {
++	SM6375_SLAVE_MDP_PORT0_SNOC,
++};
++
++static struct qcom_icc_node qxm_mdp0 = {
++	.name = "qxm_mdp0",
++	.id = SM6375_MASTER_MDP_PORT0,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_mdp0_links),
++	.links = qxm_mdp0_links,
++};
++
++static const u16 qxm_mdp0_snoc_links[] = {
++	SM6375_SLAVE_SNOC_RT,
++};
++
++static struct qcom_icc_node qxm_mdp0_snoc = {
++	.name = "qxm_mdp0_snoc",
++	.id = SM6375_MASTER_MDP_PORT0_SNOC,
++	.channels = 1,
++	.buswidth = 256,
++	.qos.ap_owned = true,
++	.qos.qos_port = 26,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.qos.urg_fwd_en = true,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_mdp0_snoc_links),
++	.links = qxm_mdp0_snoc_links,
++};
++
++static const u16 qxm_venus0_links[] = {
++	SM6375_SLAVE_VIDEO_P0_SNOC,
++};
++
++static struct qcom_icc_node qxm_venus0 = {
++	.name = "qxm_venus0",
++	.id = SM6375_MASTER_VIDEO_P0,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_venus0_links),
++	.links = qxm_venus0_links,
++};
++
++static const u16 qxm_venus0_snoc_links[] = {
++	SM6375_SLAVE_SNOC_NRT,
++};
++
++static struct qcom_icc_node qxm_venus0_snoc = {
++	.name = "qxm_venus0_snoc",
++	.id = SM6375_MASTER_VIDEO_P0_SNOC,
++	.channels = 1,
++	.buswidth = 256,
++	.qos.ap_owned = true,
++	.qos.qos_port = 30,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 0,
++	.qos.urg_fwd_en = true,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_venus0_snoc_links),
++	.links = qxm_venus0_snoc_links,
++};
++
++static const u16 qxm_venus_cpu_links[] = {
++	SM6375_SLAVE_VIDEO_PROC_SNOC,
++};
++
++static struct qcom_icc_node qxm_venus_cpu = {
++	.name = "qxm_venus_cpu",
++	.id = SM6375_MASTER_VIDEO_PROC,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_venus_cpu_links),
++	.links = qxm_venus_cpu_links,
++};
++
++static const u16 qxm_venus_cpu_snoc_links[] = {
++	SM6375_SLAVE_SNOC_NRT,
++};
++
++static struct qcom_icc_node qxm_venus_cpu_snoc = {
++	.name = "qxm_venus_cpu_snoc",
++	.id = SM6375_MASTER_VIDEO_PROC_SNOC,
++	.channels = 1,
++	.buswidth = 256,
++	.qos.ap_owned = true,
++	.qos.qos_port = 34,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_venus_cpu_snoc_links),
++	.links = qxm_venus_cpu_snoc_links,
++};
++
++static const u16 mas_snoc_cfg_links[] = {
++	SM6375_SLAVE_SERVICE_SNOC,
++};
++
++static struct qcom_icc_node mas_snoc_cfg = {
++	.name = "mas_snoc_cfg",
++	.id = SM6375_MASTER_SNOC_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_snoc_cfg_links),
++	.links = mas_snoc_cfg_links,
++};
++
++static const u16 qhm_tic_links[] = {
++	SM6375_SLAVE_APPSS, SM6375_SNOC_CNOC_SLV, SM6375_SLAVE_OCIMEM, SM6375_SLAVE_PIMEM, SM6375_SNOC_BIMC_SLV, SM6375_SLAVE_QDSS_STM, SM6375_SLAVE_TCU,
++};
++
++static struct qcom_icc_node qhm_tic = {
++	.name = "qhm_tic",
++	.id = SM6375_MASTER_TIC,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qhm_tic_links),
++	.links = qhm_tic_links,
++};
++
++static const u16 mas_a1noc_snoc_links[] = {
++	SM6375_SLAVE_APPSS, SM6375_SNOC_CNOC_SLV, SM6375_SLAVE_OCIMEM, SM6375_SLAVE_PIMEM, SM6375_SNOC_BIMC_SLV, SM6375_SLAVE_QDSS_STM,
++};
++
++static struct qcom_icc_node mas_a1noc_snoc = {
++	.name = "mas_a1noc_snoc",
++	.id = SM6375_A1NOC_SNOC_MAS,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = 111,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_a1noc_snoc_links),
++	.links = mas_a1noc_snoc_links,
++};
++
++static const u16 mas_a2noc_snoc_links[] = {
++	SM6375_SLAVE_APPSS, SM6375_SNOC_CNOC_SLV, SM6375_SLAVE_OCIMEM, SM6375_SLAVE_PIMEM, SM6375_SNOC_BIMC_SLV, SM6375_SLAVE_QDSS_STM, SM6375_SLAVE_TCU,
++};
++
++static struct qcom_icc_node mas_a2noc_snoc = {
++	.name = "mas_a2noc_snoc",
++	.id = SM6375_A2NOC_SNOC_MAS,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = 112,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_a2noc_snoc_links),
++	.links = mas_a2noc_snoc_links,
++};
++
++static const u16 mas_bimc_snoc_links[] = {
++	SM6375_SLAVE_APPSS, SM6375_SNOC_CNOC_SLV, SM6375_SLAVE_OCIMEM, SM6375_SLAVE_PIMEM, SM6375_SLAVE_QDSS_STM, SM6375_SLAVE_TCU,
++};
++
++static struct qcom_icc_node mas_bimc_snoc = {
++	.name = "mas_bimc_snoc",
++	.id = SM6375_BIMC_SNOC_MAS,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 29,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 21,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_bimc_snoc_links),
++	.links = mas_bimc_snoc_links,
++};
++
++static const u16 qxm_pimem_links[] = {
++	SM6375_SLAVE_OCIMEM, SM6375_SNOC_BIMC_SLV,
++};
++
++static struct qcom_icc_node qxm_pimem = {
++	.name = "qxm_pimem",
++	.id = SM6375_MASTER_PIMEM,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 20,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_pimem_links),
++	.links = qxm_pimem_links,
++};
++
++static const u16 qhm_qup0_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qhm_qup0 = {
++	.name = "qhm_qup0",
++	.id = SM6375_MASTER_QUP_0,
++	.channels = 1,
++	.buswidth = 4,
++	.qos.ap_owned = true,
++	.qos.qos_port = 0,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 166,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qhm_qup0_links),
++	.links = qhm_qup0_links,
++};
++
++static const u16 qhm_qup1_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qhm_qup1 = {
++	.name = "qhm_qup1",
++	.id = SM6375_MASTER_QUP_1,
++	.channels = 1,
++	.buswidth = 4,
++	.qos.ap_owned = true,
++	.qos.qos_port = 22,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 41,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qhm_qup1_links),
++	.links = qhm_qup1_links,
++};
++
++static const u16 xm_emmc_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node xm_emmc = {
++	.name = "xm_emmc",
++	.id = SM6375_MASTER_EMMC,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 38,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_emmc_links),
++	.links = xm_emmc_links,
++};
++
++static const u16 xm_sdc2_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node xm_sdc2 = {
++	.name = "xm_sdc2",
++	.id = SM6375_MASTER_SDCC_2,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 23,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 35,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_sdc2_links),
++	.links = xm_sdc2_links,
++};
++
++static const u16 xm_ufs_mem_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node xm_ufs_mem = {
++	.name = "xm_ufs_mem",
++	.id = SM6375_MASTER_UFS_MEM,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 46,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_ufs_mem_links),
++	.links = xm_ufs_mem_links,
++};
++
++static const u16 xm_usb3_0_links[] = {
++	SM6375_A1NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node xm_usb3_0 = {
++	.name = "xm_usb3_0",
++	.id = SM6375_MASTER_USB3_0,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 24,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_usb3_0_links),
++	.links = xm_usb3_0_links,
++};
++
++static const u16 mas_crypto_c0_links[] = {
++	SM6375_A2NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node mas_crypto_c0 = {
++	.name = "mas_crypto_c0",
++	.id = SM6375_MASTER_CRYPTO_CORE0,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 22,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 23,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(mas_crypto_c0_links),
++	.links = mas_crypto_c0_links,
++};
++
++static const u16 qhm_qdss_bam_links[] = {
++	SM6375_A2NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qhm_qdss_bam = {
++	.name = "qhm_qdss_bam",
++	.id = SM6375_MASTER_QDSS_BAM,
++	.channels = 1,
++	.buswidth = 4,
++	.qos.ap_owned = true,
++	.qos.qos_port = 2,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qhm_qdss_bam_links),
++	.links = qhm_qdss_bam_links,
++};
++
++static const u16 qxm_ipa_links[] = {
++	SM6375_A2NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node qxm_ipa = {
++	.name = "qxm_ipa",
++	.id = SM6375_MASTER_IPA,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 3,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = 59,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(qxm_ipa_links),
++	.links = qxm_ipa_links,
++};
++
++static const u16 xm_qdss_etr_links[] = {
++	SM6375_A2NOC_SNOC_SLV,
++};
++
++static struct qcom_icc_node xm_qdss_etr = {
++	.name = "xm_qdss_etr",
++	.id = SM6375_MASTER_QDSS_ETR,
++	.channels = 1,
++	.buswidth = 8,
++	.qos.ap_owned = true,
++	.qos.qos_port = 12,
++	.qos.qos_mode = NOC_QOS_MODE_FIXED,
++	.qos.areq_prio = 2,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(xm_qdss_etr_links),
++	.links = xm_qdss_etr_links,
++};
++
++static struct qcom_icc_node ebi = {
++	.name = "ebi",
++	.id = SM6375_SLAVE_EBI,
++	.channels = 2,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 0,
++	.num_links = 0,
++};
++
++static const u16 slv_bimc_snoc_links[] = {
++	SM6375_BIMC_SNOC_MAS,
++};
++
++static struct qcom_icc_node slv_bimc_snoc = {
++	.name = "slv_bimc_snoc",
++	.id = SM6375_BIMC_SNOC_SLV,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 2,
++	.num_links = ARRAY_SIZE(slv_bimc_snoc_links),
++	.links = slv_bimc_snoc_links,
++};
++
++static struct qcom_icc_node qup0_core_slave = {
++	.name = "qup0_core_slave",
++	.id = SM6375_SLAVE_QUP_CORE_0,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qup1_core_slave = {
++	.name = "qup1_core_slave",
++	.id = SM6375_SLAVE_QUP_CORE_1,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_bimc_cfg = {
++	.name = "qhs_bimc_cfg",
++	.id = SM6375_SLAVE_BIMC_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_camera_nrt_throttle_cfg = {
++	.name = "qhs_camera_nrt_throttle_cfg",
++	.id = SM6375_SLAVE_CAMERA_NRT_THROTTLE_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_camera_rt_throttle_cfg = {
++	.name = "qhs_camera_rt_throttle_cfg",
++	.id = SM6375_SLAVE_CAMERA_RT_THROTTLE_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_camera_ss_cfg = {
++	.name = "qhs_camera_ss_cfg",
++	.id = SM6375_SLAVE_CAMERA_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_clk_ctl = {
++	.name = "qhs_clk_ctl",
++	.id = SM6375_SLAVE_CLK_CTL,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_compute_dsp_cfg = {
++	.name = "qhs_compute_dsp_cfg",
++	.id = SM6375_SLAVE_DSP_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_cpr_cx = {
++	.name = "qhs_cpr_cx",
++	.id = SM6375_SLAVE_RBCPR_CX_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_cpr_mx = {
++	.name = "qhs_cpr_mx",
++	.id = SM6375_SLAVE_RBCPR_MX_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_crypto0_cfg = {
++	.name = "qhs_crypto0_cfg",
++	.id = SM6375_SLAVE_CRYPTO_0_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_dcc_cfg = {
++	.name = "qhs_dcc_cfg",
++	.id = SM6375_SLAVE_DCC_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_ddr_phy_cfg = {
++	.name = "qhs_ddr_phy_cfg",
++	.id = SM6375_SLAVE_DDR_PHY_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_ddr_ss_cfg = {
++	.name = "qhs_ddr_ss_cfg",
++	.id = SM6375_SLAVE_DDR_SS_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_disp_ss_cfg = {
++	.name = "qhs_disp_ss_cfg",
++	.id = SM6375_SLAVE_DISPLAY_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_display_throttle_cfg = {
++	.name = "qhs_display_throttle_cfg",
++	.id = SM6375_SLAVE_DISPLAY_THROTTLE_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_emmc_cfg = {
++	.name = "qhs_emmc_cfg",
++	.id = SM6375_SLAVE_EMMC_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_gpuss_cfg = {
++	.name = "qhs_gpuss_cfg",
++	.id = SM6375_SLAVE_GRAPHICS_3D_CFG,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_hw_km = {
++	.name = "qhs_hw_km",
++	.id = SM6375_SLAVE_HWKM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_imem_cfg = {
++	.name = "qhs_imem_cfg",
++	.id = SM6375_SLAVE_IMEM_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_ipa_cfg = {
++	.name = "qhs_ipa_cfg",
++	.id = SM6375_SLAVE_IPA_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_lpass = {
++	.name = "qhs_lpass",
++	.id = SM6375_SLAVE_LPASS,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_mapss = {
++	.name = "qhs_mapss",
++	.id = SM6375_SLAVE_MAPSS,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_mesg_ram = {
++	.name = "qhs_mesg_ram",
++	.id = SM6375_SLAVE_MESSAGE_RAM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_pdm = {
++	.name = "qhs_pdm",
++	.id = SM6375_SLAVE_PDM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_pimem_cfg = {
++	.name = "qhs_pimem_cfg",
++	.id = SM6375_SLAVE_PIMEM_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_pka_wrapper = {
++	.name = "qhs_pka_wrapper",
++	.id = SM6375_SLAVE_PKA_CORE,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_pmic_arb = {
++	.name = "qhs_pmic_arb",
++	.id = SM6375_SLAVE_PMIC_ARB,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_qdss_cfg = {
++	.name = "qhs_qdss_cfg",
++	.id = SM6375_SLAVE_QDSS_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_qm_cfg = {
++	.name = "qhs_qm_cfg",
++	.id = SM6375_SLAVE_QM_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_qm_mpu_cfg = {
++	.name = "qhs_qm_mpu_cfg",
++	.id = SM6375_SLAVE_QM_MPU_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_qup0 = {
++	.name = "qhs_qup0",
++	.id = SM6375_SLAVE_QUP_0,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_qup1 = {
++	.name = "qhs_qup1",
++	.id = SM6375_SLAVE_QUP_1,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_rpm = {
++	.name = "qhs_rpm",
++	.id = SM6375_SLAVE_RPM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_sdc2 = {
++	.name = "qhs_sdc2",
++	.id = SM6375_SLAVE_SDCC_2,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_security = {
++	.name = "qhs_security",
++	.id = SM6375_SLAVE_SECURITY,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static const u16 slv_snoc_cfg_links[] = {
++	SM6375_MASTER_SNOC_CFG,
++};
++
++static struct qcom_icc_node slv_snoc_cfg = {
++	.name = "slv_snoc_cfg",
++	.id = SM6375_SLAVE_SNOC_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_snoc_cfg_links),
++	.links = slv_snoc_cfg_links,
++};
++
++static struct qcom_icc_node qhs_tcsr = {
++	.name = "qhs_tcsr",
++	.id = SM6375_SLAVE_TCSR,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_tlmm = {
++	.name = "qhs_tlmm",
++	.id = SM6375_SLAVE_TLMM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_ufs_mem_cfg = {
++	.name = "qhs_ufs_mem_cfg",
++	.id = SM6375_SLAVE_UFS_MEM_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_usb3_0 = {
++	.name = "qhs_usb3_0",
++	.id = SM6375_SLAVE_USB3,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_venus_cfg = {
++	.name = "qhs_venus_cfg",
++	.id = SM6375_SLAVE_VENUS_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_venus_throttle_cfg = {
++	.name = "qhs_venus_throttle_cfg",
++	.id = SM6375_SLAVE_VENUS_THROTTLE_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qhs_vsense_ctrl_cfg = {
++	.name = "qhs_vsense_ctrl_cfg",
++	.id = SM6375_SLAVE_VSENSE_CTRL_CFG,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static const u16 slv_camera_nrt_snoc_links[] = {
++	SM6375_MASTER_CAMNOC_SF_SNOC,
++};
++
++static struct qcom_icc_node slv_camera_nrt_snoc = {
++	.name = "slv_camera_nrt_snoc",
++	.id = SM6375_SLAVE_CAMNOC_SF_SNOC,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_camera_nrt_snoc_links),
++	.links = slv_camera_nrt_snoc_links,
++};
++
++static const u16 slv_venus0_snoc_links[] = {
++	SM6375_MASTER_VIDEO_P0_SNOC,
++};
++
++static struct qcom_icc_node slv_venus0_snoc = {
++	.name = "slv_venus0_snoc",
++	.id = SM6375_SLAVE_VIDEO_P0_SNOC,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_venus0_snoc_links),
++	.links = slv_venus0_snoc_links,
++};
++
++static const u16 slv_venus_cpu_snoc_links[] = {
++	SM6375_MASTER_VIDEO_PROC_SNOC,
++};
++
++static struct qcom_icc_node slv_venus_cpu_snoc = {
++	.name = "slv_venus_cpu_snoc",
++	.id = SM6375_SLAVE_VIDEO_PROC_SNOC,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_venus_cpu_snoc_links),
++	.links = slv_venus_cpu_snoc_links,
++};
++
++static const u16 slv_snoc_nrt_links[] = {
++	SM6375_MASTER_SNOC_NRT,
++};
++
++static struct qcom_icc_node slv_snoc_nrt = {
++	.name = "slv_snoc_nrt",
++	.id = SM6375_SLAVE_SNOC_NRT,
++	.channels = 1,
++	.buswidth = 256,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_snoc_nrt_links),
++	.links = slv_snoc_nrt_links,
++};
++
++static const u16 slv_snoc_bimc_nrt_links[] = {
++	SM6375_MASTER_SNOC_BIMC_NRT,
++};
++
++static struct qcom_icc_node slv_snoc_bimc_nrt = {
++	.name = "slv_snoc_bimc_nrt",
++	.id = SM6375_SLAVE_SNOC_BIMC_NRT,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_snoc_bimc_nrt_links),
++	.links = slv_snoc_bimc_nrt_links,
++};
++
++static const u16 slv_camera_rt_snoc_links[] = {
++	SM6375_MASTER_CAMNOC_HF_SNOC,
++};
++
++static struct qcom_icc_node slv_camera_rt_snoc = {
++	.name = "slv_camera_rt_snoc",
++	.id = SM6375_SLAVE_CAMNOC_HF_SNOC,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_camera_rt_snoc_links),
++	.links = slv_camera_rt_snoc_links,
++};
++
++static const u16 slv_mdp0_snoc_links[] = {
++	SM6375_MASTER_MDP_PORT0_SNOC,
++};
++
++static struct qcom_icc_node slv_mdp0_snoc = {
++	.name = "slv_mdp0_snoc",
++	.id = SM6375_SLAVE_MDP_PORT0_SNOC,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_mdp0_snoc_links),
++	.links = slv_mdp0_snoc_links,
++};
++
++static const u16 slv_snoc_rt_links[] = {
++	SM6375_MASTER_SNOC_RT,
++};
++
++static struct qcom_icc_node slv_snoc_rt = {
++	.name = "slv_snoc_rt",
++	.id = SM6375_SLAVE_SNOC_RT,
++	.channels = 1,
++	.buswidth = 256,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_snoc_rt_links),
++	.links = slv_snoc_rt_links,
++};
++
++static const u16 slv_snoc_bimc_rt_links[] = {
++	SM6375_MASTER_SNOC_BIMC_RT,
++};
++
++static struct qcom_icc_node slv_snoc_bimc_rt = {
++	.name = "slv_snoc_bimc_rt",
++	.id = SM6375_SLAVE_SNOC_BIMC_RT,
++	.channels = 1,
++	.buswidth = 32,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = ARRAY_SIZE(slv_snoc_bimc_rt_links),
++	.links = slv_snoc_bimc_rt_links,
++};
++
++static struct qcom_icc_node qhs_apss = {
++	.name = "qhs_apss",
++	.id = SM6375_SLAVE_APPSS,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static const u16 slv_snoc_cnoc_links[] = {
++	SM6375_SNOC_CNOC_MAS,
++};
++
++static struct qcom_icc_node slv_snoc_cnoc = {
++	.name = "slv_snoc_cnoc",
++	.id = SM6375_SNOC_CNOC_SLV,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 25,
++	.num_links = ARRAY_SIZE(slv_snoc_cnoc_links),
++	.links = slv_snoc_cnoc_links,
++};
++
++static struct qcom_icc_node qxs_imem = {
++	.name = "qxs_imem",
++	.id = SM6375_SLAVE_OCIMEM,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 26,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node qxs_pimem = {
++	.name = "qxs_pimem",
++	.id = SM6375_SLAVE_PIMEM,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static const u16 slv_snoc_bimc_links[] = {
++	SM6375_SNOC_BIMC_MAS,
++};
++
++static struct qcom_icc_node slv_snoc_bimc = {
++	.name = "slv_snoc_bimc",
++	.id = SM6375_SNOC_BIMC_SLV,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 24,
++	.num_links = ARRAY_SIZE(slv_snoc_bimc_links),
++	.links = slv_snoc_bimc_links,
++};
++
++static struct qcom_icc_node srvc_snoc = {
++	.name = "srvc_snoc",
++	.id = SM6375_SLAVE_SERVICE_SNOC,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node xs_qdss_stm = {
++	.name = "xs_qdss_stm",
++	.id = SM6375_SLAVE_QDSS_STM,
++	.channels = 1,
++	.buswidth = 4,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 30,
++	.num_links = 0,
++};
++
++static struct qcom_icc_node xs_sys_tcu_cfg = {
++	.name = "xs_sys_tcu_cfg",
++	.id = SM6375_SLAVE_TCU,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = -1,
++	.num_links = 0,
++};
++
++static const u16 slv_a1noc_snoc_links[] = {
++	SM6375_A1NOC_SNOC_MAS,
++};
++
++static struct qcom_icc_node slv_a1noc_snoc = {
++	.name = "slv_a1noc_snoc",
++	.id = SM6375_A1NOC_SNOC_SLV,
++	.channels = 1,
++	.buswidth = 8,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 142,
++	.num_links = ARRAY_SIZE(slv_a1noc_snoc_links),
++	.links = slv_a1noc_snoc_links,
++};
++
++static const u16 slv_a2noc_snoc_links[] = {
++	SM6375_A2NOC_SNOC_MAS,
++};
++
++static struct qcom_icc_node slv_a2noc_snoc = {
++	.name = "slv_a2noc_snoc",
++	.id = SM6375_A2NOC_SNOC_SLV,
++	.channels = 1,
++	.buswidth = 16,
++	.mas_rpm_id = -1,
++	.slv_rpm_id = 143,
++	.num_links = ARRAY_SIZE(slv_a2noc_snoc_links),
++	.links = slv_a2noc_snoc_links,
++};
++
++static const char * const snoc_intf_clocks[] = {
++	"cpu_axi",
++	"ufs_axi",
++	"usb_axi",
++	"ipa", /* Required by qxm_ipa */
++};
++
++static const char * const cnoc_intf_clocks[] = {
++	"usb_axi",
++};
++
++static struct qcom_icc_node * const bimc_nodes[] = {
++	[MASTER_AMPSS_M0] = &apps_proc,
++	[MASTER_SNOC_BIMC_RT] = &mas_snoc_bimc_rt,
++	[MASTER_SNOC_BIMC_NRT] = &mas_snoc_bimc_nrt,
++	[SNOC_BIMC_MAS] = &mas_snoc_bimc,
++	[MASTER_GRAPHICS_3D] = &qnm_gpu,
++	[MASTER_CDSP_PROC] = &qnm_cdsp,
++	[MASTER_TCU_0] = &tcu_0,
++	[SLAVE_EBI] = &ebi,
++	[BIMC_SNOC_SLV] = &slv_bimc_snoc,
++};
++
++static struct qcom_icc_node * const clk_virt_nodes[] = {
++	[MASTER_QUP_CORE_0] = &qup0_core_master,
++	[MASTER_QUP_CORE_1] = &qup1_core_master,
++	[SLAVE_QUP_CORE_0] = &qup0_core_slave,
++	[SLAVE_QUP_CORE_1] = &qup1_core_slave,
++};
++
++static struct qcom_icc_node * const config_noc_nodes[] = {
++	[SNOC_CNOC_MAS] = &mas_snoc_cnoc,
++	[MASTER_QDSS_DAP] = &xm_qdss_dap,
++	[SLAVE_BIMC_CFG] = &qhs_bimc_cfg,
++	[SLAVE_CAMERA_NRT_THROTTLE_CFG] = &qhs_camera_nrt_throttle_cfg,
++	[SLAVE_CAMERA_RT_THROTTLE_CFG] = &qhs_camera_rt_throttle_cfg,
++	[SLAVE_CAMERA_CFG] = &qhs_camera_ss_cfg,
++	[SLAVE_CLK_CTL] = &qhs_clk_ctl,
++	[SLAVE_DSP_CFG] = &qhs_compute_dsp_cfg,
++	[SLAVE_RBCPR_CX_CFG] = &qhs_cpr_cx,
++	[SLAVE_RBCPR_MX_CFG] = &qhs_cpr_mx,
++	[SLAVE_CRYPTO_0_CFG] = &qhs_crypto0_cfg,
++	[SLAVE_DCC_CFG] = &qhs_dcc_cfg,
++	[SLAVE_DDR_PHY_CFG] = &qhs_ddr_phy_cfg,
++	[SLAVE_DDR_SS_CFG] = &qhs_ddr_ss_cfg,
++	[SLAVE_DISPLAY_CFG] = &qhs_disp_ss_cfg,
++	[SLAVE_DISPLAY_THROTTLE_CFG] = &qhs_display_throttle_cfg,
++	[SLAVE_EMMC_CFG] = &qhs_emmc_cfg,
++	[SLAVE_GRAPHICS_3D_CFG] = &qhs_gpuss_cfg,
++	[SLAVE_HWKM] = &qhs_hw_km,
++	[SLAVE_IMEM_CFG] = &qhs_imem_cfg,
++	[SLAVE_IPA_CFG] = &qhs_ipa_cfg,
++	[SLAVE_LPASS] = &qhs_lpass,
++	[SLAVE_MAPSS] = &qhs_mapss,
++	[SLAVE_MESSAGE_RAM] = &qhs_mesg_ram,
++	[SLAVE_PDM] = &qhs_pdm,
++	[SLAVE_PIMEM_CFG] = &qhs_pimem_cfg,
++	[SLAVE_PKA_CORE] = &qhs_pka_wrapper,
++	[SLAVE_PMIC_ARB] = &qhs_pmic_arb,
++	[SLAVE_QDSS_CFG] = &qhs_qdss_cfg,
++	[SLAVE_QM_CFG] = &qhs_qm_cfg,
++	[SLAVE_QM_MPU_CFG] = &qhs_qm_mpu_cfg,
++	[SLAVE_QUP_0] = &qhs_qup0,
++	[SLAVE_QUP_1] = &qhs_qup1,
++	[SLAVE_RPM] = &qhs_rpm,
++	[SLAVE_SDCC_2] = &qhs_sdc2,
++	[SLAVE_SECURITY] = &qhs_security,
++	[SLAVE_SNOC_CFG] = &slv_snoc_cfg,
++	[SLAVE_TCSR] = &qhs_tcsr,
++	[SLAVE_TLMM] = &qhs_tlmm,
++	[SLAVE_UFS_MEM_CFG] = &qhs_ufs_mem_cfg,
++	[SLAVE_USB3] = &qhs_usb3_0,
++	[SLAVE_VENUS_CFG] = &qhs_venus_cfg,
++	[SLAVE_VENUS_THROTTLE_CFG] = &qhs_venus_throttle_cfg,
++	[SLAVE_VSENSE_CTRL_CFG] = &qhs_vsense_ctrl_cfg,
++};
++
++static struct qcom_icc_node * const mmrt_virt_nodes[] = {
++	[MASTER_CAMNOC_HF] = &qnm_camera_rt,
++	[MASTER_MDP_PORT0] = &qxm_mdp0,
++	[MASTER_SNOC_RT] = &mas_snoc_rt,
++	[SLAVE_SNOC_BIMC_RT] = &slv_snoc_bimc_rt,
++	[SLAVE_CAMNOC_HF_SNOC] = &slv_camera_rt_snoc,
++	[SLAVE_MDP_PORT0_SNOC] = &slv_mdp0_snoc,
++};
++
++static struct qcom_icc_node * const mmnrt_virt_nodes[] = {
++	[MASTER_CAMNOC_SF] = &qnm_camera_nrt,
++	[MASTER_VIDEO_P0] = &qxm_venus0,
++	[MASTER_VIDEO_PROC] = &qxm_venus_cpu,
++	[MASTER_SNOC_NRT] = &mas_snoc_nrt,
++	[SLAVE_SNOC_BIMC_NRT] = &slv_snoc_bimc_nrt,
++	[SLAVE_CAMNOC_SF_SNOC] = &slv_camera_nrt_snoc,
++	[SLAVE_VIDEO_P0_SNOC] = &slv_venus0_snoc,
++	[SLAVE_VIDEO_PROC_SNOC] = &slv_venus_cpu_snoc,
++};
++
++static struct qcom_icc_node * const sys_noc_nodes[] = {
++	[MASTER_SNOC_CFG] = &mas_snoc_cfg,
++	[MASTER_TIC] = &qhm_tic,
++	[A1NOC_SNOC_MAS] = &mas_a1noc_snoc,
++	[A2NOC_SNOC_MAS] = &mas_a2noc_snoc,
++	[BIMC_SNOC_MAS] = &mas_bimc_snoc,
++	[MASTER_PIMEM] = &qxm_pimem,
++	[MASTER_QUP_0] = &qhm_qup0,
++	[MASTER_QUP_1] = &qhm_qup1,
++	[MASTER_EMMC] = &xm_emmc,
++	[MASTER_SDCC_2] = &xm_sdc2,
++	[MASTER_UFS_MEM] = &xm_ufs_mem,
++	[MASTER_CRYPTO_CORE0] = &mas_crypto_c0,
++	[MASTER_QDSS_BAM] = &qhm_qdss_bam,
++	[MASTER_IPA] = &qxm_ipa,
++	[MASTER_QDSS_ETR] = &xm_qdss_etr,
++	[MASTER_USB3_0] = &xm_usb3_0,
++	[MASTER_CAMNOC_SF_SNOC] = &qnm_camera_nrt_snoc,
++	[MASTER_CAMNOC_HF_SNOC] = &qnm_camera_rt_snoc,
++	[MASTER_MDP_PORT0_SNOC] = &qxm_mdp0_snoc,
++	[MASTER_VIDEO_P0_SNOC] = &qxm_venus0_snoc,
++	[MASTER_VIDEO_PROC_SNOC] = &qxm_venus_cpu_snoc,
++	[SLAVE_APPSS] = &qhs_apss,
++	[SNOC_CNOC_SLV] = &slv_snoc_cnoc,
++	[SLAVE_OCIMEM] = &qxs_imem,
++	[SLAVE_PIMEM] = &qxs_pimem,
++	[SNOC_BIMC_SLV] = &slv_snoc_bimc,
++	[SLAVE_SERVICE_SNOC] = &srvc_snoc,
++	[SLAVE_QDSS_STM] = &xs_qdss_stm,
++	[SLAVE_TCU] = &xs_sys_tcu_cfg,
++	[A1NOC_SNOC_SLV] = &slv_a1noc_snoc,
++	[A2NOC_SNOC_SLV] = &slv_a2noc_snoc,
++	[SLAVE_SNOC_RT] = &slv_snoc_rt,
++	[SLAVE_SNOC_NRT] = &slv_snoc_nrt,
++};
++
++static const struct regmap_config bimc_regmap_config = {
++	.reg_bits = 32,
++	.reg_stride = 4,
++	.val_bits = 32,
++	.max_register = 0x80000,
++	.fast_io = true,
++};
++
++static const struct regmap_config cnoc_regmap_config = {
++	.reg_bits = 32,
++	.reg_stride = 4,
++	.val_bits = 32,
++	.max_register = 0x6200,
++	.fast_io = true,
++};
++
++static const struct regmap_config sys_noc_regmap_config = {
++	.reg_bits = 32,
++	.reg_stride = 4,
++	.val_bits = 32,
++	.max_register = 0x5f080,
++	.fast_io = true,
++};
++
++static const struct qcom_icc_desc sm6375_bimc = {
++	.type = QCOM_ICC_BIMC,
++	.nodes = bimc_nodes,
++	.num_nodes = ARRAY_SIZE(bimc_nodes),
++	.regmap_cfg = &bimc_regmap_config,
++	.bus_clk_desc = &bimc_clk,
++	.qos_offset = 0x8000,
++	.ab_coeff = 153,
++	.keep_alive = true,
++};
++
++static const struct qcom_icc_desc sm6375_clk_virt = {
++	.type = QCOM_ICC_QNOC,
++	.nodes = clk_virt_nodes,
++	.num_nodes = ARRAY_SIZE(clk_virt_nodes),
++	.regmap_cfg = &sys_noc_regmap_config,
++	.bus_clk_desc = &qup_clk,
++	.keep_alive = true,
++};
++
++static const struct qcom_icc_desc sm6375_config_noc = {
++	.type = QCOM_ICC_QNOC,
++	.nodes = config_noc_nodes,
++	.num_nodes = ARRAY_SIZE(config_noc_nodes),
++	.regmap_cfg = &cnoc_regmap_config,
++	.intf_clocks = cnoc_intf_clocks,
++	.num_intf_clocks = ARRAY_SIZE(cnoc_intf_clocks),
++	.bus_clk_desc = &bus_1_clk,
++	.qos_offset = 0x15000,
++	.keep_alive = true,
++};
++
++static const struct qcom_icc_desc sm6375_mmrt_virt = {
++	.type = QCOM_ICC_QNOC,
++	.nodes = mmrt_virt_nodes,
++	.num_nodes = ARRAY_SIZE(mmrt_virt_nodes),
++	.regmap_cfg = &sys_noc_regmap_config,
++	.bus_clk_desc = &mmaxi_1_clk,
++	.qos_offset = 0x15000,
++	.ab_coeff = 139,
++	.keep_alive = true,
++};
++
++static const struct qcom_icc_desc sm6375_mmnrt_virt = {
++	.type = QCOM_ICC_QNOC,
++	.nodes = mmnrt_virt_nodes,
++	.num_nodes = ARRAY_SIZE(mmnrt_virt_nodes),
++	.regmap_cfg = &sys_noc_regmap_config,
++	.bus_clk_desc = &mmaxi_0_clk,
++	.qos_offset = 0x15000,
++	.ab_coeff = 142,
++	.keep_alive = true,
++};
++
++static const struct qcom_icc_desc sm6375_sys_noc = {
++	.type = QCOM_ICC_QNOC,
++	.nodes = sys_noc_nodes,
++	.num_nodes = ARRAY_SIZE(sys_noc_nodes),
++	.regmap_cfg = &sys_noc_regmap_config,
++	.intf_clocks = snoc_intf_clocks,
++	.num_intf_clocks = ARRAY_SIZE(snoc_intf_clocks),
++	.bus_clk_desc = &bus_2_clk,
++	.qos_offset = 0x15000,
++	.keep_alive = true,
++};
++
++static const struct of_device_id sm6375_noc_of_match[] = {
++	{ .compatible = "qcom,sm6375-bimc", .data = &sm6375_bimc },
++	{ .compatible = "qcom,sm6375-clk-virt", .data = &sm6375_clk_virt },
++	{ .compatible = "qcom,sm6375-cnoc", .data = &sm6375_config_noc },
++	{ .compatible = "qcom,sm6375-mmrt-virt", .data = &sm6375_mmrt_virt },
++	{ .compatible = "qcom,sm6375-mmnrt-virt", .data = &sm6375_mmnrt_virt },
++	{ .compatible = "qcom,sm6375-snoc", .data = &sm6375_sys_noc },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sm6375_noc_of_match);
++
++static struct platform_driver sm6375_noc_driver = {
++	.probe = qnoc_probe,
++	.remove = qnoc_remove,
++	.driver = {
++		.name = "qnoc-sm6375",
++		.of_match_table = sm6375_noc_of_match,
++		.sync_state = icc_sync_state,
++	},
++};
++module_platform_driver(sm6375_noc_driver);
++
++MODULE_DESCRIPTION("Qualcomm SM6375 NoC driver");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/include/dt-bindings/interconnect/qcom,sm6375.h
+@@ -0,0 +1,132 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Qualcomm SM6375 interconnect IDs
++ *
++ * Numbered densely from 0 within each bus, which is what every other
++ * mainline qcom interconnect binding does and what of_icc_xlate_onecell()
++ * requires: the ID in the device tree is used directly as an index into
++ * that provider's node array. The vendor header this was derived from
++ * (qcom,holi.h) numbers every node in one global sequence instead, which
++ * leaves each array full of NULL holes and makes qnoc_probe() dereference
++ * the first one.
++ */
++#ifndef __DT_BINDINGS_INTERCONNECT_QCOM_SM6375_H
++#define __DT_BINDINGS_INTERCONNECT_QCOM_SM6375_H
++
++/* BIMC */
++#define MASTER_AMPSS_M0                          0
++#define MASTER_SNOC_BIMC_RT                      1
++#define MASTER_SNOC_BIMC_NRT                     2
++#define SNOC_BIMC_MAS                            3
++#define MASTER_GRAPHICS_3D                       4
++#define MASTER_CDSP_PROC                         5
++#define MASTER_TCU_0                             6
++#define SLAVE_EBI                                7
++#define BIMC_SNOC_SLV                            8
++
++/* CLK VIRT */
++#define MASTER_QUP_CORE_0                        0
++#define MASTER_QUP_CORE_1                        1
++#define SLAVE_QUP_CORE_0                         2
++#define SLAVE_QUP_CORE_1                         3
++
++/* CNOC */
++#define SNOC_CNOC_MAS                            0
++#define MASTER_QDSS_DAP                          1
++#define SLAVE_BIMC_CFG                           2
++#define SLAVE_CAMERA_NRT_THROTTLE_CFG            3
++#define SLAVE_CAMERA_RT_THROTTLE_CFG             4
++#define SLAVE_CAMERA_CFG                         5
++#define SLAVE_CLK_CTL                            6
++#define SLAVE_DSP_CFG                            7
++#define SLAVE_RBCPR_CX_CFG                       8
++#define SLAVE_RBCPR_MX_CFG                       9
++#define SLAVE_CRYPTO_0_CFG                       10
++#define SLAVE_DCC_CFG                            11
++#define SLAVE_DDR_PHY_CFG                        12
++#define SLAVE_DDR_SS_CFG                         13
++#define SLAVE_DISPLAY_CFG                        14
++#define SLAVE_DISPLAY_THROTTLE_CFG               15
++#define SLAVE_EMMC_CFG                           16
++#define SLAVE_GRAPHICS_3D_CFG                    17
++#define SLAVE_HWKM                               18
++#define SLAVE_IMEM_CFG                           19
++#define SLAVE_IPA_CFG                            20
++#define SLAVE_LPASS                              21
++#define SLAVE_MAPSS                              22
++#define SLAVE_MESSAGE_RAM                        23
++#define SLAVE_PDM                                24
++#define SLAVE_PIMEM_CFG                          25
++#define SLAVE_PKA_CORE                           26
++#define SLAVE_PMIC_ARB                           27
++#define SLAVE_QDSS_CFG                           28
++#define SLAVE_QM_CFG                             29
++#define SLAVE_QM_MPU_CFG                         30
++#define SLAVE_QUP_0                              31
++#define SLAVE_QUP_1                              32
++#define SLAVE_RPM                                33
++#define SLAVE_SDCC_2                             34
++#define SLAVE_SECURITY                           35
++#define SLAVE_SNOC_CFG                           36
++#define SLAVE_TCSR                               37
++#define SLAVE_TLMM                               38
++#define SLAVE_UFS_MEM_CFG                        39
++#define SLAVE_USB3                               40
++#define SLAVE_VENUS_CFG                          41
++#define SLAVE_VENUS_THROTTLE_CFG                 42
++#define SLAVE_VSENSE_CTRL_CFG                    43
++
++/* MMRT VIRT */
++#define MASTER_CAMNOC_HF                         0
++#define MASTER_MDP_PORT0                         1
++#define MASTER_SNOC_RT                           2
++#define SLAVE_SNOC_BIMC_RT                       3
++#define SLAVE_CAMNOC_HF_SNOC                     4
++#define SLAVE_MDP_PORT0_SNOC                     5
++
++/* MMNRT VIRT */
++#define MASTER_CAMNOC_SF                         0
++#define MASTER_VIDEO_P0                          1
++#define MASTER_VIDEO_PROC                        2
++#define MASTER_SNOC_NRT                          3
++#define SLAVE_SNOC_BIMC_NRT                      4
++#define SLAVE_CAMNOC_SF_SNOC                     5
++#define SLAVE_VIDEO_P0_SNOC                      6
++#define SLAVE_VIDEO_PROC_SNOC                    7
++
++/* SNOC */
++#define MASTER_SNOC_CFG                          0
++#define MASTER_TIC                               1
++#define A1NOC_SNOC_MAS                           2
++#define A2NOC_SNOC_MAS                           3
++#define BIMC_SNOC_MAS                            4
++#define MASTER_PIMEM                             5
++#define MASTER_QUP_0                             6
++#define MASTER_QUP_1                             7
++#define MASTER_EMMC                              8
++#define MASTER_SDCC_2                            9
++#define MASTER_UFS_MEM                           10
++#define MASTER_CRYPTO_CORE0                      11
++#define MASTER_QDSS_BAM                          12
++#define MASTER_IPA                               13
++#define MASTER_QDSS_ETR                          14
++#define MASTER_USB3_0                            15
++#define MASTER_CAMNOC_SF_SNOC                    16
++#define MASTER_CAMNOC_HF_SNOC                    17
++#define MASTER_MDP_PORT0_SNOC                    18
++#define MASTER_VIDEO_P0_SNOC                     19
++#define MASTER_VIDEO_PROC_SNOC                   20
++#define SLAVE_APPSS                              21
++#define SNOC_CNOC_SLV                            22
++#define SLAVE_OCIMEM                             23
++#define SLAVE_PIMEM                              24
++#define SNOC_BIMC_SLV                            25
++#define SLAVE_SERVICE_SNOC                       26
++#define SLAVE_QDSS_STM                           27
++#define SLAVE_TCU                                28
++#define A1NOC_SNOC_SLV                           29
++#define A2NOC_SNOC_SLV                           30
++#define SLAVE_SNOC_RT                            31
++#define SLAVE_SNOC_NRT                           32
++
++#endif
+--- a/drivers/interconnect/qcom/Kconfig	2026-08-09 00:32:48.786035007 +0000
++++ b/drivers/interconnect/qcom/Kconfig	2026-08-09 00:32:48.787035007 +0000
+@@ -153,6 +153,16 @@
+ 	  This is a driver for the Qualcomm Network-on-Chip on qcm2290-based
+ 	  platforms.
+ 
++config INTERCONNECT_QCOM_SM6375
++	tristate "Qualcomm SM6375 interconnect driver"
++	depends on INTERCONNECT_QCOM
++	depends on QCOM_SMD_RPM
++	depends on ARM64 || COMPILE_TEST
++	select INTERCONNECT_QCOM_SMD_RPM
++	help
++	  This is a driver for the Qualcomm Network-on-Chip on sm6375-based
++	  platforms.
++
+ config INTERCONNECT_QCOM_QCS404
+ 	tristate "Qualcomm QCS404 interconnect driver"
+ 	depends on INTERCONNECT_QCOM
+--- a/drivers/interconnect/qcom/Makefile	2026-08-09 00:32:48.786035007 +0000
++++ b/drivers/interconnect/qcom/Makefile	2026-08-09 00:32:48.788035007 +0000
+@@ -20,6 +20,7 @@
+ qnoc-nord-objs				:= nord.o
+ icc-osm-l3-objs				:= osm-l3.o
+ qnoc-qcm2290-objs			:= qcm2290.o
++qnoc-sm6375-objs			:= sm6375.o
+ qnoc-qcs404-objs			:= qcs404.o
+ qnoc-qcs615-objs			:= qcs615.o
+ qnoc-qcs8300-objs			:= qcs8300.o
+@@ -68,6 +69,7 @@
+ obj-$(CONFIG_INTERCONNECT_QCOM_NORD) += qnoc-nord.o
+ obj-$(CONFIG_INTERCONNECT_QCOM_OSM_L3) += icc-osm-l3.o
+ obj-$(CONFIG_INTERCONNECT_QCOM_QCM2290) += qnoc-qcm2290.o
++obj-$(CONFIG_INTERCONNECT_QCOM_SM6375) += qnoc-sm6375.o
+ obj-$(CONFIG_INTERCONNECT_QCOM_QCS404) += qnoc-qcs404.o
+ obj-$(CONFIG_INTERCONNECT_QCOM_QCS615) += qnoc-qcs615.o
+ obj-$(CONFIG_INTERCONNECT_QCOM_QCS8300) += qnoc-qcs8300.o

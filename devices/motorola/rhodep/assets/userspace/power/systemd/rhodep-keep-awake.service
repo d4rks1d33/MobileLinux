@@ -1,0 +1,12 @@
+[Unit]
+Description=Hold the phone awake while listed jobs are running
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rhodep-keep-awake
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

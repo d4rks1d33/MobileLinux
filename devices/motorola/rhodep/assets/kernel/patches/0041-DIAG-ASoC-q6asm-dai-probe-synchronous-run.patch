@@ -1,0 +1,41 @@
+From: postmarketOS rhodep port
+Subject: [DIAG] ASoC: q6asm-dai: probe whether the DSP answers RUN at all
+
+The DSP acknowledges every ASM command it is sent, with status 0, and never
+acknowledges ASM_SESSION_CMD_RUN_V2. That looked like the anomaly, but it
+proves nothing on its own: RUN is sent from the PCM trigger, which runs in
+atomic context, so it has to go out through q6asm_run_nowait(), and
+downstream encodes an explicit no_wait flag in the RUN token via
+q6asm_update_token() where mainline only sends the session id. A firmware
+that stays silent for a nowait RUN would be behaving correctly.
+
+So ask the question directly, from prepare(), where sleeping is allowed:
+send one synchronous RUN and log what comes back. q6asm_ac_send_cmd_sync()
+waits five seconds, so -ETIMEDOUT means the DSP is ignoring RUN outright,
+while 0 or a DSP error status means RUN is being received and considered,
+and the silence in the trigger path is just the nowait contract.
+
+Diagnostic only.
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 22:52:01.344301000 +0000
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 22:52:01.352301000 +0000
+@@ -310,6 +310,20 @@
+ 
+ 	prtd->run_sent = false;
+ 
++	/* DIAG (not for upstream): the DSP answers every ASM command except
++	 * RUN, which it never acknowledges. RUN is normally sent from the
++	 * trigger, which is atomic, so it has to go out nowait and an absent
++	 * reply proves nothing. Send one synchronously from here, where
++	 * sleeping is allowed, purely to find out whether the DSP answers it
++	 * at all: a 5 second timeout means it is ignoring RUN outright.
++	 */
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		int probe = q6asm_run(prtd->audio_client, prtd->stream_id,
++				      0, 0, 0);
++
++		ASM_DIAG("probe: synchronous RUN rc=%d", probe);
++	}
++
+ 	return ret;
+ 
+ routing_err:

@@ -1,0 +1,125 @@
+From: rhodep port
+Subject: [PATCH] inputmethod: a user-forced keyboard that survives non-text-input surfaces
+
+The on-screen keyboard is only ever raised for a surface that speaks the
+Wayland text-input protocol. XWayland clients cannot speak it, so Java/X11
+applications (Burp Suite, and every other XWayland window) get a text field, a
+cursor and no keyboard. The DBus escape hatch forceActivate() exists but does
+not persist: refreshActive() re-imposes the text-input gate and calls
+setActive(false) on the next text-input signal, shouldShowOnActive() only shows
+the panel for touch/tablet input, and setTrackedWindow() clears m_shouldShowPanel
+on the next focus change -- so a forced keyboard is torn down within a moment of
+appearing.
+
+This adds one member, m_forcedActive, set by forceActivate() and cleared when
+the user dismisses the keyboard (hide()). While it is set, refreshActive() keeps
+the keyboard active, shouldShowOnActive() shows it regardless of the input
+device (short of VirtualKeyboardVisibility::Never), and setTrackedWindow() keeps
+the panel up and re-shows it across focus changes.
+
+The keystroke delivery path already exists on KWin 6.7 and needed nothing here:
+plasma-keyboard is an input method (zwp_input_method_v1) that sends commit_string
+/ keysym rather than keycodes, and InputMethod::commitString()'s final else branch
+already converts committed text to keysyms and injects them into the seat keyboard
+via forwardKeySym()/notifyKeyboardKey() when the focused surface has no text-input
+-- which is exactly the XWayland case. So once this patch lets the panel be shown
+over an XWayland window, the keys land in it. (On older KWin without that else
+branch, a separate change would be needed; this is why the port measured the KWin
+version first.)
+
+Against KWin 6.7.2 (Kali kwin 6.7.2-1; src/inputmethod.cpp, src/inputmethod.h).
+The hunks are anchored on stable API and apply with fuzz on neighbouring 6.7.x.
+---
+diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
+index 4f3cd3f..3b1b855 100644
+--- a/src/inputmethod.cpp
++++ b/src/inputmethod.cpp
+@@ -161,6 +161,9 @@ void InputMethod::show()
+ 
+ void InputMethod::hide()
+ {
++    // A user dismissing the keyboard clears the forced-on state; the next
++    // text-input-driven surface decides on its own whether to raise it again.
++    m_forcedActive = false;
+     m_shouldShowPanel = false;
+     if (m_panel) {
+         m_panel->hide();
+@@ -170,6 +173,12 @@ void InputMethod::hide()
+ 
+ bool InputMethod::shouldShowOnActive() const
+ {
++    // A user-forced keyboard (forceActivate over an XWayland / non-text-input
++    // surface) is driven by mouse or keyboard, so NonMouseInput would hide it.
++    // Show it anyway while the force is in effect.
++    if (m_forcedActive) {
++        return m_virtualKeyboardVisibility != VirtualKeyboardVisibility::Never;
++    }
+     switch (m_virtualKeyboardVisibility) {
+     case VirtualKeyboardVisibility::Never:
+         return false;
+@@ -188,6 +197,15 @@ void InputMethod::refreshActive()
+     auto t2 = seat->textInputV2();
+     auto t3 = seat->textInputV3();
+ 
++    // If the user forced the keyboard on (e.g. over an XWayland window that
++    // cannot speak text-input), keep it active regardless of what the focused
++    // surface supports. Without this, any text-input enabled-changed signal
++    // would call setActive(false) and tear the forced keyboard back down.
++    if (m_forcedActive) {
++        setActive(true);
++        return;
++    }
++
+     bool active = false;
+     if (auto focusedSurface = seat->focusedTextInputSurface()) {
+         auto client = focusedSurface->client();
+@@ -319,12 +337,20 @@ void InputMethod::setTrackedWindow(Window *trackedWindow)
+         disconnect(m_trackedWindow, &Window::frameGeometryChanged, this, &InputMethod::cursorRectangleChanged);
+     }
+     m_trackedWindow = trackedWindow;
+-    m_shouldShowPanel = false;
++    // A focus change normally hides the panel (m_shouldShowPanel = false). Keep
++    // a user-forced keyboard up across focus changes so it does not vanish the
++    // instant the pointer moves to another window.
++    if (!m_forcedActive) {
++        m_shouldShowPanel = false;
++    }
+     if (m_trackedWindow) {
+         connect(m_trackedWindow, &Window::frameGeometryChanged, this, &InputMethod::updateInputPanelState, Qt::QueuedConnection);
+         connect(m_trackedWindow, &Window::frameGeometryChanged, this, &InputMethod::cursorRectangleChanged);
+     }
+     updateInputPanelState();
++    if (m_forcedActive) {
++        show();
++    }
+     Q_EMIT activeWindowChanged();
+ }
+ 
+@@ -982,6 +1008,7 @@ bool InputMethod::activeClientSupportsTextInput() const
+ 
+ void InputMethod::forceActivate()
+ {
++    m_forcedActive = true;
+     setActive(true);
+     show();
+ }
+diff --git a/src/inputmethod.h b/src/inputmethod.h
+index fa6806b..cc7039b 100644
+--- a/src/inputmethod.h
++++ b/src/inputmethod.h
+@@ -166,6 +166,15 @@ private:
+     bool m_hasPendingModifiers = false;
+     bool m_activeClientSupportsTextInput = false;
+     bool m_shouldShowPanel = false;
++    // Set by forceActivate() (the DBus "show keyboard" entry point), cleared
++    // when the user dismisses the keyboard via hide(). While set, the text-input
++    // gate in refreshActive() is bypassed, shouldShowOnActive() returns true and
++    // focus changes do not drop the panel -- which is what lets the keyboard be
++    // raised over an XWayland / Java window that cannot speak text-input. On
++    // KWin 6.7 the delivery path already exists: commitString() synthesises key
++    // events into the seat keyboard for surfaces with no text-input, so the
++    // keys reach XWayland once the panel is allowed to show.
++    bool m_forcedActive = false;
+ };
+ 
+ }

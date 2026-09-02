@@ -1,0 +1,139 @@
+#!/bin/sh
+# rhodep-repaint-bench - repeatable repaint load, reports jank and DSI errors.
+#
+# Every measurement in the glitched-lines investigation so far was a cumulative
+# dmesg count taken across whatever the phone was doing at the time, so two
+# runs were never comparable and a change could not be told from a quiet
+# minute. This runs an identical workload each time and reports both halves of
+# the symptom: frames that landed late, and DSI errors raised while they did.
+#
+# Needs the diagnostic kernel patch (0064) for the dsi-diag figure. Without it
+# the frame numbers are still valid and the error count reads 0.
+#
+# usage: rhodep-repaint-bench [seconds] [label] [brightness]
+#
+# Passing a third argument drives the backlight during the run. Repainting on
+# its own reproduces the artefact only rarely; by hand it shows up while the
+# brightness is also moving, which is what that mode recreates.
+
+set -u
+
+DUR="${1:-20}"
+LABEL="${2:-run}"
+BACKLIGHT="${3:-}"
+RUNNER=/usr/local/share/rhodep-repaint-bench.py
+
+[ -f "$RUNNER" ] || { echo "missing $RUNNER" >&2; exit 1; }
+
+if [ "$(id -u)" = 0 ]; then
+	SUDO=""
+else
+	command -v sudo >/dev/null || { echo "need root or sudo" >&2; exit 1; }
+	SUDO="sudo -n"
+	$SUDO true 2>/dev/null || SUDO="sudo -A"
+fi
+
+count_dsi() { $SUDO dmesg | grep -c 'dsi-diag' 2>/dev/null || echo 0; }
+
+# Anchor in the ring buffer so a wrap during the run cannot be mistaken for a
+# drop in errors.
+$SUDO sh -c "echo 'BENCH-$LABEL-START' > /dev/kmsg" 2>/dev/null
+
+before=$(count_dsi)
+start_boot=$(awk '{print $1}' /proc/uptime)
+
+# The compositor session belongs to the desktop user; running the load as root
+# would land on a different Wayland socket, or none.
+RUNAS=$(id -un 1000 2>/dev/null || echo kali)
+ENVV="XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland"
+
+# Nothing touches the screen during a run, so the session idles out and the
+# phone suspends mid-measurement, which looks exactly like a hang from the
+# other end of an ssh session.
+if command -v systemd-inhibit >/dev/null; then
+	INHIBIT="systemd-inhibit --what=idle:sleep --who=rhodep-repaint-bench --why=benchmark --mode=block"
+else
+	INHIBIT=""
+fi
+
+run_load() {
+	# systemd-inhibit has to be taken as root: asking for it after dropping to
+	# the desktop user needs polkit, which has no interactive agent here.
+	if [ "$(id -u)" = 0 ]; then
+		$INHIBIT runuser -u "$RUNAS" -- env $ENVV python3 "$RUNNER" "$DUR"
+	elif [ "$(id -un)" = "$RUNAS" ]; then
+		env $ENVV python3 "$RUNNER" "$DUR"
+	else
+		sudo -A $INHIBIT runuser -u "$RUNAS" -- env $ENVV python3 "$RUNNER" "$DUR"
+	fi
+}
+
+
+BL=/sys/class/backlight/5e94000.dsi.0/brightness
+BL_MAX=$(cat /sys/class/backlight/5e94000.dsi.0/max_brightness 2>/dev/null || echo 0)
+BL_LO=1200
+BL_HI=3600
+# The panel's max_brightness is 3514, and writing 3600 is rejected with -EINVAL.
+# The ramp used to end in `|| exit 0`, so that one rejected write killed the
+# whole subshell after about twenty steps -- one second of a thirty second run,
+# ascending only, and silently, because the error went to /dev/null and the
+# report printed "+bl" regardless. Every measurement taken with this mode before
+# the clamp was added was therefore made with the backlight standing still for
+# 97% of the run, which is why it could not reproduce an artefact that needs the
+# level to be moving.
+[ "$BL_MAX" -gt 0 ] && [ "$BL_HI" -gt "$BL_MAX" ] && BL_HI=$BL_MAX
+
+bl_pid=""
+if [ -n "$BACKLIGHT" ] && [ -w "$BL" ]; then
+	bl_saved=$(cat "$BL")
+	# Ramp rather than jump between two values: the artefact appears while the
+	# level is moving, and a compositor ramp is a sequence of small steps.
+	(
+		while :; do
+			v=$BL_LO
+			while [ "$v" -le "$BL_HI" ]; do
+				# Only give up if the file really went away. A rejected
+				# value must not end the ramp.
+				echo "$v" > "$BL" 2>/dev/null || [ -w "$BL" ] || exit 0
+				v=$((v + 120)); sleep 0.05
+			done
+			v=$((v - 120))	# the loop leaves v above the ceiling
+			while [ "$v" -ge "$BL_LO" ]; do
+				echo "$v" > "$BL" 2>/dev/null || [ -w "$BL" ] || exit 0
+				v=$((v - 120)); sleep 0.05
+			done
+		done
+	) &
+	bl_pid=$!
+elif [ -n "$BACKLIGHT" ]; then
+	echo "warning: $BL is not writable, running without the ramp" >&2
+fi
+
+out=$(run_load 2>&1)
+
+if [ -n "$bl_pid" ]; then
+	kill "$bl_pid" 2>/dev/null
+	wait "$bl_pid" 2>/dev/null
+	echo "$bl_saved" > "$BL" 2>/dev/null
+fi
+
+end_boot=$(awk '{print $1}' /proc/uptime)
+after=$(count_dsi)
+
+res=$(printf '%s\n' "$out" | grep -m1 'RESULT ')
+if [ -z "$res" ]; then
+	echo "the load did not report; it said:" >&2
+	printf '%s\n' "$out" | tail -5 >&2
+	exit 1
+fi
+
+frames=$(printf '%s' "$res" | sed -n 's/.*frames=\([0-9]*\).*/\1/p')
+secs=$(printf '%s' "$res" | sed -n 's/.*secs=\([0-9.]*\).*/\1/p')
+fps=$(printf '%s' "$res" | sed -n 's/.*fps=\([0-9.]*\).*/\1/p')
+janks=$(printf '%s' "$res" | sed -n 's/.*janks=\([0-9]*\).*/\1/p')
+worst=$(printf '%s' "$res" | sed -n 's/.*worst_ms=\([0-9.]*\).*/\1/p')
+dsi=$((after - before))
+wall=$(awk -v a="$start_boot" -v b="$end_boot" 'BEGIN{printf "%.1f", b-a}')
+
+printf '%-10s%s frames=%-5s fps=%-5s janks=%-4s worst=%-6s dsi_err=%-4s (%ss)\n' \
+	"$LABEL" "$([ -n "$bl_pid" ] && echo ' +bl' || echo '    ')" "$frames" "$fps" "$janks" "${worst}ms" "$dsi" "$wall"

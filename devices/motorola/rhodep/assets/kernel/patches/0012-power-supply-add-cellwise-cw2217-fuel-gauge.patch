@@ -1,0 +1,528 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: add CellWise CW2217 fuel gauge driver
+
+The Moto G82 (rhodep) reports no battery at all: /sys/class/power_supply
+is empty, so userspace cannot show charge level or react to a low battery.
+
+The gauge on this board is a CellWise CW2217 at 0x64. It is not the CW2015
+handled by cw2015_battery.c: the CW2217 is a coulomb counter with an
+external sense resistor (5 mOhm here) and adds temperature, current, cycle
+count and state-of-health registers, with a different cell voltage LSB.
+
+The register layout and the conversions were taken from the vendor driver
+(drivers/power/cw2217b_fg_mmi/cw2217B_fuel_gauge_base.c in the Motorola
+SM6375 kernel) and cross-checked against the hardware:
+
+  - voltage is 5/16 mV per LSB
+  - temperature is (T + 40) * 2 in degrees Celsius
+  - current steps by 1600 uA divided by the shunt in milliohms, and is
+    positive while charging (the vendor applies a -1 polarity to its own
+    reading, which is the opposite of the Linux convention)
+
+Dumping the device also gives an exact byte-for-byte match of the 80-byte
+battery profile at 0x10..0x5f with the SWD 5000 mAh profile in
+arch/arm64/boot/dts/vendor/qcom/bat_setting/CW_ng50-SWD-5000mah-rhodep.dtsi,
+including its trailing checksum, so the profile range is confirmed too.
+
+The driver is read-only on purpose. The profile is loaded by the boot
+firmware and rewriting it discards the gauge's learned state, so the driver
+only checks that a profile is present and warns if it is not.
+
+Current and status depend on the shunt value, which cannot be probed. If
+shunt-resistor-micro-ohms is missing both are reported as unavailable
+rather than scaled by a guess.
+
+Also register the cell as an OF thermal sensor, so a zone described in the
+device tree can carry trip points and drive a cooling device. The tripless
+zone the power supply core registers is only good for monitoring.
+
+--- /dev/null
++++ b/drivers/power/supply/cw2217_battery.c
+@@ -0,0 +1,456 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Fuel gauge driver for CellWise CW2217 (CW221x family)
++ *
++ * The CW2217 is a coulomb-counting fuel gauge with an external sense
++ * resistor. It is a different device from the CW2015 supported by
++ * cw2015_battery.c: the register layout is similar in spirit but the
++ * CW2217 adds temperature, current, state-of-health and cycle count
++ * registers, and the cell voltage LSB differs.
++ *
++ * This driver is deliberately read-only. The battery profile is loaded
++ * into the gauge by the boot firmware, and reprogramming it resets the
++ * gauge's learned state, so we only validate that a profile is present
++ * and otherwise never write to the device.
++ */
++
++#include <linux/cleanup.h>
++#include <linux/i2c.h>
++#include <linux/jiffies.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/thermal.h>
++
++#define CW2217_REG_VERSION		0x00
++#define CW2217_REG_VCELL_H		0x02
++#define CW2217_REG_VCELL_L		0x03
++#define CW2217_REG_SOC_INT		0x04
++#define CW2217_REG_SOC_DEC		0x05
++#define CW2217_REG_TEMP			0x06
++#define CW2217_REG_MODE_CONFIG		0x08
++#define CW2217_REG_TEMP_MAX		0x0c
++#define CW2217_REG_TEMP_MIN		0x0d
++#define CW2217_REG_CURRENT_H		0x0e
++#define CW2217_REG_CURRENT_L		0x0f
++#define CW2217_REG_BAT_PROFILE		0x10
++#define CW2217_REG_CYCLE_H		0xa4
++#define CW2217_REG_CYCLE_L		0xa5
++#define CW2217_REG_SOH			0xa6
++#define CW2217_REG_IC_STATE		0xa7
++
++#define CW2217_PROFILE_SIZE		80
++
++/* Top nibble identifies the CW221x family; 0xa0 is the CW2217. */
++#define CW2217_VERSION_MASK		0xf0
++#define CW2217_VERSION_CW221X		0xa0
++
++#define CW2217_MODE_SLEEP		0xf0
++
++/* Cell voltage is 5/16 mV per LSB, i.e. 312.5 uV. */
++#define CW2217_VCELL_TO_UV(r)		((int)(r) * 3125 / 10)
++
++/* Temperature is coded as (T + 40) * 2, in degrees Celsius. */
++#define CW2217_TEMP_TO_DECIDEGC(r)	((int)(r) * 5 - 400)
++
++/*
++ * Current is a signed value across the external sense resistor, with a
++ * step of 1600 uA divided by the shunt resistance in milliohms, and is
++ * positive while the battery is charging.
++ */
++#define CW2217_CURRENT_TO_UA(r, mohm)	((int)(s16)(r) * 1600 / (mohm))
++
++/* Ignore current below this; the gauge dithers by a few LSB around zero. */
++#define CW2217_CURRENT_NOISE_UA		10000
++
++/* The cycle counter counts in sixteenths of a cycle. */
++#define CW2217_CYCLE_PER_LSB		16
++
++/* Cache device reads for this long to keep I2C traffic down. */
++#define CW2217_CACHE_MS			2000
++
++struct cw2217 {
++	struct i2c_client *client;
++	struct power_supply *psy;
++	struct power_supply_battery_info *info;
++	struct mutex lock;	/* protects the cached registers below */
++	int shunt_mohm;		/* signed: used in signed division */
++	u32 ui_full;		/* raw SOC that maps to 100% in the UI */
++	unsigned long valid_until;
++	u8 soc;
++	u16 vcell;
++	u16 current_raw;
++	u8 temp;
++	u8 temp_max;
++	u8 temp_min;
++	u16 cycle;
++	u8 soh;
++};
++
++static int cw2217_read_word(struct cw2217 *cw, u8 reg, u16 *val)
++{
++	int hi, lo;
++
++	/*
++	 * The gauge latches the low byte when the high byte is read, so the
++	 * two bytes must be read in that order and as a pair.
++	 */
++	hi = i2c_smbus_read_byte_data(cw->client, reg);
++	if (hi < 0)
++		return hi;
++
++	lo = i2c_smbus_read_byte_data(cw->client, reg + 1);
++	if (lo < 0)
++		return lo;
++
++	*val = (hi << 8) | lo;
++	return 0;
++}
++
++static int cw2217_refresh(struct cw2217 *cw)
++{
++	int ret;
++
++	if (cw->valid_until && time_before(jiffies, cw->valid_until))
++		return 0;
++
++	ret = i2c_smbus_read_byte_data(cw->client, CW2217_REG_SOC_INT);
++	if (ret < 0)
++		return ret;
++	/*
++	 * A gauge that has lost its profile reports nonsense here. Clamp
++	 * rather than hand a bogus percentage to userspace. Scale by ui_full
++	 * so the raw saturation point reads as 100%.
++	 */
++	cw->soc = min(ret * 100 / cw->ui_full, 100);
++
++	ret = cw2217_read_word(cw, CW2217_REG_VCELL_H, &cw->vcell);
++	if (ret)
++		return ret;
++
++	ret = i2c_smbus_read_byte_data(cw->client, CW2217_REG_TEMP);
++	if (ret < 0)
++		return ret;
++	cw->temp = ret;
++
++	ret = cw2217_read_word(cw, CW2217_REG_CURRENT_H, &cw->current_raw);
++	if (ret)
++		return ret;
++
++	ret = cw2217_read_word(cw, CW2217_REG_CYCLE_H, &cw->cycle);
++	if (ret)
++		return ret;
++
++	ret = i2c_smbus_read_byte_data(cw->client, CW2217_REG_SOH);
++	if (ret < 0)
++		return ret;
++	cw->soh = ret;
++
++	cw->valid_until = jiffies + msecs_to_jiffies(CW2217_CACHE_MS);
++	if (!cw->valid_until)
++		cw->valid_until = 1;
++
++	return 0;
++}
++
++/*
++ * Expose the cell temperature as an OF thermal sensor as well as through the
++ * power supply. The tripless zone the power supply core registers is only good
++ * for monitoring; a zone described in the device tree can carry trip points and
++ * drive a cooling device, which is how charging gets throttled when the cell
++ * gets hot without depending on anything in userspace.
++ */
++static int cw2217_thermal_get_temp(struct thermal_zone_device *tz, int *temp)
++{
++	struct cw2217 *cw = thermal_zone_device_priv(tz);
++	int ret;
++
++	guard(mutex)(&cw->lock);
++
++	ret = cw2217_refresh(cw);
++	if (ret)
++		return ret;
++
++	/* The gauge counts in tenths of a degree, thermal wants thousandths. */
++	*temp = CW2217_TEMP_TO_DECIDEGC(cw->temp) * 100;
++
++	return 0;
++}
++
++static const struct thermal_zone_device_ops cw2217_thermal_ops = {
++	.get_temp = cw2217_thermal_get_temp,
++};
++
++static int cw2217_get_status(struct cw2217 *cw)
++{
++	int cur;
++
++	if (cw->soc >= 100)
++		return POWER_SUPPLY_STATUS_FULL;
++
++	if (!cw->shunt_mohm)
++		return POWER_SUPPLY_STATUS_UNKNOWN;
++
++	cur = CW2217_CURRENT_TO_UA(cw->current_raw, cw->shunt_mohm);
++	if (abs(cur) < CW2217_CURRENT_NOISE_UA)
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
++
++	return cur > 0 ? POWER_SUPPLY_STATUS_CHARGING :
++			 POWER_SUPPLY_STATUS_DISCHARGING;
++}
++
++static int cw2217_get_health(struct cw2217 *cw)
++{
++	int temp = CW2217_TEMP_TO_DECIDEGC(cw->temp);
++
++	if (cw->temp_max && temp > CW2217_TEMP_TO_DECIDEGC(cw->temp_max))
++		return POWER_SUPPLY_HEALTH_OVERHEAT;
++	if (cw->temp_min && temp < CW2217_TEMP_TO_DECIDEGC(cw->temp_min))
++		return POWER_SUPPLY_HEALTH_COLD;
++	if (cw->soh && cw->soh < 50)
++		return POWER_SUPPLY_HEALTH_DEAD;
++
++	return POWER_SUPPLY_HEALTH_GOOD;
++}
++
++static int cw2217_get_property(struct power_supply *psy,
++			       enum power_supply_property psp,
++			       union power_supply_propval *val)
++{
++	struct cw2217 *cw = power_supply_get_drvdata(psy);
++	int ret;
++
++	guard(mutex)(&cw->lock);
++
++	ret = cw2217_refresh(cw);
++	if (ret)
++		return ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		val->intval = cw->soc;
++		break;
++	case POWER_SUPPLY_PROP_STATUS:
++		val->intval = cw2217_get_status(cw);
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = CW2217_VCELL_TO_UV(cw->vcell);
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		if (!cw->shunt_mohm)
++			return -ENODATA;
++		val->intval = CW2217_CURRENT_TO_UA(cw->current_raw,
++						   cw->shunt_mohm);
++		break;
++	case POWER_SUPPLY_PROP_TEMP:
++		val->intval = CW2217_TEMP_TO_DECIDEGC(cw->temp);
++		break;
++	case POWER_SUPPLY_PROP_CYCLE_COUNT:
++		val->intval = cw->cycle / CW2217_CYCLE_PER_LSB;
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = cw2217_get_health(cw);
++		break;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LIPO;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
++		if (!cw->info ||
++		    cw->info->charge_full_design_uah < 0)
++			return -ENODATA;
++		val->intval = cw->info->charge_full_design_uah;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
++		if (!cw->info || cw->info->voltage_min_design_uv < 0)
++			return -ENODATA;
++		val->intval = cw->info->voltage_min_design_uv;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
++		if (!cw->info || cw->info->voltage_max_design_uv < 0)
++			return -ENODATA;
++		val->intval = cw->info->voltage_max_design_uv;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static enum power_supply_property cw2217_properties[] = {
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_CYCLE_COUNT,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
++	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
++};
++
++static const struct power_supply_desc cw2217_psy_desc = {
++	.name		= "cw2217-battery",
++	.type		= POWER_SUPPLY_TYPE_BATTERY,
++	.properties	= cw2217_properties,
++	.num_properties	= ARRAY_SIZE(cw2217_properties),
++	.get_property	= cw2217_get_property,
++};
++
++/*
++ * The gauge is useless without a battery profile, and the profile is the
++ * boot firmware's job. Warn loudly if it is missing so a wrong capacity is
++ * not mistaken for a driver bug.
++ */
++static void cw2217_check_profile(struct cw2217 *cw)
++{
++	u8 profile[CW2217_PROFILE_SIZE];
++	bool blank = true;
++	int ret;
++	size_t i;
++
++	ret = i2c_smbus_read_i2c_block_data(cw->client, CW2217_REG_BAT_PROFILE,
++					    sizeof(profile), profile);
++	if (ret < 0) {
++		dev_warn(&cw->client->dev,
++			 "could not read battery profile: %d\n", ret);
++		return;
++	}
++
++	for (i = 0; i < sizeof(profile); i++) {
++		if (profile[i] != 0x00 && profile[i] != 0xff) {
++			blank = false;
++			break;
++		}
++	}
++
++	if (blank)
++		dev_warn(&cw->client->dev,
++			 "no battery profile loaded, capacity will be wrong\n");
++}
++
++static int cw2217_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = {};
++	struct thermal_zone_device *tzd;
++	struct cw2217 *cw;
++	u32 shunt_uohm;
++	int ret;
++
++	cw = devm_kzalloc(dev, sizeof(*cw), GFP_KERNEL);
++	if (!cw)
++		return -ENOMEM;
++
++	cw->client = client;
++	ret = devm_mutex_init(dev, &cw->lock);
++	if (ret)
++		return ret;
++
++	ret = i2c_smbus_read_byte_data(client, CW2217_REG_VERSION);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "could not read version\n");
++
++	if ((ret & CW2217_VERSION_MASK) != CW2217_VERSION_CW221X)
++		return dev_err_probe(dev, -ENODEV,
++				     "not a CW221x fuel gauge (version 0x%02x)\n",
++				     ret);
++	dev_info(dev, "CellWise fuel gauge, version 0x%02x\n", ret);
++
++	ret = i2c_smbus_read_byte_data(client, CW2217_REG_MODE_CONFIG);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "could not read mode\n");
++	if (ret == CW2217_MODE_SLEEP)
++		dev_warn(dev, "gauge is asleep, readings will be stale\n");
++
++	cw2217_check_profile(cw);
++
++	/*
++	 * Current is measured across an external shunt, so without knowing
++	 * its value there is no way to scale the reading. Report no current
++	 * at all rather than a wrong one.
++	 */
++	/*
++	 * The vendor scales the reported charge so that a raw SOC of ui_full
++	 * reads as 100% (cellwise,ui-full-soc in the vendor DT, 97 here). The
++	 * gauge saturates a few percent below full by design, so without this
++	 * the battery never shows 100%. Default 100 means no scaling.
++	 */
++	if (device_property_read_u32(dev, "cellwise,ui-full-soc", &cw->ui_full) ||
++	    cw->ui_full < 50 || cw->ui_full > 100)
++		cw->ui_full = 100;
++
++	ret = device_property_read_u32(dev, "shunt-resistor-micro-ohms",
++				       &shunt_uohm);
++	if (ret || shunt_uohm < 1000 || shunt_uohm > INT_MAX) {
++		dev_warn(dev,
++			 "no usable shunt-resistor-micro-ohms, current and status unavailable\n");
++		cw->shunt_mohm = 0;
++	} else {
++		cw->shunt_mohm = shunt_uohm / 1000;
++	}
++
++	/* Alarm thresholds are configured by firmware; used for health only. */
++	ret = i2c_smbus_read_byte_data(client, CW2217_REG_TEMP_MAX);
++	cw->temp_max = ret < 0 ? 0 : ret;
++	ret = i2c_smbus_read_byte_data(client, CW2217_REG_TEMP_MIN);
++	cw->temp_min = ret < 0 ? 0 : ret;
++
++	psy_cfg.drv_data = cw;
++	psy_cfg.fwnode = dev_fwnode(dev);
++
++	cw->psy = devm_power_supply_register(dev, &cw2217_psy_desc, &psy_cfg);
++	if (IS_ERR(cw->psy))
++		return dev_err_probe(dev, PTR_ERR(cw->psy),
++				     "could not register power supply\n");
++
++	/* Optional: only used to publish design values. */
++	ret = power_supply_get_battery_info(cw->psy, &cw->info);
++	if (ret && ret != -ENODEV && ret != -ENOENT)
++		dev_warn(dev, "could not get battery info: %d\n", ret);
++
++	i2c_set_clientdata(client, cw);
++
++	/*
++	 * Optional: only present if the device tree describes a zone for this
++	 * sensor. Anything other than a missing zone is worth reporting.
++	 */
++	tzd = devm_thermal_of_zone_register(dev, 0, cw, &cw2217_thermal_ops);
++	if (IS_ERR(tzd) && PTR_ERR(tzd) != -ENODEV)
++		dev_warn(dev, "could not register thermal zone: %pe\n", tzd);
++
++	return 0;
++}
++
++static const struct i2c_device_id cw2217_i2c_id[] = {
++	{ "cw2217" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, cw2217_i2c_id);
++
++static const struct of_device_id cw2217_of_match[] = {
++	{ .compatible = "cellwise,cw2217" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, cw2217_of_match);
++
++static struct i2c_driver cw2217_driver = {
++	.driver = {
++		.name = "cw2217",
++		.of_match_table = cw2217_of_match,
++	},
++	.id_table = cw2217_i2c_id,
++	.probe = cw2217_probe,
++};
++module_i2c_driver(cw2217_driver);
++
++MODULE_DESCRIPTION("CellWise CW2217 fuel gauge driver");
++MODULE_LICENSE("GPL");
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -141,6 +141,18 @@
+ 	  This driver can also be built as a module. If so, the module will be
+ 	  called cw2015_battery.
+ 
++config BATTERY_CW2217
++	tristate "CW2217 Battery driver"
++	depends on I2C
++	help
++	  Say Y here to enable support for the CellWise CW2217 coulomb
++	  counting battery fuel gauge. This is a different device from the
++	  CW2015 above: it has an external sense resistor and reports
++	  temperature, cycle count and state of health.
++
++	  This driver can also be built as a module. If so, the module will be
++	  called cw2217_battery.
++
+ config BATTERY_DS2760
+ 	tristate "DS2760 battery driver (HP iPAQ & others)"
+ 	depends on W1
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -27,6 +27,7 @@
+ obj-$(CONFIG_BATTERY_CHAGALL)	+= chagall-battery.o
+ obj-$(CONFIG_BATTERY_CPCAP)	+= cpcap-battery.o
+ obj-$(CONFIG_BATTERY_CW2015)	+= cw2015_battery.o
++obj-$(CONFIG_BATTERY_CW2217)	+= cw2217_battery.o
+ obj-$(CONFIG_BATTERY_DS2760)	+= ds2760_battery.o
+ obj-$(CONFIG_BATTERY_DS2780)	+= ds2780_battery.o
+ obj-$(CONFIG_BATTERY_DS2781)	+= ds2781_battery.o

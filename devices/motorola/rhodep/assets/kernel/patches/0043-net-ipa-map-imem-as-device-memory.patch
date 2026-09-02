@@ -1,0 +1,52 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: map IMEM as device memory, not normal memory
+
+ipa_imem_init() maps the IPA's window into IMEM with IOMMU_READ|IOMMU_WRITE,
+which leaves the SMMU page table entry with Normal cacheable attributes. IMEM
+is not DRAM: it is an on-chip SRAM slave, and on SM6375 issuing cacheable
+transactions at it is not merely inefficient, it is fatal. The SoC resets
+instantly with no CPU exception, no panic and not one character of console
+output — the same failure mode this port already hit once when the IPA shared
+memory window was pointed at a hole (see HANDOFF-SESSION4.md §1).
+
+The symptom is a watchdog reset a few minutes after the modem registers on a
+network, and only then: it needs the modem to be actually using the IPA, so it
+never appeared while the modem was stuck offline. With the modem's radio off,
+or with ipa.ko not loaded, the device runs indefinitely.
+
+The downstream Motorola SM6375 kernel maps exactly this region with the device
+attribute, in the code that consumes the `qcom,additional-mapping` property
+that carries it:
+
+	techpack/dataipa/.../ipa_v3/ipa.c:8951
+		ipa3_iommu_map(cb->iommu_domain,
+			rounddown(iova, PAGE_SIZE), rounddown(pa, PAGE_SIZE),
+			roundup(size + pa - rounddown(pa, PAGE_SIZE), PAGE_SIZE),
+			IOMMU_READ | IOMMU_WRITE | IOMMU_MMIO);
+
+	blair.dtsi, ipa_smmu_ap:
+		qcom,additional-mapping =
+		/* modem tables in IMEM */
+		<0x0C123000 0x0C123000 0x2000>;
+
+IOMMU_MMIO is the flag that makes the SMMU use Device-nGnRE for the entry, and
+it is the correct description of the slave on every SoC, not just this one:
+IMEM is memory-mapped I/O, and no user of this mapping wants it cached.
+
+--- a/drivers/net/ipa/ipa_mem.c
++++ b/drivers/net/ipa/ipa_mem.c
+@@ -472,8 +472,12 @@
+ 	size = PAGE_ALIGN(size + addr - phys);
+ 	iova = phys;	/* We just want a direct mapping */
+ 
+-	ret = iommu_map(domain, iova, phys, size, IOMMU_READ | IOMMU_WRITE,
+-			GFP_KERNEL);
++	/* IMEM is an on-chip SRAM slave, not DRAM. It must be mapped as device
++	 * memory: on SM6375 a cacheable mapping makes the SoC reset without a
++	 * trace as soon as the IPA touches it.
++	 */
++	ret = iommu_map(domain, iova, phys, size,
++			IOMMU_READ | IOMMU_WRITE | IOMMU_MMIO, GFP_KERNEL);
+ 	if (ret)
+ 		return ret;
+ 

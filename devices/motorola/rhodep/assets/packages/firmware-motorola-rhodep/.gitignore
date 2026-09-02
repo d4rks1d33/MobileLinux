@@ -1,0 +1,2 @@
+lib/firmware/**
+!lib/firmware/.gitkeep

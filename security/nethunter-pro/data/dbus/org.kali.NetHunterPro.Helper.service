@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.kali.NetHunterPro.Helper
+Exec=/usr/libexec/nethunter-pro-helper
+User=root
+SystemdService=nethunter-pro-helper.service

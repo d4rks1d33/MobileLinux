@@ -1,0 +1,90 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: wire the IPA's three NoC paths
+
+Companion to patch 0044, which gives ipa_data_v4_11_sm6375 an "imem" path.
+Without this the driver asks for three interconnects the node does not declare
+and IPA fails to probe.
+
+The three are copied from the vendor node, which is the only description of
+this SoC's IPA that exists:
+
+	blair.dtsi:3196, qcom,ipa@0x5800000
+		interconnects = <&system_noc MASTER_IPA &bimc SLAVE_EBI>,
+				<&system_noc MASTER_IPA &system_noc SLAVE_OCIMEM>,
+				<&bimc MASTER_AMPSS_M0 &config_noc SLAVE_IPA_CFG>;
+		interconnect-names = "ipa_to_ebi1", "ipa_to_imem", "appss_to_ipa";
+
+renamed to the "memory"/"imem"/"config" the mainline driver looks for.
+
+This supersedes the old 0029 in docs/interconnect-sm6375-wip/, which was
+written when the IPA node was still disabled and wired only two of the three,
+missing the one that matters.
+
+Each specifier carries two cells, the node id and an RPM tag, because the
+providers declare #interconnect-cells = <2>, exactly as sm6115.dtsi does it.
+Getting that wrong does not fail loudly: fw_devlink walks the list with the
+wrong stride, takes a node id for a phandle, and parks the device on whatever
+it points at. The first version of this patch omitted the tags and the IPA sat
+forever on "wait for supplier /opp-table-cpu6", which is simply where the id 20
+(SLAVE_IPA_CFG) happened to land.
+
+Note the ordering constraint: the IPA node now depends on the interconnect
+provider (patch 0028), so with INTERCONNECT_QCOM_SM6375=m the IPA sits at
+-EPROBE_DEFER until that module is loaded. That is deliberate for now — it
+keeps both out of the boot so the pair can be loaded by hand and a bad guess
+costs a reboot rather than a reflash.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -13,6 +13,8 @@
+ #define PMK8350_SID 6
+ 
+ #include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interconnect/qcom,rpm-icc.h>
++#include <dt-bindings/interconnect/qcom,sm6375.h>
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
+ #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
+@@ -1350,6 +1352,42 @@
+ 		clocks = <&rpmcc RPM_SMD_IPA_CLK>;
+ 		clock-names = "core";
+ 
++		/*
++		 * Three NoC paths, copied from the vendor node, which is the
++		 * only description of this SoC's IPA that exists:
++		 *
++		 *   blair.dtsi:3196, qcom,ipa@0x5800000
++		 *     interconnect-names = "ipa_to_ebi1", "ipa_to_imem",
++		 *                          "appss_to_ipa";
++		 *
++		 * renamed to what the mainline driver looks for. "imem" is the
++		 * one that matters and that the other IPA v4.11 SoCs do not
++		 * have: the modem keeps its filter and route tables in IMEM at
++		 * 0x0c123000 and the IPA reads them through its own context
++		 * bank, so with no path voted the SoC resets without a word a
++		 * few minutes after the modem registers. See patch 0044 and
++		 * HANDOFF-SESSION4.md session 14.
++		 *
++		 * Two cells per specifier, node id and RPM tag, because the
++		 * providers declare #interconnect-cells = <2> - the same shape
++		 * sm6115.dtsi uses. Writing one cell here does not fail
++		 * loudly: fw_devlink walks the list with the wrong stride,
++		 * reads a node id as if it were a phandle, and blocks this
++		 * device on whatever that number happens to point at. Here it
++		 * was SLAVE_IPA_CFG (20) landing on opp-table-cpu6:
++		 *
++		 *   5840000.ipa platform: wait for supplier /opp-table-cpu6
++		 */
++		interconnects = <&system_noc MASTER_IPA RPM_ALWAYS_TAG
++				 &bimc SLAVE_EBI RPM_ALWAYS_TAG>,
++				<&system_noc MASTER_IPA RPM_ALWAYS_TAG
++				 &system_noc SLAVE_OCIMEM RPM_ALWAYS_TAG>,
++				<&bimc MASTER_AMPSS_M0 RPM_ALWAYS_TAG
++				 &config_noc SLAVE_IPA_CFG RPM_ALWAYS_TAG>;
++		interconnect-names = "memory",
++				     "imem",
++				     "config";
++
+ 		qcom,smem-states = <&ipa_smp2p_out 0>,
+ 				   <&ipa_smp2p_out 1>;
+ 		qcom,smem-state-names = "ipa-clock-enabled-valid",

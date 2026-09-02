@@ -1,0 +1,77 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: give the charger its interrupt
+
+Unplug the cable at 100% and the phone does not notice. UPower keeps
+reporting the charger online -- observed still saying "online: yes" ten
+minutes after the cable came out -- so UPower.OnBattery stays false,
+PowerDevil keeps the plugged-in policy, and a locked screen never leads to
+a suspend.
+
+The charger node has no interrupt. bq256xx registers
+bq256xx_irq_handler_thread() only `if (client->irq)`, and that handler is
+the only thing in the driver that calls power_supply_changed() on a state
+change. With no interrupt there is no uevent, and nothing ever tells
+userspace the cable moved. The values in sysfs are correct the moment
+anything reads them, which is what makes this hard to see: the kernel says
+online=0 and status=Discharging while UPower, which is event driven, still
+believes what it read at startup.
+
+	# unplugged ten minutes earlier
+	upower: online: yes   (updated 574 seconds ago)
+	kernel: bq256xx-charger/online = 0
+	busctl ... UPower OnBattery -> b false
+
+	# udevadm trigger --subsystem-match=power_supply
+	upower: online: no
+	busctl ... UPower OnBattery -> b true
+
+The comment this replaces called the interrupt optional, which is what the
+binding says and is true of the driver in the narrow sense -- it reads
+registers on demand and charging works without it. It is not true of the
+system: without it nothing is ever pushed, and every consumer that waits to
+be told sees a stale world.
+
+The number is the vendor's, from discrete_charging_rhodep.dtsi, and tlmm 12
+is unclaimed in this port. The driver requests IRQF_TRIGGER_FALLING, which
+is what the type here says.
+
+This is the second half of "the phone will not suspend at 100%". The first
+was patch 0096, where the fuel gauge reported FULL while discharging; with
+that fixed the battery correctly reads Discharging at 100% but the daemon
+still said OnBattery: false, because the daemon asks the charger, not the
+gauge.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -596,14 +596,28 @@
+ 	 * which is what we want: if it expires the part resets its registers to
+ 	 * the factory values and charging stops.
+ 	 *
+-	 * The interrupt (tlmm 12 in the vendor DT) is left out on purpose: it is
+-	 * optional in bq256xx and without it the driver reads the registers on
+-	 * demand. It can be added later.
++	 * The interrupt is not optional in practice, whatever the binding says.
++	 * Without it bq256xx_irq_handler_thread() never runs, so nothing ever
++	 * calls power_supply_changed() for this supply and userspace is never
++	 * told the cable moved. UPower keeps whatever it read at startup --
++	 * observed holding "online: yes" for ten minutes after the charger was
++	 * unplugged -- so UPower.OnBattery stays false, and PowerDevil applies
++	 * the plugged-in policy: a locked screen never leads to a suspend. A
++	 * udevadm trigger on the power_supply subsystem fixes it immediately,
++	 * which is what identified this.
++	 *
++	 * tlmm 12, from the vendor's discrete_charging_rhodep.dtsi:
++	 *	interrupt-parent = <&tlmm>;
++	 *	interrupts = <12 0>;
++	 *	sgm,irq-gpio = <&tlmm 12 0>;
++	 * The driver asks for IRQF_TRIGGER_FALLING, and the part pulls the line
++	 * low on a state change, so the type here matches.
+ 	 */
+ 	charger: charger@3b {
+ 		compatible = "sgm,sgm41542";
+ 		#cooling-cells = <2>;
+ 		reg = <0x3b>;
++		interrupts-extended = <&tlmm 12 IRQ_TYPE_EDGE_FALLING>;
+ 		monitored-battery = <&battery>;
+ 		input-current-limit-microamp = <1000000>;
+ 	};

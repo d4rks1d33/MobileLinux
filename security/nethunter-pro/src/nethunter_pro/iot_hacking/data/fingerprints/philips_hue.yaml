@@ -1,0 +1,28 @@
+id: philips-hue
+version: 1
+device_type: hub
+vendor: Signify (Philips Hue)
+family: philips-hue
+threshold: 60
+matchers:
+  - name: config-api
+    type: http_body
+    path: /api/config
+    regex: '"bridgeid":"[0-9A-F]+FFFE[0-9A-F]+"'
+    confidence: 90
+    extract:
+      bridgeid: '"bridgeid":"([0-9A-F]+)"'
+      modelid: '"modelid":"([^"]+)"'
+      apiversion: '"apiversion":"([^"]+)"'
+      swversion: '"swversion":"([^"]+)"'
+  - name: mdns-hue
+    type: mdns
+    mdns_type: _hue._tcp
+    confidence: 60
+  - name: oui-signify
+    type: mac_oui
+    values: ["00:17:88", "EC:B5:FA", "00:1E:C0"]
+    confidence: 20
+metadata:
+  playbook: philips-hue
+  known_cves: ["CVE-2020-6007", "CVE-2026-73669"]

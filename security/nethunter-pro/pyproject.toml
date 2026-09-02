@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nethunter-pro-app"
+version = "0.1.0"
+description = "Kali NetHunter Pro control panel for Phosh (GTK4/libadwaita)"
+readme = "README.md"
+license = { text = "GPL-2.0-or-later" }
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+# Smart TV remote control drivers. Each library is optional; the tv_remote
+# module degrades gracefully when a library is missing (that brand's driver
+# just becomes unavailable). Installing them all is ~30 MB.
+tv = [
+    "androidtvremote2",
+    "PyChromecast",
+    "samsungtvws",
+    "bscpylgtv",
+    "bravia-tv",
+    "roku",
+    "pyvizio",
+    "pyatv",
+    "adb-shell",
+]
+
+# IoT Hacking module: the core discovery / fingerprint / playbook engine
+# only needs PyYAML. Everything else is optional and only pulled in when
+# a specific plugin is exercised. Playbooks that shell out to nmap /
+# hydra / mosquitto_pub etc. rely on the system-level tools that
+# install.sh's apt block already brings in.
+iot = [
+    "PyYAML",
+    "python-kasa",     # kasa plug driver used by kasa playbook
+    "python-miio",     # Xiaomi / Roborock / miIO ecosystem
+    "aiohttp",         # richer HTTP client for future playbooks
+    "aiocoap",         # CoAP probes (Shelly Gen1, IKEA)
+    "aiomqtt",         # MQTT anon-connect check
+    "soco",            # Sonos SOAP wrapper
+    "phue",            # Philips Hue
+    "pywizlight",      # WiZ bulbs
+    "yeelight",        # Yeelight
+    "aioshelly",       # Shelly Gen1 + Gen2
+    "pywemo",          # Belkin Wemo
+    "screenlogicpy",   # Pentair pool
+    "openevsehttp",    # OpenEVSE
+    "pyenphase",       # Enphase Envoy
+    "roombapy",        # iRobot Roomba
+]
+
+[project.scripts]
+nethunter-pro = "nethunter_pro.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nethunter_pro = ["style.css"]

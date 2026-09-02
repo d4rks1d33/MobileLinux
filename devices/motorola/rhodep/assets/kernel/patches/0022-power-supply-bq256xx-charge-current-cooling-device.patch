@@ -1,0 +1,135 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: bq256xx: expose the charge current as a cooling device
+
+Charging heats the cell, and on boards where the battery thermistor is not
+wired to the charger's TS pin there is no hardware JEITA to fall back on:
+nothing stops the part from charging a hot cell at full current.
+
+Register the charge current as a thermal cooling device so a zone fed by
+whatever reports the battery temperature can throttle it. State 0 leaves the
+configured current alone, each further state halves it, and the last state
+stops charging.
+
+Registration is optional and only takes effect if a thermal zone in the
+device tree points at it.
+
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -10,6 +10,7 @@
+ #include <linux/module.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
++#include <linux/thermal.h>
+ #include <linux/types.h>
+ #include <linux/usb/phy.h>
+ #include <linux/delay.h>
+@@ -226,6 +227,7 @@
+  * @chip_info: device variant information
+  * @state: device status and faults
+  * @watchdog_timer: watchdog timer value in milliseconds
++ * @thermal_state: current cooling device state, 0 is unthrottled
+  */
+ struct bq256xx_device {
+ 	struct i2c_client *client;
+@@ -247,6 +249,7 @@
+ 	const struct bq256xx_chip_info *chip_info;
+ 	struct bq256xx_state state;
+ 	int watchdog_timer;
++	unsigned long thermal_state;
+ };
+ 
+ /**
+@@ -1557,6 +1560,70 @@
+ 	return 0;
+ }
+ 
++/*
++ * Charging is a heat source of its own, and on boards where the battery
++ * thermistor is not wired to the charger's TS pin there is no hardware JEITA
++ * to fall back on. Expose the charge current as a cooling device so a thermal
++ * zone fed by the fuel gauge can throttle it, and stop charging altogether in
++ * the last state.
++ *
++ * State 0 leaves the configured current alone; each further state halves it.
++ */
++#define BQ256XX_THERMAL_STATES		4
++
++static int bq256xx_cdev_get_max_state(struct thermal_cooling_device *cdev,
++				      unsigned long *state)
++{
++	*state = BQ256XX_THERMAL_STATES - 1;
++
++	return 0;
++}
++
++static int bq256xx_cdev_get_cur_state(struct thermal_cooling_device *cdev,
++				      unsigned long *state)
++{
++	struct bq256xx_device *bq = cdev->devdata;
++
++	*state = bq->thermal_state;
++
++	return 0;
++}
++
++static int bq256xx_cdev_set_cur_state(struct thermal_cooling_device *cdev,
++				      unsigned long state)
++{
++	struct bq256xx_device *bq = cdev->devdata;
++	int ret;
++
++	if (state >= BQ256XX_THERMAL_STATES)
++		return -EINVAL;
++
++	if (state == BQ256XX_THERMAL_STATES - 1) {
++		ret = bq->chip_info->bq256xx_set_charge_type(bq,
++						POWER_SUPPLY_CHARGE_TYPE_NONE);
++	} else {
++		ret = bq->chip_info->bq256xx_set_charge_type(bq,
++						POWER_SUPPLY_CHARGE_TYPE_FAST);
++		if (ret)
++			return ret;
++
++		ret = bq->chip_info->bq256xx_set_ichg(bq,
++					bq->init_data.ichg_max >> state);
++	}
++	if (ret)
++		return ret;
++
++	bq->thermal_state = state;
++
++	return 0;
++}
++
++static const struct thermal_cooling_device_ops bq256xx_cooling_ops = {
++	.get_max_state = bq256xx_cdev_get_max_state,
++	.get_cur_state = bq256xx_cdev_get_cur_state,
++	.set_cur_state = bq256xx_cdev_set_cur_state,
++};
++
+ static int bq256xx_hw_init(struct bq256xx_device *bq)
+ {
+ 	struct power_supply_battery_info *bat_info;
+@@ -1722,6 +1789,7 @@
+ {
+ 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
+ 	struct device *dev = &client->dev;
++	struct thermal_cooling_device *cdev;
+ 	struct bq256xx_device *bq;
+ 	struct power_supply_config psy_cfg = { };
+ 
+@@ -1780,6 +1848,14 @@
+ 		return ret;
+ 	}
+ 
++	/*
++	 * Optional: only bound if the device tree points a thermal zone at it.
++	 */
++	cdev = devm_thermal_of_cooling_device_register(dev, 0, "bq256xx-charger",
++						      bq, &bq256xx_cooling_ops);
++	if (IS_ERR(cdev) && PTR_ERR(cdev) != -ENODEV)
++		dev_warn(dev, "could not register cooling device: %pe\n", cdev);
++
+ 	if (client->irq) {
+ 		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+ 						bq256xx_irq_handler_thread,

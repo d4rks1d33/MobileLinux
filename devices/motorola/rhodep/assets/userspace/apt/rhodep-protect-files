@@ -1,0 +1,212 @@
+#!/bin/sh
+# Keep this port's own files from being deleted or quietly edited.
+#
+# Everything that makes this phone work that is NOT owned by a package lives in
+# /usr/local and /etc: the modem's RFS populator, the UIM provisioning service,
+# the patched tqftpserv, the memshare responder, the audio route unit, the apt
+# guard and its enforcer. dpkg does not know about any of them, so nothing
+# reinstalls them, and a stray `rm -rf` or a well-meaning cleanup takes them out
+# with no trace and no way back short of re-running the installers.
+#
+# Two layers, the same pair used for the apt holds:
+#
+#   - chattr +i on the live file. Root can still remove it, but only by
+#     deciding to: chattr -i first. That is the line between a deliberate
+#     change and something deleting it in passing.
+#   - a canonical copy under /usr/local/share/rhodep/files, so that if the live
+#     one does go missing or gets modified, rhodep-holds-enforce puts the
+#     original back and says so in the journal.
+#
+# Usage, from an installer:
+#
+#	rhodep-protect-files release  <path>...            # before overwriting
+#	rhodep-protect-files register <component> <mode> <path>...
+#	rhodep-protect-files register-units <component> <unit>...
+#
+# and then, from the enforcer:
+#
+#	rhodep-protect-files enforce
+#
+# register-units covers the one thing the immutable bit cannot: a unit's
+# *enabled* state. chattr +i on a .service stops it being deleted or edited,
+# and `systemctl disable` still works — which on this port means losing the
+# below-0C battery cutoff, or the sensors listener that keeps the ADSP from
+# asserting on suspend, silently and with everything still looking present.
+#
+# It is deliberately the narrowest thing that closes that gap:
+#
+#   - it only ever runs `systemctl enable`, which writes a symlink. It never
+#     starts, stops or restarts anything. Restoring a file must not be able to
+#     bounce audio or drop the network.
+#   - it only acts when the unit reports exactly `disabled`. `masked` is left
+#     alone, because masking is always deliberate here (droid-juicer,
+#     systemd-repart, phosh.service under GDM); `static`, `indirect`,
+#     `generated` and `enabled` are all already correct.
+#   - system units only. User units live in a session and cannot be enabled
+#     from here.
+#
+# Re-running the component's install.sh was the other option and is rejected on
+# blast radius: those scripts restart PipeWire, WirePlumber and
+# iio-sensor-proxy, touch udev and query apt, and having that fire unattended
+# every 30 minutes because one file went missing is worse than the missing file.
+#
+# Fails open everywhere. Protecting files must never be able to stop the phone
+# from booting or an installer from running.
+set -u
+
+SHARE=/usr/local/share/rhodep
+STORE=$SHARE/files
+MANIFEST=$SHARE/protect.d
+
+# Restore one file from its snapshot.
+#
+# The first field of a manifest line is meant to be an octal mode, but every
+# caller in this port passes the word "protected" instead, and
+# `install -m protected` is an error. The immutable flag was doing all the work
+# and the restore half had never once succeeded -- found by deleting a
+# registered file on purpose and watching enforce say "could not restore".
+#
+# Rather than migrate the manifests, treat anything that is not octal as "keep
+# whatever the snapshot has", which is what cp -a does and what the callers
+# meant. Real octal modes still work, so old and new entries both do.
+put_back() {
+	_mode=$1; _src=$2; _dst=$3
+	case $_mode in
+	[0-7]|[0-7][0-7][0-7]|[0-7][0-7][0-7][0-7])
+		install -D -m "$_mode" "$_src" "$_dst" 2>/dev/null
+		;;
+	*)
+		mkdir -p "$(dirname "$_dst")" 2>/dev/null
+		cp -a "$_src" "$_dst" 2>/dev/null
+		;;
+	esac
+}
+
+log() { logger -t rhodep-protect-files -p daemon.warning -- "$*" 2>/dev/null; echo "rhodep-protect-files: $*"; }
+
+# A live path flattened into a single store filename: /etc/foo -> %etc%foo
+flat() { printf '%s' "$1" | tr '/' '%'; }
+
+case "${1:-}" in
+
+release)
+	shift
+	for f in "$@"; do
+		[ -e "$f" ] && chattr -i "$f" 2>/dev/null
+	done
+	exit 0
+	;;
+
+register)
+	shift
+	comp=${1:-}; mode=${2:-0644}; shift 2 2>/dev/null || { echo "usage: register <component> <mode> <path>..." >&2; exit 1; }
+	[ -n "$comp" ] || { echo "a component name is required" >&2; exit 1; }
+	install -d -m 0755 "$STORE" "$MANIFEST" 2>/dev/null || exit 0
+	list=$MANIFEST/$comp.list
+	for f in "$@"; do
+		[ -e "$f" ] || { log "not registering $f, it does not exist"; continue; }
+		chattr -i "$f" 2>/dev/null
+		cp -a "$f" "$STORE/$(flat "$f")" 2>/dev/null || { log "could not snapshot $f"; continue; }
+		# One entry per path, refreshed rather than duplicated.
+		if [ -e "$list" ]; then
+			grep -v "[[:space:]]$f\$" "$list" > "$list.tmp" 2>/dev/null || : > "$list.tmp"
+			mv "$list.tmp" "$list"
+		fi
+		printf '%s %s\n' "$mode" "$f" >> "$list"
+		chattr +i "$f" 2>/dev/null
+	done
+	exit 0
+	;;
+
+register-units)
+	shift
+	comp=${1:-}; shift 2>/dev/null || { echo "usage: register-units <component> <unit>..." >&2; exit 1; }
+	[ -n "$comp" ] || { echo "a component name is required" >&2; exit 1; }
+	install -d -m 0755 "$MANIFEST" 2>/dev/null || exit 0
+	list=$MANIFEST/$comp.units
+	for u in "$@"; do
+		[ -n "$u" ] || continue
+		if [ -e "$list" ]; then
+			grep -vx "$u" "$list" > "$list.tmp" 2>/dev/null || : > "$list.tmp"
+			mv "$list.tmp" "$list"
+		fi
+		printf '%s\n' "$u" >> "$list"
+	done
+	exit 0
+	;;
+
+enforce)
+	[ -d "$MANIFEST" ] || exit 0
+	for list in "$MANIFEST"/*.list; do
+		[ -e "$list" ] || continue
+		while read -r mode f; do
+			[ -n "${f:-}" ] || continue
+			src=$STORE/$(flat "$f")
+			[ -e "$src" ] || continue
+			if [ ! -e "$f" ]; then
+				log "ALERT: $f had been deleted, restoring it"
+				chattr -i "$f" 2>/dev/null
+				put_back "$mode" "$src" "$f" || { log "could not restore $f"; continue; }
+			elif ! cmp -s "$src" "$f"; then
+				log "ALERT: $f had been modified, restoring it"
+				chattr -i "$f" 2>/dev/null
+				put_back "$mode" "$src" "$f" || { log "could not restore $f"; continue; }
+			fi
+			chattr +i "$f" 2>/dev/null
+		done < "$list"
+	done
+
+	# The enabled state of the units those files belong to. Only `disabled`
+	# is acted on, and only ever with `enable` -- see the header.
+	if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+		for list in "$MANIFEST"/*.units; do
+			[ -e "$list" ] || continue
+			while read -r u; do
+				[ -n "${u:-}" ] || continue
+				[ "$(systemctl is-enabled "$u" 2>/dev/null)" = disabled ] || continue
+				log "ALERT: $u had been disabled, re-enabling it"
+				systemctl enable "$u" >/dev/null 2>&1 || log "could not re-enable $u"
+			done < "$list"
+		done
+	fi
+	exit 0
+	;;
+
+status)
+	[ -d "$MANIFEST" ] || { echo "nothing registered"; exit 0; }
+	for list in "$MANIFEST"/*.list; do
+		[ -e "$list" ] || continue
+		echo "[$(basename "$list" .list)]"
+		while read -r mode f; do
+			[ -n "${f:-}" ] || continue
+			if [ ! -e "$f" ]; then st="MISSING"
+			elif ! cmp -s "$STORE/$(flat "$f")" "$f" 2>/dev/null; then st="MODIFIED"
+			elif lsattr "$f" 2>/dev/null | cut -c5 | grep -q i; then st="protected"
+			else st="not immutable"; fi
+			printf '  %-12s %s\n' "$st" "$f"
+		done < "$list"
+		ulist=${list%.list}.units
+		[ -e "$ulist" ] || continue
+		while read -r u; do
+			[ -n "${u:-}" ] || continue
+			printf '  %-12s %s (unit)\n' "$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)" "$u"
+		done < "$ulist"
+	done
+	# Components that registered units but no files.
+	for ulist in "$MANIFEST"/*.units; do
+		[ -e "$ulist" ] || continue
+		[ -e "${ulist%.units}.list" ] && continue
+		echo "[$(basename "$ulist" .units)]"
+		while read -r u; do
+			[ -n "${u:-}" ] || continue
+			printf '  %-12s %s (unit)\n' "$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)" "$u"
+		done < "$ulist"
+	done
+	exit 0
+	;;
+
+*)
+	echo "usage: rhodep-protect-files [release <path>... | register <component> <mode> <path>... | register-units <component> <unit>... | enforce | status]" >&2
+	exit 1
+	;;
+esac

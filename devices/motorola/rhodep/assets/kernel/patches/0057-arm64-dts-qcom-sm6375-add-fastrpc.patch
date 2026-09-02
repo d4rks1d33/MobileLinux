@@ -1,0 +1,158 @@
+From: rhodep port <none@example.com>
+Date: Wed, 20 Aug 2026 04:20:00 -0300
+Subject: [PATCH] arm64: dts: qcom: sm6375: add fastrpc to the ADSP and CDSP
+
+SM6375 has no fastrpc nodes, so the driver never probes and there is no
+/dev/fastrpc, even though CONFIG_QCOM_FASTRPC builds fine and the module
+is installed. Both remoteprocs already have a glink-edge; they just have
+nothing under it but apr on the ADSP side.
+
+The context bank stream IDs are the vendor's, out of holi.dtsi rather than
+guessed from another SoC: 0x00a3..0x00a7 for the ADSP and 0x1001..0x1006
+plus 0x1009 for the CDSP. They follow the same base-plus-bank-number
+pattern sm6115 uses, which is a useful cross-check - getting a stream ID
+wrong on this SoC is not a soft failure, a wrong SID copied from qcm2290
+for camss bootlooped the device with no log output at all.
+
+The ADSP node also needs a remote heap. Without a memory-region the probe
+prints "no reserved DMA memory for FASTRPC" and any attempt to create a
+static protection domain fails, which is exactly what a sensors PD needs.
+The vmids come out agreeing from two directions: the vendor writes
+qcom,adsp-remoteheap-vmid = <22 37>, and QCOM_SCM_VMID_LPASS is 0x16 with
+QCOM_SCM_VMID_ADSP_HEAP 0x25, the same pair kodiak.dtsi uses. Size is 8 MB
+in both trees. The region is declared the way the vendor does it, as a
+reusable CMA pool with no fixed address, so it cannot collide with the
+firmware carve-outs.
+
+This is wanted for sensors. The accelerometer and gyroscope are on I3C
+bus 1 and the magnetometers on the sensor core's own I2C bus 2, none of
+which the application processor owns, so the only route to them is the
+Snapdragon Sensor Core. That core is up and its framework sensors work,
+but every physical sensor is missing because the registry sensor is
+missing, and the registry lives on the AP.
+
+Signed-off-by: rhodep port <none@example.com>
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -639,6 +639,14 @@
+ 			no-map;
+ 		};
+ 
++		adsp_rpc_remote_heap_mem: adsp-rpc-remote-heap {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0 0x00000000 0 0xffffffff>;
++			reusable;
++			alignment = <0 0x400000>;
++			size = <0 0x800000>;
++		};
++
+ 		cmdline_region: cmdline@ffd00000 {
+ 			reg = <0 0xffd00000 0 0x1000>;
+ 			no-map;
+@@ -2144,6 +2152,48 @@
+ 						};
+ 					};
+ 				};
++
++				fastrpc {
++					compatible = "qcom,fastrpc";
++					qcom,glink-channels = "fastrpcglink-apps-dsp";
++					label = "adsp";
++					qcom,non-secure-domain;
++					memory-region = <&adsp_rpc_remote_heap_mem>;
++					qcom,vmids = <QCOM_SCM_VMID_LPASS
++						      QCOM_SCM_VMID_ADSP_HEAP>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++
++					compute-cb@3 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <3>;
++						iommus = <&apps_smmu 0x00a3 0x0>;
++					};
++
++					compute-cb@4 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <4>;
++						iommus = <&apps_smmu 0x00a4 0x0>;
++					};
++
++					compute-cb@5 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <5>;
++						iommus = <&apps_smmu 0x00a5 0x0>;
++					};
++
++					compute-cb@6 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <6>;
++						iommus = <&apps_smmu 0x00a6 0x0>;
++					};
++
++					compute-cb@7 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <7>;
++						iommus = <&apps_smmu 0x00a7 0x0>;
++					};
++				};
+ 			};
+ 		};
+ 
+@@ -2180,6 +2230,57 @@
+ 						IPCC_MPROC_SIGNAL_GLINK_QMP>;
+ 				label = "cdsp";
+ 				qcom,remote-pid = <5>;
++
++				fastrpc {
++					compatible = "qcom,fastrpc";
++					qcom,glink-channels = "fastrpcglink-apps-dsp";
++					label = "cdsp";
++					qcom,non-secure-domain;
++					#address-cells = <1>;
++					#size-cells = <0>;
++
++					compute-cb@1 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <1>;
++						iommus = <&apps_smmu 0x1001 0x0>;
++					};
++
++					compute-cb@2 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <2>;
++						iommus = <&apps_smmu 0x1002 0x0>;
++					};
++
++					compute-cb@3 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <3>;
++						iommus = <&apps_smmu 0x1003 0x0>;
++					};
++
++					compute-cb@4 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <4>;
++						iommus = <&apps_smmu 0x1004 0x0>;
++					};
++
++					compute-cb@5 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <5>;
++						iommus = <&apps_smmu 0x1005 0x0>;
++					};
++
++					compute-cb@6 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <6>;
++						iommus = <&apps_smmu 0x1006 0x0>;
++					};
++
++					compute-cb@9 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <9>;
++						iommus = <&apps_smmu 0x1009 0x0>;
++					};
++				};
+ 			};
+ 		};
+ 

@@ -1,0 +1,60 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: pin pm6125 L24 (UFS VCC) at 2.96 V
+
+Same story as L11 (UFS VCCQ2), the other UFS rail. The &rpm_requests block
+came from sm6375-sony-xperia-murray-pdx225.dts, so L24 carries Sony's wide
+range, 2704 mV to 3544 mV. Mainline's RPM regulator driver never reads the
+hardware, and the only consumer of this rail is ufshcd, which calls
+regulator_enable() and regulator_set_load() over vcc but never
+regulator_set_voltage(). So the framework settles on the range's floor. With
+a min of 2704000 against the pm660_pldo660 range (base 1504000, 8 mV steps)
+the selector lands on 2704000 uV exactly.
+
+Measured on the device before this build:
+
+	l24    enabled   2704000 uV
+
+L24 is UFS VCC, the main memory rail:
+
+	ufshc  vcc-supply = <&pm6125_l24>
+
+2.704 V is below the 2.96 V the storage wants. The part is SK Hynix
+H9HQ15AECMBDAR; VCC below its operating point degrades program/erase margins
+in the NAND -- incomplete writes/erases, higher BER and worse retention -- so
+it is a data-integrity risk on the memory itself, not just the link. Less
+acute than VCCQ2 under its floor (fixed in the previous patch) but real.
+
+The vendor pins it with qcom,init-voltage = <2960000> (L24A) in
+holi-regulators-pm6125.dtsi; mainline has no such property, so the constraint
+itself has to say it. 2960000 is on the 8 mV grid (selector 182), so no
+rounding surprise. Narrowing to min == max is what makes the framework vote
+2.96 V, the same fix applied to L9 (v125) and L11 (v127).
+
+Not yet confirmed by measurement of the physical rail; a fix by inspection
+against the vendor tree. UFS enumerated clean and a 64 MiB write/read past
+dropped caches matched after the L11 fix, which is the regression to repeat
+here.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -366,9 +366,18 @@
+ 			regulator-max-microvolt = <3312000>;
+ 		};
+ 
++		/*
++		 * 2.96 V, not the 2704 mV the bottom of the PMIC's range gives.
++		 *
++		 * L24 is UFS VCC, the NAND's main rail. ufshcd only enables it
++		 * (it never votes a voltage), so the framework picks the range
++		 * minimum, 2704 mV -- below the 2.96 V the storage operates at.
++		 * The vendor pins it with qcom,init-voltage = <2960000>, which
++		 * mainline has no equivalent for.
++		 */
+ 		pm6125_l24: l24 {
+-			regulator-min-microvolt = <2704000>;
+-			regulator-max-microvolt = <3544000>;
++			regulator-min-microvolt = <2960000>;
++			regulator-max-microvolt = <2960000>;
+ 		};
+ 	};
+ 

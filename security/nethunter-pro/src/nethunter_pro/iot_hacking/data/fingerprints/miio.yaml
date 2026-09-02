@@ -1,0 +1,20 @@
+id: miio
+version: 1
+device_type: vacuum
+vendor: Xiaomi
+family: miio
+threshold: 60
+matchers:
+  - name: udp-54321-magic
+    type: udp_reply
+    port: 54321
+    body_regex: '^\!1'   # \x21\x31 magic, decoded as latin1 = "!1"
+    confidence: 80
+  - name: oui-xiaomi
+    type: mac_oui
+    values: ["B0:C5:CA", "5C:E5:0C", "A4:C1:38", "F0:B4:29",
+             "04:CF:8C", "78:11:DC", "8C:53:C3", "50:EC:50",
+             "60:D7:E3", "50:8A:06", "58:D5:6E"]
+    confidence: 20
+metadata:
+  playbook: miio

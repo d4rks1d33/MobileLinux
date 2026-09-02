@@ -1,0 +1,89 @@
+#!/bin/sh
+# Put back the two pieces of the terminal keyboard that cannot be made
+# immutable.
+#
+# rhodep-protect-files covers the static files - the wrapper, the .desktop file,
+# the layouts - with the immutable bit and a snapshot. Two things cannot be
+# protected that way:
+#
+#   kwinrc   KWin rewrites it constantly. Locking it would break the desktop.
+#   .zshrc   It belongs to the user, who is expected to edit it.
+#
+# Lose the kwinrc entry and the keyboard silently reverts to the stock layouts,
+# with no terminal row and no Ctrl key. Lose the .zshrc line and copy and paste
+# stop working. Neither failure announces itself, which is exactly why they are
+# worth a boot-time check.
+#
+# Runs at boot and on a timer. Fails open everywhere: a phone that cannot start
+# a session because its keyboard guard is unhappy is worse off than one with a
+# stale setting.
+set -u
+
+DESKTOP=/usr/share/applications/rhodep-terminal-keyboard.desktop
+SNIPPET=/usr/local/share/rhodep/rhodep-clipboard.zsh
+LOCALES=/usr/local/share/rhodep/keyboard/enabled-locales
+MARKER="# >>> rhodep clipboard keys >>>"
+
+log() { logger -t rhodep-keyboard-enforce -p daemon.warning -- "$*" 2>/dev/null; echo "rhodep-keyboard-enforce: $*"; }
+
+# Every human user with a home directory, so this keeps working if the account is
+# ever renamed or a second one is added - plus root, which gets the clipboard keys
+# but has no Plasma session of its own.
+users=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65000 && $6 ~ /^\/home\// { print $1 ":" $6 }')
+users="$users root:$(getent passwd root | cut -d: -f6)"
+[ -n "$users" ] || exit 0
+
+for entry in $users; do
+	user=${entry%%:*}
+	home=${entry#*:}
+	[ -d "$home" ] || continue
+
+	# --- the input method KWin starts ------------------------------------
+	# Only for a user who can have a session; root's kwinrc would mean nothing.
+	if [ -e "$DESKTOP" ] && [ "$user" != root ]; then
+		current=$(su "$user" -c "HOME='$home' kreadconfig6 --file kwinrc --group Wayland --key InputMethod" 2>/dev/null)
+		if [ "$current" != "$DESKTOP" ]; then
+			if su "$user" -c "HOME='$home' kwriteconfig6 --file kwinrc --group Wayland --key InputMethod '$DESKTOP'" 2>/dev/null; then
+				log "restored kwinrc InputMethod for $user (was '${current:-unset}'); takes effect on next login"
+			else
+				log "could not restore kwinrc InputMethod for $user"
+			fi
+		fi
+	fi
+
+	# --- the language key ------------------------------------------------
+	# Empty means plasma-keyboard activates a single locale and the language key
+	# goes grey, which is how you lose access to the Spanish layout. Only the
+	# empty case is repaired: a list the user has changed is theirs.
+	if [ "$user" != root ] && [ -r "$LOCALES" ]; then
+		want=$(grep -v '^#' "$LOCALES" | grep -v '^$' | head -1)
+		if [ -n "$want" ]; then
+			have=$(su "$user" -c "HOME='$home' kreadconfig6 --file plasmakeyboardrc --group General --key enabledLocales" 2>/dev/null)
+			if [ -z "$have" ]; then
+				su "$user" -c "HOME='$home' kwriteconfig6 --file plasmakeyboardrc --group General --key enabledLocales '$want'" 2>/dev/null \
+					&& log "restored the keyboard languages for $user to $want; the language key was greyed out"
+			fi
+		fi
+	fi
+
+	# --- the clipboard keys ----------------------------------------------
+	# root's .zshrc often does not exist at all, so create it rather than skip:
+	# without it a root shell has no paste key.
+	rc=$home/.zshrc
+	if [ -e "$SNIPPET" ] && [ ! -e "$rc" ] && [ "$user" = root ]; then
+		: > "$rc" 2>/dev/null && chmod 0644 "$rc" 2>/dev/null
+	fi
+	if [ -e "$SNIPPET" ] && [ -e "$rc" ] && ! grep -qF "$MARKER" "$rc" 2>/dev/null; then
+		{
+			echo ""
+			echo "$MARKER"
+			echo "[ -r $SNIPPET ] && . $SNIPPET"
+			echo "# <<< rhodep clipboard keys <<<"
+		} >> "$rc" 2>/dev/null && {
+			chown "$user":"$user" "$rc" 2>/dev/null
+			log "restored the clipboard keys in $rc; takes effect in new shells"
+		} || log "could not restore the clipboard keys in $rc"
+	fi
+done
+
+exit 0

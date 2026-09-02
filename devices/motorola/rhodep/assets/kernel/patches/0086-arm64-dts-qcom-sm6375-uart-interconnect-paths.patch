@@ -1,0 +1,68 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: give the QUP UART its interconnect paths
+
+qcom_geni_serial asks for QUP core bandwidth as soon as the port runs
+faster than 115200:
+
+	avg_bw_core = (baud > 115200) ? Bps_to_icc(CORE_2X_50_MHZ)
+				      : GENI_DEFAULT_BW;
+	port->se.icc_paths[GENI_TO_CORE].avg_bw = avg_bw_core;
+	port->se.icc_paths[CPU_TO_GENI].avg_bw = Bps_to_icc(baud);
+	geni_icc_set_bw(&port->se);
+
+but sm6375's UART nodes declare no interconnects at all, so
+geni_icc_get() finds no "qup-core" or "qup-config" path, every
+geni_icc_set_bw() is a no-op and the request is silently dropped. The
+sibling SoC this port is modelled on, sm6115, declares both paths on
+each SE; sm6375 was simply never given them.
+
+This was invisible for as long as nothing drove the NoC: with no
+interconnect provider bound, the RPM keeps the bandwidth it handed over
+at boot and the UART is fast enough by accident. Once a provider does
+bind it aggregates the votes it is given, and a consumer that votes for
+nothing gets nothing.
+
+The Bluetooth controller sits on uart1 at 3.2 Mbps, so it is the first
+thing to notice. Its firmware download starts failing:
+
+	Bluetooth: hci0: QCA Downloading qca/crbtfw21.tlv
+	Bluetooth: hci0: command 0xfc00 tx timeout
+	Bluetooth: hci0: QCA Failed to send TLV segment (-110)
+
+while the short EDL version query on the same link still succeeds, which
+is what a starved QUP core looks like from userspace: small transfers
+get through and large ones do not.
+
+Bisected on the device between two boot images, same rootfs, 150
+controller resets per image: an image whose kernel predates the
+interconnect provider being built in passes 150/150, and the next one
+fails within one or two.
+
+Only uart1 is wired up here, because it is the only SE this board
+enables and the only one that has been tested. The other SEs need the
+same treatment before they are used.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -9,6 +9,8 @@
+ #include <dt-bindings/dma/qcom-gpi.h>
+ #include <dt-bindings/firmware/qcom,scm.h>
+ #include <dt-bindings/interconnect/qcom,osm-l3.h>
++#include <dt-bindings/interconnect/qcom,rpm-icc.h>
++#include <dt-bindings/interconnect/qcom,sm6375.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/mailbox/qcom-ipcc.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
+@@ -1227,6 +1229,12 @@
+ 				operating-points-v2 = <&qup_opp_table>;
+ 				pinctrl-0 = <&qup_uart1_default>;
+ 				pinctrl-names = "default";
++				interconnects = <&clk_virt MASTER_QUP_CORE_0 RPM_ALWAYS_TAG
++						 &clk_virt SLAVE_QUP_CORE_0 RPM_ALWAYS_TAG>,
++						<&bimc MASTER_AMPSS_M0 RPM_ALWAYS_TAG
++						 &config_noc SLAVE_QUP_0 RPM_ALWAYS_TAG>;
++				interconnect-names = "qup-core",
++						     "qup-config";
+ 				status = "disabled";
+ 			};
+ 

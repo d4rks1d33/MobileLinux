@@ -1,0 +1,20 @@
+[Unit]
+Description=Build the external USB Wi-Fi drivers (rtw88 / rtl8188eus) against the running kernel
+Documentation=file:/usr/local/share/rhodep/wifi-drivers
+# Needs the network the first time, to apt-install realtek-rtl8188eus-dkms and
+# the build deps. It self-disables once both drivers are built for this kernel,
+# so ordinarily it runs exactly once, on the first boot of a fresh image.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-wifi-drivers-build
+# The builder decides success per-kernel with its own stamp file and disables
+# this unit when done; exit 0 on transient failure so it simply retries next
+# boot rather than being marked failed.
+RemainAfterExit=no
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

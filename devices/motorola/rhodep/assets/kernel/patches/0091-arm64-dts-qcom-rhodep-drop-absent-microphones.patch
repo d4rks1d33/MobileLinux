@@ -1,0 +1,35 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: drop microphones this board does not have
+
+Only AMIC3 is populated. AMIC1, AMIC2 and the four VA-macro DMICs all
+capture digital silence, measured by counting zero crossings rather than
+by peak or RMS -- enabling any capture path emits a settling DC
+transient whose peak looks like signal on a dead input. AMIC3 gives
+13790 crossings; AMIC1 gives 1.
+
+Describing inputs that are not fitted costs nothing at runtime but sends
+the next person looking for them.
+
+The VA macro's own dmic01/dmic23 pinctrl is deliberately left in place.
+It is the macro that provides fsgen to the RX and TX macros, so nothing
+audio-related probes without it, and pinctrl-0 cannot be left empty.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -345,15 +345,9 @@
+ 
+ 		audio-routing = "IN1_HPHL", "HPHL_OUT",
+ 				"IN2_HPHR", "HPHR_OUT",
+-				"AMIC1", "MIC BIAS1",
+-				"AMIC2", "MIC BIAS2",
+ 				"AMIC3", "MIC BIAS3",
+ 				"TX SWR_INPUT1", "ADC1_OUTPUT",
+-				"TX SWR_INPUT0", "ADC2_OUTPUT",
+-				"VA DMIC0", "VA MIC BIAS1",
+-				"VA DMIC1", "VA MIC BIAS1",
+-				"VA DMIC2", "VA MIC BIAS3",
+-				"VA DMIC3", "VA MIC BIAS3";
++				"TX SWR_INPUT0", "ADC2_OUTPUT";
+ 
+ 		mm1-dai-link {
+ 			link-name = "MultiMedia1";

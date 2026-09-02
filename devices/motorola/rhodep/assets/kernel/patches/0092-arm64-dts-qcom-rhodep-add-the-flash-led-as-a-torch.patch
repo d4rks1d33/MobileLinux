@@ -1,0 +1,58 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: add the flash LED as a torch
+
+The rear camera flash is a plain GPIO on this board. The vendor declares
+it as flash-type = <CAM_FLASH_TYPE_GPIO> with gpios = <&tlmm 49 0>, not
+through an i2c LED controller, so in mainline terms it is a gpio-led and
+nothing more.
+
+Confirmed before writing the node: tlmm 49 was free and unclaimed,
+driving it with gpioset blinks the rear LED, and the pin shows as
+"GPIO 500000.pinctrl" in pinmux-pins while held.
+
+Exposed as LED_FUNCTION_TORCH rather than as a camera flash on purpose.
+A strobe synchronised to an exposure wants the v4l2-flash class and a
+camera that captures, and neither exists on this port yet; a flashlight
+only has to turn on and stay on. There is a second LED, led_flash_macro
+at cell-index 2 in the vendor tree, which is not wired up here.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -16,6 +16,7 @@
+ #include <dt-bindings/interconnect/qcom,rpm-icc.h>
+ #include <dt-bindings/interconnect/qcom,sm6375.h>
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
+ #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
+ #include <dt-bindings/clock/qcom,sm6375-dispcc.h>
+@@ -287,6 +288,29 @@
+ 		regulator-boot-on;
+ 	};
+ 
++	/*
++	 * The rear camera flash. The vendor drives it as a plain GPIO --
++	 * flash-type = <CAM_FLASH_TYPE_GPIO> on tlmm 49 -- rather than through
++	 * an i2c LED controller, so in mainline terms it is a gpio-led and
++	 * nothing more. Confirmed on the device before this node existed:
++	 * tlmm 49 was unclaimed, and driving it blinks the LED.
++	 *
++	 * Exposed as a torch rather than a camera flash on purpose. A strobe
++	 * synchronised to an exposure needs the v4l2-flash class and a camera
++	 * that captures, and neither exists here yet; a flashlight only needs
++	 * to turn on and stay on.
++	 */
++	leds {
++		compatible = "gpio-leds";
++
++		led-torch {
++			gpios = <&tlmm 49 GPIO_ACTIVE_HIGH>;
++			function = LED_FUNCTION_TORCH;
++			color = <LED_COLOR_ID_WHITE>;
++			default-state = "off";
++		};
++	};
++
+ 	vibrator {
+ 		compatible = "gpio-vibrator";
+ 		enable-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;

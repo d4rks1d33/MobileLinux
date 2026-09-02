@@ -1,0 +1,13 @@
+[Unit]
+Description=rhodep: pin the modem to GSM (an LTE attach resets this SoC)
+After=rmtfs.service
+Before=ModemManager.service
+Wants=rmtfs.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-modem-gsm-only
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] ASoC: qcom: add the Motorola rhodep sound card
+
+The Moto G82 5G uses the generic q6dsp machine driver. Add its compatible
+so the card is picked up.
+
+--- a/sound/soc/qcom/sm8250.c	2026-08-11 20:55:17.732457003 +0000
++++ b/sound/soc/qcom/sm8250.c	2026-08-11 20:55:17.742457003 +0000
+@@ -191,6 +191,7 @@
+ static const struct of_device_id snd_sm8250_dt_match[] = {
+ 	{ .compatible = "fairphone,fp4-sndcard", .data = "sm7225" },
+ 	{ .compatible = "fairphone,fp5-sndcard", .data = "qcm6490" },
++	{ .compatible = "motorola,rhodep-sndcard", .data = "sm6375" },
+ 	{ .compatible = "qcom,qrb2210-sndcard", .data = "qcm2290" },
+ 	{ .compatible = "qcom,qrb4210-rb2-sndcard", .data = "sm4250" },
+ 	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = "sm8250" },

@@ -1,0 +1,61 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] soc: qcom: pd_mapper: serve tms/pdr_enabled on sm6375 modem PD
+
+0084 added sm6375 to the PD mapper but reused sm6115's domain set, which puts
+the plain mpss_root_pd_gps on the modem root PD. That domain advertises
+gps/gps_service but not tms/pdr_enabled.
+
+A measurement on a Motorola Moto G82 5G (SM6375) shows that is the gap. With
+qcom_pd_mapper's get_domain_list pr_debug enabled, the modem, during its boot,
+queries the service registry by service name and asks for:
+
+	PDM: service 'tms/pdr_enabled'     offset -1 returning 0 domains (of 0)
+	PDM: service 'tms/pddump_disabled' offset -1 returning 0 domains (of 0)
+
+Both are unserved. tms/pdr_enabled is the flag by which a PD-aware peripheral
+learns the AP supports PDR on its protection domain; it is declared upstream
+only by the mpss_root_pd_gps_pdr variant, used by sc7180 and sc7280. This is
+consistent with the modem-image string
+
+	Diag_LSM.c:servreg_get_local_domain() returned null
+
+which is the modem's diag failing to find its enabled PD.
+
+Give sm6375 its own domain table, identical to sm6115's set that already works
+for adsp, cdsp and gps, but with mpss_root_pd_gps_pdr in place of
+mpss_root_pd_gps so the modem's tms/pdr_enabled query is answered. This is a
+module, so it is tested by swapping the module and rebooting, not by flashing.
+
+Whether serving this actually makes the modem bring up diag is the next test;
+this patch is the change that makes tms/pdr_enabled resolve, which the modem
+was measured to ask for and not get.
+--- a/drivers/soc/qcom/qcom_pd_mapper.c
++++ b/drivers/soc/qcom/qcom_pd_mapper.c
+@@ -512,6 +512,18 @@
+ 	NULL,
+ };
+ 
++/* Like sm6115, but the modem root PD advertises tms/pdr_enabled, which this
++ * SoC's modem diag looks up at boot (measured on Moto G82 5G, rhodep). */
++static const struct qcom_pdm_domain_data *sm6375_domains[] = {
++	&adsp_audio_pd,
++	&adsp_root_pd,
++	&adsp_sensor_pd,
++	&cdsp_root_pd,
++	&mpss_root_pd_gps_pdr,
++	&mpss_wlan_pd,
++	NULL,
++};
++
+ static const struct qcom_pdm_domain_data *sm6350_domains[] = {
+ 	&adsp_audio_pd,
+ 	&adsp_root_pd,
+@@ -615,7 +627,7 @@
+ 	{ .compatible = "qcom,sm4250", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6115", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6350", .data = sm6350_domains, },
+-	{ .compatible = "qcom,sm6375", .data = sm6115_domains, },
++	{ .compatible = "qcom,sm6375", .data = sm6375_domains, },
+ 	{ .compatible = "qcom,sm7150", .data = sm7150_domains, },
+ 	{ .compatible = "qcom,sm7225", .data = sm6350_domains, },
+ 	{ .compatible = "qcom,sm7325", .data = sc7280_domains, },

@@ -1,0 +1,54 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: bq256xx: add SGMicro SGM41542
+
+The SGM41542 is an SGMicro charger that is register compatible with the
+TI bq25601. Verified field by field against the vendor header
+(drivers/power/sgm4154x_chg_mmi/sgm4154x_charger.h in the Motorola SM6375
+kernel):
+
+  IINDPM   GENMASK(4, 0), step 100 mA, base 100 mA
+  VINDPM   GENMASK(3, 0), step 100 mV, base 3900 mV
+  VBATREG  GENMASK(7, 3), step 32 mV, base 3856 mV, max 4624 mV
+  ITERM    GENMASK(3, 0), step 60 mA, base 60 mA
+  ICHG     GENMASK(5, 0), step 60 mA
+
+all identical to the bq25601 values in this driver, including
+BQ2560X_VBATREG_OFFSET_uV and BQ2560X_VBATREG_MAX_uV. Confirmed on real
+hardware too: an unconfigured part reads 0x58 in REG04, which decodes to
+4208 mV, exactly BQ2560X_VBATREG_DEF_uV.
+
+The register set is 0x00..0x0f like the bq25601, and this driver never
+validates the part number in REG0B, so no identification change is needed.
+
+Found on the Motorola Moto G82 5G (SM6375), which uses discrete charging
+instead of the PMIC charger.
+
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -1771,6 +1771,7 @@
+ 	{ .name = "bq25600", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25600] },
+ 	{ .name = "bq25600d", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25600D] },
+ 	{ .name = "bq25601", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25601] },
++	{ .name = "sgm41542", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25601] },
+ 	{ .name = "bq25601d", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25601D] },
+ 	{ .name = "bq25611d", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25611D] },
+ 	{ .name = "bq25618", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25618] },
+@@ -1783,6 +1784,8 @@
+ 	{ .compatible = "ti,bq25600", .data = &bq256xx_chip_info_tbl[BQ25600] },
+ 	{ .compatible = "ti,bq25600d", .data = &bq256xx_chip_info_tbl[BQ25600D] },
+ 	{ .compatible = "ti,bq25601", .data = &bq256xx_chip_info_tbl[BQ25601] },
++	/* SGMicro clone, register compatible with the bq25601 */
++	{ .compatible = "sgm,sgm41542", .data = &bq256xx_chip_info_tbl[BQ25601] },
+ 	{ .compatible = "ti,bq25601d", .data = &bq256xx_chip_info_tbl[BQ25601D] },
+ 	{ .compatible = "ti,bq25611d", .data = &bq256xx_chip_info_tbl[BQ25611D] },
+ 	{ .compatible = "ti,bq25618", .data = &bq256xx_chip_info_tbl[BQ25618] },
+--- a/Documentation/devicetree/bindings/power/supply/bq256xx.yaml
++++ b/Documentation/devicetree/bindings/power/supply/bq256xx.yaml
+@@ -34,6 +34,7 @@
+       - ti,bq25611d
+       - ti,bq25618
+       - ti,bq25619
++      - sgm,sgm41542
+ 
+   reg:
+     maxItems: 1

@@ -1,0 +1,28 @@
+id: computer-apple
+version: 1
+device_type: computer
+vendor: Apple
+family: apple
+threshold: 60
+matchers:
+  - name: nmap-os-apple
+    type: nmap_os
+    os_regex: 'Mac ?OS|Darwin|Apple|iOS|iPhone|iPad'
+    confidence: 75
+    extract:
+      os: '(macOS|Mac OS|iOS|Darwin|iPhone|iPad)[^,]*'
+  - name: oui-apple
+    type: mac_oui
+    values: ["00:03:93", "00:05:02", "00:0A:27", "00:0A:95", "00:0D:93",
+             "00:10:FA", "00:11:24", "00:14:51", "00:16:CB", "00:17:F2",
+             "00:19:E3", "00:1B:63", "00:1C:B3", "00:1D:4F", "00:1E:52",
+             "00:1E:C2", "00:1F:5B", "00:1F:F3", "00:21:E9", "00:22:41",
+             "00:23:12", "00:23:32", "00:23:6C", "00:23:DF", "00:24:36",
+             "00:25:00", "00:25:4B", "00:25:BC", "00:26:08", "00:26:4A",
+             "00:26:B0", "00:26:BB", "00:30:65", "00:3D:E8", "00:50:E4",
+             "00:56:CD", "00:61:71", "00:6D:52", "00:88:65", "00:A0:40",
+             "00:BB:60", "00:C6:10", "00:CD:FE", "00:DB:70", "00:F4:B9",
+             "00:F7:6F", "04:0C:CE", "04:15:52", "04:1E:64", "04:26:65",
+             "04:48:9A", "04:4B:ED", "04:52:F3", "04:54:53", "04:69:F8"]
+    confidence: 20
+metadata: {}

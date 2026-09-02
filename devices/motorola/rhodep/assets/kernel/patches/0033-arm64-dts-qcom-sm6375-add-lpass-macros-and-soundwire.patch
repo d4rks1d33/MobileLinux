@@ -1,0 +1,311 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: add LPASS macros, soundwire and LPI pinctrl
+
+Describe the LPASS audio blocks. Every address, and the RX soundwire
+interrupt, is identical to sm6115 (bengal): the downstream device tree for
+this SoC (holi-audio.dtsi) has rx-macro@A600000, va-macro@A730000, the RX
+soundwire master at 0xA610000 with GIC_SPI 297, the VA/TX one at
+0xA740000, and the two soundwire hctl registers at 0x0A6A9098 and
+0x0A7EC100, which are the lpassaudiocc@a6a9000 and lpasscc@a7ec000
+register blocks. The LPI pin controller is at 0xa7c0000 with 19 GPIOs and
+the same offset table, so the sm6115 compatibles describe this hardware.
+
+The VA/TX soundwire master interrupt is the one exception: downstream
+routes it through the MPM wake GIC (wakegic 5), which mainline does not
+support here, so the direct GIC line is used, GIC_SPI 296, one below the
+RX one exactly as on sm6115.
+
+The LPI pin numbering also matches downstream holi-lpi.dtsi: swr_tx_clk on
+gpio0, swr_tx_data on gpio1/gpio2, swr_rx_clk on gpio3, swr_rx_data on
+gpio4/gpio5, and the two DMIC pairs on gpio6-gpio9. Downstream drives a
+third TX data lane on gpio18, which the sm6115 pin controller does not
+describe as part of swr_tx_data; two lanes are enough for the WCD9370.
+
+The soundwire controllers report more ports on this SoC than sm6115
+declares ("din-ports (3) mismatch with controller (4)" on the VA/TX one and
+"din-ports (0)/dout-ports (5) mismatch with controller (1)/(6)" on the RX
+one), so the port counts are corrected and the extra ports described.
+
+Everything is left disabled, to be enabled per board.
+
+Note that the macros deliberately do NOT get the LPASS_HW_MACRO_VOTE clock
+that sm8250 and sc7280 have. The ADSP firmware on this device does not
+implement that vote and answers the request with "unknown command", so
+asking for it only makes the VA macro fail to probe:
+
+	qcom-q6afe: cmd = 0x100f4 returned error = 0x1
+	qcom-q6afe: AFE failed to vote (3)
+	va_macro a730000.codec: probe with driver va_macro failed with error -110
+
+The dcodec vote (block 4) is accepted, and the LPASS is kept up by the ADSP
+itself. Downstream votes the whole macro complex with a single
+"lpass_audio_hw_vote" clock on the bolero parent node instead.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1611,6 +1611,265 @@
+ 			};
+ 		};
+ 
++		rxmacro: codec@a600000 {
++			compatible = "qcom,sm6115-lpass-rx-macro";
++			pinctrl-0 = <&rx_swr_active>;
++			pinctrl-names = "default";
++			reg = <0x0 0x0a600000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_RX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_RX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&vamacro>;
++			clock-names = "mclk",
++				      "npl",
++				      "dcodec",
++				      "fsgen";
++			assigned-clocks = <&q6afecc LPASS_CLK_ID_RX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++					  <&q6afecc LPASS_CLK_ID_RX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			assigned-clock-rates = <22579200>,
++					       <22579200>;
++
++			#clock-cells = <0>;
++			clock-output-names = "mclk";
++			#sound-dai-cells = <1>;
++
++			status = "disabled";
++		};
++
++		swr1: soundwire@a610000 {
++			compatible = "qcom,soundwire-v1.6.0";
++			reg = <0x0 0x0a610000 0x0 0x2000>;
++			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
++
++			clocks = <&rxmacro>;
++			clock-names = "iface";
++
++			resets = <&lpass_audiocc 0>;
++			reset-names = "swr_audio_cgcr";
++
++			label = "RX";
++			qcom,din-ports = <1>;
++			qcom,dout-ports = <6>;
++
++			qcom,ports-sinterval-low =	/bits/ 8 <0x03 0x1f 0x1f 0x07 0x00 0x00 0x00>;
++			qcom,ports-offset1 =		/bits/ 8 <0x00 0x00 0x0b 0x01 0x00 0x00 0x00>;
++			qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x0b 0x00 0x00 0x00 0x00>;
++			qcom,ports-hstart =		/bits/ 8 <0xff 0x03 0xff 0xff 0xff 0xff 0xff>;
++			qcom,ports-hstop =		/bits/ 8 <0xff 0x06 0xff 0xff 0xff 0xff 0xff>;
++			qcom,ports-word-length =	/bits/ 8 <0x01 0x07 0x04 0xff 0xff 0xff 0xff>;
++			qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0x00 0x01 0xff 0xff 0xff 0xff>;
++			qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff 0x00 0xff 0xff>;
++			qcom,ports-lane-control =	/bits/ 8 <0x01 0x00 0x00 0x00 0x00 0x00 0x00>;
++
++			#sound-dai-cells = <1>;
++			#address-cells = <2>;
++			#size-cells = <0>;
++
++			status = "disabled";
++		};
++
++		txmacro: codec@a620000 {
++			compatible = "qcom,sm6115-lpass-tx-macro";
++			pinctrl-0 = <&tx_swr_active>;
++			pinctrl-names = "default";
++			reg = <0x0 0x0a620000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&vamacro>;
++			clock-names = "mclk",
++				      "npl",
++				      "dcodec",
++				      "fsgen";
++			assigned-clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++					  <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			assigned-clock-rates = <19200000>,
++					       <19200000>;
++
++			#clock-cells = <0>;
++			clock-output-names = "mclk";
++			#sound-dai-cells = <1>;
++
++			status = "disabled";
++		};
++
++		lpass_audiocc: clock-controller@a6a9000 {
++			compatible = "qcom,sm6115-lpassaudiocc";
++			reg = <0x0 0x0a6a9000 0x0 0x1000>;
++			#reset-cells = <1>;
++		};
++
++		vamacro: codec@a730000 {
++			compatible = "qcom,sm6115-lpass-va-macro";
++			reg = <0x0 0x0a730000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			clock-names = "mclk",
++				      "dcodec",
++				      "npl";
++			assigned-clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++					  <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			assigned-clock-rates = <19200000>,
++					       <19200000>;
++
++			#clock-cells = <0>;
++			clock-output-names = "fsgen";
++			#sound-dai-cells = <1>;
++
++			status = "disabled";
++		};
++
++		swr0: soundwire@a740000 {
++			compatible = "qcom,soundwire-v1.6.0";
++			reg = <0x0 0x0a740000 0x0 0x2000>;
++			interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>;
++
++			clocks = <&txmacro>;
++			clock-names = "iface";
++
++			resets = <&lpasscc 0>;
++			reset-names = "swr_audio_cgcr";
++
++			label = "VA_TX";
++			qcom,din-ports = <4>;
++			qcom,dout-ports = <0>;
++
++			qcom,ports-sinterval-low =	/bits/ 8 <0x01 0x03 0x03 0x03>;
++			qcom,ports-offset1 =		/bits/ 8 <0x01 0x01 0x02 0x01>;
++			qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x00 0x00>;
++			qcom,ports-hstart =		/bits/ 8 <0xff 0xff 0xff 0xff>;
++			qcom,ports-hstop =		/bits/ 8 <0xff 0xff 0xff 0xff>;
++			qcom,ports-word-length =	/bits/ 8 <0xff 0xff 0xff 0xff>;
++			qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0xff 0xff 0xff>;
++			qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff>;
++			qcom,ports-lane-control =	/bits/ 8 <0x00 0x00 0x00 0x00>;
++
++			#sound-dai-cells = <1>;
++			#address-cells = <2>;
++			#size-cells = <0>;
++
++			status = "disabled";
++		};
++
++		lpass_tlmm: pinctrl@a7c0000 {
++			compatible = "qcom,sm6115-lpass-lpi-pinctrl";
++			reg = <0x0 0x0a7c0000 0x0 0x20000>,
++			      <0x0 0x0a950000 0x0 0x10000>;
++
++			clocks = <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			clock-names = "audio";
++
++			gpio-controller;
++			#gpio-cells = <2>;
++			gpio-ranges = <&lpass_tlmm 0 0 19>;
++
++			status = "disabled";
++
++			lpi_i2s2_active: lpi-i2s2-active-state {
++				clk-pins {
++					pins = "gpio10";
++					function = "i2s2_clk";
++					drive-strength = <8>;
++					bias-disable;
++					output-high;
++				};
++
++				ws-pins {
++					pins = "gpio11";
++					function = "i2s2_ws";
++					drive-strength = <8>;
++					bias-disable;
++					output-high;
++				};
++
++				data-pins {
++					pins = "gpio12", "gpio13";
++					function = "i2s2_data";
++					drive-strength = <8>;
++					bias-disable;
++					output-high;
++				};
++			};
++
++			tx_swr_active: tx-swr-active-state {
++				clk-pins {
++					pins = "gpio0";
++					function = "swr_tx_clk";
++					drive-strength = <2>;
++					slew-rate = <1>;
++					bias-disable;
++				};
++
++				data-pins {
++					pins = "gpio1", "gpio2";
++					function = "swr_tx_data";
++					drive-strength = <2>;
++					slew-rate = <1>;
++					bias-bus-hold;
++				};
++			};
++
++			rx_swr_active: rx-swr-active-state {
++				clk-pins {
++					pins = "gpio3";
++					function = "swr_rx_clk";
++					drive-strength = <2>;
++					slew-rate = <1>;
++					bias-disable;
++				};
++
++				data-pins {
++					pins = "gpio4", "gpio5";
++					function = "swr_rx_data";
++					drive-strength = <2>;
++					slew-rate = <1>;
++					bias-bus-hold;
++				};
++			};
++
++			dmic01_active: dmic01-active-state {
++				clk-pins {
++					pins = "gpio6";
++					function = "dmic01_clk";
++					drive-strength = <8>;
++					output-high;
++				};
++
++				data-pins {
++					pins = "gpio7";
++					function = "dmic01_data";
++					drive-strength = <8>;
++					bias-pull-down;
++				};
++			};
++
++			dmic23_active: dmic23-active-state {
++				clk-pins {
++					pins = "gpio8";
++					function = "dmic23_clk";
++					drive-strength = <8>;
++					output-high;
++				};
++
++				data-pins {
++					pins = "gpio9";
++					function = "dmic23_data";
++					drive-strength = <8>;
++					bias-pull-down;
++				};
++			};
++		};
++
++		lpasscc: clock-controller@a7ec000 {
++			compatible = "qcom,sm6115-lpasscc";
++			reg = <0x0 0x0a7ec000 0x0 0x1000>;
++			#reset-cells = <1>;
++		};
++
+ 		remoteproc_adsp: remoteproc@a400000 {
+ 			compatible = "qcom,sm6375-adsp-pas";
+ 			reg = <0 0x0a400000 0 0x10000>;

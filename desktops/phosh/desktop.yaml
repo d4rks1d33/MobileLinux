@@ -1,0 +1,10 @@
+id: phosh
+name: Phosh (Phone Shell)
+compositor: phoc (wlroots)
+toolkit: gtk
+session: phosh
+# Phosh is the reference desktop (working today on rhodep). Kept decoupled from
+# hardware: selecting a different desktop must not touch device support.
+packages:
+  apt: [phosh, phoc, squeekboard, gnome-shell-common]
+default: true

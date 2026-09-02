@@ -1,0 +1,231 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] DIAG: ASoC: q6asm-dai: trace the playback write handshake
+
+Not for upstream. The SoC dies a fixed amount of audio after the stream is
+triggered: with the default ~0.5 s buffer it survives ~460 ms, with a 21 ms
+buffer (1024 frames) only 27 ms. So the data path works and it dies exactly
+when the DSP has consumed the periods the AP queued.
+
+Also log every packet the APR router receives, to tell apart "the DSP never
+replies" from "the reply arrives and is dropped before the ASM service".
+
+Trace the handshake: how many periods .ack queues, every WRITE_DONE the DSP
+sends back, and every packet the ASM service receives at all, so the log shows
+whether the AP keeps feeding and whether the DSP ever answers.
+
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 16:14:46.644364003 +0000
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c	2026-08-12 16:14:46.660364003 +0000
+@@ -19,6 +19,11 @@
+ #include <linux/dma-mapping.h>
+ #include <sound/pcm_params.h>
+ #include "q6asm.h"
++
++/* DIAG (not for upstream): the SoC dies exactly when the DSP has consumed the
++ * periods the AP queued, so trace the write/WRITE_DONE handshake. */
++#define ASM_DIAG(fmt, ...) \
++	printk(KERN_EMERG "ASM-DIAG: " fmt "\n", ##__VA_ARGS__)
+ #include "q6routing.h"
+ #include "q6dsp-errno.h"
+ 
+@@ -184,11 +189,14 @@
+ 
+ 	switch (opcode) {
+ 	case ASM_CLIENT_EVENT_CMD_RUN_DONE:
++		ASM_DIAG("RUN_DONE");
+ 		break;
+ 	case ASM_CLIENT_EVENT_CMD_EOS_DONE:
+ 		break;
+ 	case ASM_CLIENT_EVENT_DATA_WRITE_DONE:
++		ASM_DIAG("WRITE_DONE token=%u", token);
+ 		snd_pcm_period_elapsed(substream);
++		ASM_DIAG("WRITE_DONE token=%u handled", token);
+ 		break;
+ 	case ASM_CLIENT_EVENT_DATA_READ_DONE:
+ 		snd_pcm_period_elapsed(substream);
+@@ -317,9 +325,16 @@
+ 
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && prtd->state == Q6ASM_STREAM_RUNNING) {
+ 		avail_periods = (runtime->control->appl_ptr - prtd->queue_ptr)/runtime->period_size;
++		ASM_DIAG("ack: appl=%lu queue=%lu period=%lu avail=%d pcm_count=%u",
++			 (unsigned long)runtime->control->appl_ptr,
++			 (unsigned long)prtd->queue_ptr,
++			 (unsigned long)runtime->period_size, avail_periods,
++			 prtd->pcm_count);
+ 		for (i = 0; i < avail_periods; i++) {
++			ASM_DIAG("ack: write_async #%d", i);
+ 			ret = q6asm_write_async(prtd->audio_client, prtd->stream_id,
+ 					   prtd->pcm_count, 0, 0, 0);
++			ASM_DIAG("ack: write_async #%d ret=%d", i, ret);
+ 
+ 			if (ret < 0) {
+ 				dev_err(component->dev, "Error queuing playback buffer %d\n", ret);
+--- a/sound/soc/qcom/qdsp6/q6asm.c	2026-08-12 16:26:58.898104008 +0000
++++ b/sound/soc/qcom/qdsp6/q6asm.c	2026-08-12 18:51:58.294706006 +0000
+@@ -23,12 +23,19 @@
+ #include "q6dsp-errno.h"
+ #include "q6dsp-common.h"
+ 
++/* DIAG (not for upstream): trace every packet the ASM service receives, to see
++ * whether the DSP ever acknowledges a playback write. */
++#define ASM_RX(fmt, ...) printk(KERN_EMERG "ASM-RX: " fmt "\n", ##__VA_ARGS__)
++
+ #define ASM_STREAM_CMD_CLOSE			0x00010BCD
+ #define ASM_STREAM_CMD_FLUSH			0x00010BCE
+ #define ASM_SESSION_CMD_PAUSE			0x00010BD3
+ #define ASM_DATA_CMD_EOS			0x00010BDB
+ #define ASM_DATA_EVENT_RENDERED_EOS		0x00010C1C
+ #define ASM_NULL_POPP_TOPOLOGY			0x00010C68
++/* DIAG: downstream DEFAULT_POPP_TOPOLOGY; the null one may not exist in this
++ * firmware's topology database. */
++#define ASM_DEFAULT_POPP_TOPOLOGY		0x00010BE4
+ #define ASM_STREAM_CMD_FLUSH_READBUFS		0x00010C09
+ #define ASM_STREAM_CMD_SET_ENCDEC_PARAM		0x00010C10
+ #define ASM_STREAM_POSTPROC_TOPO_ID_NONE	0x00010C68
+@@ -58,6 +65,9 @@
+ 
+ 
+ #define ASM_LEGACY_STREAM_SESSION	0
++/* DIAG: downstream pairs the null post-processing topology with the low
++ * latency session, never with the legacy one. */
++#define ASM_LOW_LATENCY_STREAM_SESSION	0x10000000
+ /* Bit shift for the stream_perf_mode subfield. */
+ #define ASM_SHIFT_STREAM_PERF_MODE_FLAG_IN_OPEN_READ              29
+ #define ASM_END_POINT_DEVICE_MATRIX	0
+@@ -674,6 +684,7 @@
+ 		goto done;
+ 
+ 	case ASM_DATA_EVENT_WRITE_DONE_V2:
++		ASM_RX("stream: WRITE_DONE token=0x%08x io_mode=0x%x", hdr->token, ac->io_mode);
+ 		client_event = ASM_CLIENT_EVENT_DATA_WRITE_DONE;
+ 		if (ac->io_mode & ASM_SYNC_IO_MODE) {
+ 			phys_addr_t phys;
+@@ -755,6 +766,8 @@
+ 	int session_id;
+ 
+ 	session_id = (hdr->dest_port >> 8) & 0xFF;
++	ASM_RX("srvc: opcode=0x%08x token=0x%08x src=0x%04x dst=0x%04x sid=%d",
++	       hdr->opcode, hdr->token, hdr->src_port, hdr->dest_port, session_id);
+ 	if (session_id)
+ 		return q6asm_stream_callback(adev, data, session_id);
+ 
+@@ -946,7 +959,7 @@
+ 	/* source endpoint : matrix */
+ 	open->sink_endpointype = ASM_END_POINT_DEVICE_MATRIX;
+ 	open->bits_per_sample = bits_per_sample;
+-	open->postprocopo_id = ASM_NULL_POPP_TOPOLOGY;
++	open->postprocopo_id = ASM_DEFAULT_POPP_TOPOLOGY;
+ 
+ 	switch (format) {
+ 	case SND_AUDIOCODEC_MP3:
+@@ -1532,7 +1545,15 @@
+ 	q6asm_add_hdr(ac, &pkt->hdr, pkt_size, false, stream_id);
+ 
+ 	ab = &port->buf[port->dsp_buf];
+-	pkt->hdr.token = port->dsp_buf | (len << ASM_WRITE_TOKEN_LEN_SHIFT);
++	/*
++	 * DIAG: mainline packs the transfer length into bits 16..31 of the
++	 * token. Downstream uses those bits for something else entirely
++	 * (buf_index in 16..23 and a flags byte in 24..31, where bit 24 is the
++	 * direction and bit 25 is "no wait"), so a length of 24960 bytes ends
++	 * up setting the direction flag among others. Send just the buffer
++	 * index and see whether the DSP starts acknowledging writes.
++	 */
++	pkt->hdr.token = port->dsp_buf;
+ 	pkt->hdr.opcode = ASM_DATA_CMD_WRITE_V2;
+ 	write->buf_addr_lsw = lower_32_bits(ab->phys);
+ 	write->buf_addr_msw = upper_32_bits(ab->phys);
+@@ -1551,7 +1572,11 @@
+ 		port->dsp_buf = 0;
+ 
+ 	spin_unlock_irqrestore(&ac->lock, flags);
++	ASM_RX("write: buf=%u addr=%08x%08x len=%u handle=0x%x token=0x%08x -> apr_send",
++	       write->seq_id, write->buf_addr_msw, write->buf_addr_lsw,
++	       write->buf_size, write->mem_map_handle, pkt->hdr.token);
+ 	rc = apr_send_pkt(ac->adev, pkt);
++	ASM_RX("write: apr_send returned %d", rc);
+ 	if (rc == pkt_size)
+ 		rc = 0;
+ 
+--- a/sound/soc/qcom/qdsp6/q6routing.c	2026-08-12 18:51:58.269706006 +0000
++++ b/sound/soc/qcom/qdsp6/q6routing.c	2026-08-12 18:51:58.294706006 +0000
+@@ -390,7 +390,7 @@
+ 	session->bits_per_sample = pdata->bits_per_sample;
+ 
+ 	payload.num_copps = 0; /* only RX needs to use payload */
+-	topology = NULL_COPP_TOPOLOGY;
++	topology = 0x00010314; /* DIAG: downstream DEFAULT_COPP_TOPOLOGY */
+ 	copp = q6adm_open(routing_data->dev, session->port_id,
+ 			      session->path_type, session->sample_rate,
+ 			      session->channels, topology, perf_mode,
+--- a/drivers/soc/qcom/apr.c	2026-08-12 18:13:54.139083005 +0000
++++ b/drivers/soc/qcom/apr.c	2026-08-12 18:13:54.150083005 +0000
+@@ -15,6 +15,9 @@
+ #include <linux/rpmsg.h>
+ #include <linux/of.h>
+ 
++/* DIAG (not for upstream): log every packet the router receives. */
++#define APR_DIAG(fmt, ...) printk(KERN_EMERG "APR-DIAG: " fmt "\n", ##__VA_ARGS__)
++
+ enum {
+ 	PR_TYPE_APR = 0,
+ 	PR_TYPE_GPR,
+@@ -67,6 +70,27 @@
+ 	hdr->dest_svc = adev->svc.id;
+ 
+ 	ret = rpmsg_trysend(apr->ch, pkt, hdr->pkt_size);
++
++	APR_DIAG("tx: opcode=0x%08x dst_svc=%u dst_port=0x%04x token=0x%08x hdr_field=0x%04x size=%u ret=%d",
++		 hdr->opcode, hdr->dest_svc, hdr->dest_port, hdr->token,
++		 hdr->hdr_field, hdr->pkt_size, ret);
++
++	/* Dump the payload of everything except the writes, which are many and
++	 * already understood, so the ADM and ASM command bodies can be checked
++	 * field by field against the vendor structures.
++	 */
++	if (hdr->opcode != 0x00010dab) {
++		const __le32 *w = (const __le32 *)pkt;
++		int n = hdr->pkt_size / 4, k;
++
++		for (k = 0; k + 3 < n; k += 4)
++			APR_DIAG("    t%02d: %08x %08x %08x %08x", k,
++				 le32_to_cpu(w[k]), le32_to_cpu(w[k + 1]),
++				 le32_to_cpu(w[k + 2]), le32_to_cpu(w[k + 3]));
++		for (; k < n; k++)
++			APR_DIAG("    t%02d: %08x", k, le32_to_cpu(w[k]));
++	}
++
+ 	spin_unlock_irqrestore(&adev->svc.lock, flags);
+ 
+ 	return ret ? ret : hdr->pkt_size;
+@@ -178,6 +181,31 @@
+ 	abuf->len = len;
+ 	memcpy(abuf->buf, buf, len);
+ 
++	{
++		const struct apr_hdr *h = buf;
++
++		APR_DIAG("rx: opcode=0x%08x src_svc=%u dst_svc=%u src_port=0x%04x dst_port=0x%04x token=0x%08x len=%d",
++			 h->opcode, h->src_svc, h->dest_svc, h->src_port,
++			 h->dest_port, h->token, len);
++
++		/* Dump the raw packet: guessing the payload offset is how the
++		 * status of a failed command gets mistaken for a good one.
++		 */
++		{
++			const __le32 *w = buf;
++			int n = len / 4, k;
++
++			APR_DIAG("    hdr_field=0x%04x pkt_size=%u",
++				 h->hdr_field, h->pkt_size);
++			for (k = 0; k + 3 < n; k += 4)
++				APR_DIAG("    w%02d: %08x %08x %08x %08x", k,
++					 le32_to_cpu(w[k]), le32_to_cpu(w[k + 1]),
++					 le32_to_cpu(w[k + 2]), le32_to_cpu(w[k + 3]));
++			for (; k < n; k++)
++				APR_DIAG("    w%02d: %08x", k, le32_to_cpu(w[k]));
++		}
++	}
++
+ 	spin_lock_irqsave(&apr->rx_lock, flags);
+ 	list_add_tail(&abuf->node, &apr->rx_list);
+ 	spin_unlock_irqrestore(&apr->rx_lock, flags);

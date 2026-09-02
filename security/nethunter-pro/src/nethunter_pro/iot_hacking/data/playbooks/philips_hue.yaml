@@ -1,0 +1,49 @@
+id: philips-hue
+device_type: hub
+vendor: Signify (Philips Hue)
+family: philips-hue
+requires:
+  port: 80
+actions:
+  - id: dump-config
+    label: "Dump bridge config"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/api/config"
+          save_as: cfg
+      - extract:
+          from: $cfg
+          fields:
+            name: '"name":"([^"]+)"'
+            bridgeid: '"bridgeid":"([^"]+)"'
+            modelid: '"modelid":"([^"]+)"'
+            swversion: '"swversion":"([^"]+)"'
+            apiversion: '"apiversion":"([^"]+)"'
+
+  - id: try-link
+    label: "Attempt link-button pair (usually needs physical press)"
+    category: exploit_control
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/api"
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: '{"devicetype":"nethunter#pentest"}'
+          save_as: link_reply
+
+  - id: mqtt-cve-2026-73669
+    label: "Check MQTT 1883 unauth (Hue Bridge Pro CVE-2026-73669)"
+    category: check_safe
+    dangerous: false
+    steps:
+      - note: "Hue Bridge Pro fw <1.77.2071318010 leaves Mosquitto open"
+      - tcp_send:
+          host: "{{target.ip}}"
+          port: 1883
+          payload_hex: "101c00044d5154540502003c00000010313233343536373839303132333435"
+          read: 4
+          save_as: mqtt_ack

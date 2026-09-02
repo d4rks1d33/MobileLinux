@@ -1,0 +1,16 @@
+#!/bin/sh
+# rhodep: bettercap for pwnagotchi, on the external adapter.
+#
+# Upstream's bettercap-launcher hardcodes wlan0mon and does Pi-specific brcm
+# firmware reloads. Here the monitor interface is brought up by
+# rhodep-pwn-monstart on the external wlan1, named wlan1mon, and bettercap is
+# pointed at it. The pwnagotchi agent later re-sets wifi.interface over the API
+# anyway, but -iface has to be right for the initial bring-up.
+set -e
+
+MON_IFACE=wlan1mon
+CAPLET=${PWN_CAPLET:-pwnagotchi-manual}   # manual = no auto-deauth by default
+
+/usr/local/sbin/rhodep-pwn-monstart
+
+exec /usr/bin/bettercap -no-colors -caplet "$CAPLET" -iface "$MON_IFACE"

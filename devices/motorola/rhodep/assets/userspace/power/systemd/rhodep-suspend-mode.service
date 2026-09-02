@@ -1,0 +1,14 @@
+[Unit]
+Description=Use s2idle, because deep suspend returns after two seconds on this SoC
+DefaultDependencies=no
+After=sysinit.target
+Before=suspend.target sleep.target
+ConditionPathIsReadWrite=/sys/power/mem_sleep
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-suspend-mode
+
+[Install]
+WantedBy=sysinit.target

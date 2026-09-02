@@ -1,0 +1,22 @@
+#!/bin/sh
+# rhodep: the pwnagotchi agent, from its venv.
+#
+# pwnagotchi is not pip-installed system-wide (Kali is EXTERNALLY-MANAGED); it
+# runs from a venv at /opt/pwnagotchi/.venv built with --system-site-packages,
+# so scapy/flask/etc. come from apt and only Crypto is added. The module is on
+# PYTHONPATH from the source tree.
+set -e
+
+PWN=/opt/pwnagotchi
+VENV="$PWN/.venv"
+MODE=${1:-manual}       # manual | auto
+
+export PYTHONPATH="$PWN"
+
+# manual mode: never transmits, just listens and shows the web UI. auto mode:
+# the full loop. Default manual so a first run is safe.
+if [ "$MODE" = auto ]; then
+	exec "$VENV/bin/python" -m pwnagotchi.cli
+else
+	exec "$VENV/bin/python" -m pwnagotchi.cli --manual
+fi

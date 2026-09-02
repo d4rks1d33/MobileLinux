@@ -1,0 +1,20 @@
+#!/bin/sh
+# Wait until the modem has registered its QMI User Identity Module service
+# (service id 11) on QRTR.
+#
+# The modem is a remoteproc and takes about 15 seconds to boot and register its
+# QMI services. ModemManager probes qrtr0 exactly once at startup and never
+# retries, so if it starts first it finds no modem at all: mmcli reports "No
+# modems were found" and the SIM PIN is never requested. Waiting for the UIM
+# service is what makes the modem appear on its own instead of needing a manual
+# "systemctl restart ModemManager" after every boot.
+i=0
+while [ "$i" -lt 90 ]; do
+	if qrtr-lookup 2>/dev/null | awk '{print $1}' | grep -qx 11; then
+		exit 0
+	fi
+	i=$((i + 1))
+	sleep 1
+done
+# Never block the boot forever if the modem does not come up.
+exit 0

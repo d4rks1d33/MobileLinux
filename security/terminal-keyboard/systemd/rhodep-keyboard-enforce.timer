@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically restore the terminal keyboard settings
+Documentation=file:///usr/local/share/rhodep/keyboard/README.md
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

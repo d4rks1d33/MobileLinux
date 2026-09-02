@@ -1,0 +1,24 @@
+# Keep the WCD9370 awake so the headset jack can be detected.
+#
+# The MBHC (headset detection) block lives in the codec and its interrupt is
+# delivered over soundwire. With runtime PM left at "auto" the slave suspends a
+# moment after boot, and while it is suspended inserting or removing a plug
+# produces no interrupt at all: the block is configured correctly, its IRQ is
+# unmasked, and nothing ever fires. Forcing the slave to stay powered makes
+# detection work immediately and reliably.
+#
+# Only the TX slave is pinned, because that is the one that carries the MBHC
+# registers and the interrupt; the RX slave is left on "auto" and still
+# suspends. Matching is on source_ports rather than the device name, since the
+# name embeds the soundwire bus number.
+#
+# This is a workaround, not the real fix. The real fix is for the codec to keep
+# the MBHC block alive across runtime suspend, which is a kernel change.
+#
+# "bind" matters and is easy to leave out. The slave is created before the codec
+# driver is attached to it, so on an "add" event DRIVER is still empty and this
+# rule does not match; the device then suspends and the jack goes dead. The
+# route unit sets the same attribute as well, because relying on event ordering
+# alone for something this load bearing is not worth it.
+ACTION=="add|change|bind", SUBSYSTEM=="soundwire", DRIVER=="wcd9370-codec", \
+	ATTR{dev-properties/source_ports}=="0x1f", ATTR{power/control}="on"

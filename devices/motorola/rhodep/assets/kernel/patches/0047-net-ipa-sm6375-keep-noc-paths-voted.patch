@@ -1,0 +1,119 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: sm6375: keep the NoC paths voted while idle
+
+Patch 0044 gave SM6375 the "imem" interconnect path the vendor votes and
+mainline's IPA v4.11 data never declared. The provider works, the IPA probes
+and shows up as a consumer on the path, and the SoC still resets a few minutes
+after the modem attaches to LTE.
+
+The reason is visible in interconnect_summary:
+
+	qxm_ipa                                    0            0
+	  5840000.ipa               3              0            0
+
+Registered on the path, asking for nothing. ipa_interconnect_init() sets the
+bandwidth values and then leaves every path disabled, and ipa_power_enable() /
+ipa_power_disable() turn them on and off with runtime PM. icc_disable() means
+a vote of zero.
+
+That is the right policy when the AP is the only user of those paths. It is
+the wrong one here: the modem reads its filter and route tables straight out
+of IMEM through the IPA's own SMMU context bank, on its own schedule, with no
+idea whether Linux currently considers the IPA idle. Most of the time it is
+idle, so most of the time the path is voted at zero, which on this SoC is
+indistinguishable from not having voted at all - the symptom being a reset with
+no fault, no panic and no console output, which §1 of HANDOFF-SESSION4.md
+established is what happens here when something addresses a slave that does not
+answer.
+
+So add a per-SoC flag: vote the paths once at init and never drop them. Only
+SM6375 sets it, so no other platform changes behaviour, and the cost where it
+is set is bounded - three NoC paths held at the bandwidths the vendor uses,
+instead of being released while the IPA is idle.
+
+This does not touch the device tree, so it needs no new boot image: rebuild
+ipa.ko, copy it over, reload.
+
+--- a/drivers/net/ipa/ipa_data.h
++++ b/drivers/net/ipa/ipa_data.h
+@@ -217,6 +217,12 @@
+ 	u32 core_clock_rate;
+ 	u32 interconnect_count;		/* # entries in interconnect_data[] */
+ 	const struct ipa_interconnect_data *interconnect_data;
++	/* Keep the interconnects voted even while the IPA is idle. Needed
++	 * where something other than the AP reaches through the IPA's context
++	 * bank on its own schedule - on SM6375 the modem reads its filter and
++	 * route tables out of IMEM that way.
++	 */
++	bool keep_icc_enabled;
+ };
+ 
+ /**
+--- a/drivers/net/ipa/ipa_power.c
++++ b/drivers/net/ipa/ipa_power.c
+@@ -47,6 +47,17 @@
+ 	struct clk *core;
+ 	struct qmp *qmp;
+ 	u32 interconnect_count;
++	/* Vote the interconnects once and never drop them.
++	 *
++	 * Normally the IPA only asks for NoC bandwidth while it is
++	 * runtime-resumed. That is fine when the AP is the only thing using
++	 * the paths, and wrong on SM6375, where the modem reads its filter
++	 * and route tables straight out of IMEM through the IPA's own SMMU
++	 * context bank whenever it pleases. With the demand-driven vote the
++	 * path sits at zero for most of the time and the SoC resets without a
++	 * word a few minutes after the modem attaches to LTE.
++	 */
++	bool keep_icc_enabled;
+ 	struct icc_bulk_data interconnect[] __counted_by(interconnect_count);
+ };
+ 
+@@ -79,6 +90,13 @@
+ 
+ 	/* Set the bandwidth values to be used when enabled */
+ 	ret = icc_bulk_set_bw(power->interconnect_count, power->interconnect);
++	if (!ret && power->keep_icc_enabled) {
++		/* SM6375: keep them voted for good, see the comment on
++		 * keep_icc_enabled in struct ipa_power.
++		 */
++		ret = icc_bulk_enable(power->interconnect_count,
++				      power->interconnect);
++	}
+ 	if (ret)
+ 		icc_bulk_put(power->interconnect_count, power->interconnect);
+ 
+@@ -118,7 +136,14 @@
+ 
+ 	clk_disable_unprepare(power->core);
+ 
+-	icc_bulk_disable(power->interconnect_count, power->interconnect);
++	/* On SM6375 the NoC paths stay voted even while the IPA is idle. The
++	 * modem reaches into IMEM through the IPA's context bank on its own
++	 * schedule, so dropping the vote here would take the path out from
++	 * under it. See the comment on keep_icc_enabled.
++	 */
++	if (!power->keep_icc_enabled)
++		icc_bulk_disable(power->interconnect_count,
++				 power->interconnect);
+ }
+ 
+ static int ipa_runtime_suspend(struct device *dev)
+@@ -259,6 +284,7 @@
+ 		goto err_clk_put;
+ 	}
+ 	power->dev = dev;
++	power->keep_icc_enabled = data->keep_icc_enabled;
+ 	power->core = clk;
+ 	power->interconnect_count = data->interconnect_count;
+ 
+--- a/drivers/net/ipa/data/ipa_data-v4.11.c
++++ b/drivers/net/ipa/data/ipa_data-v4.11.c
+@@ -444,6 +444,7 @@
+ 	.core_clock_rate	= 60 * 1000 * 1000,	/* Hz */
+ 	.interconnect_count	= ARRAY_SIZE(ipa_interconnect_data_sm6375),
+ 	.interconnect_data	= ipa_interconnect_data_sm6375,
++	.keep_icc_enabled	= true,
+ };
+ 
+ /* Configuration data for an SoC having IPA v4.11 */

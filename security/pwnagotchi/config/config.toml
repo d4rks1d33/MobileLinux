@@ -1,0 +1,51 @@
+# rhodep: pwnagotchi on the Moto G82, capturing on the external TP-Link only.
+#
+# Overrides pwnagotchi/defaults.toml. The important lines are the interface and
+# the monitor commands: everything captures on wlan1 (RTL8188EUS), and the
+# internal wlan0 (ath10k/WCN3990, no monitor mode) is never touched.
+
+# CAUTION: pwnagotchi's set_name() rewrites /etc/hostname and REBOOTS the whole
+# machine whenever main.name differs from the current hostname. main.name is
+# read from default.toml (where it is "pwnagotchi"), not from an unset override,
+# so leaving it out does NOT avoid the reboot -- it just reboots towards
+# "pwnagotchi". Pin it to the device's real hostname so the check is a no-op and
+# nothing is ever renamed or rebooted. install.sh sets this to `hostname`.
+main.name = "kali"
+main.lang = "en"
+
+# A distinct name, not "wlan0mon": rhodep-pwn-monstart renames the external
+# adapter to exactly this, so nothing can confuse it with the internal wlan0.
+main.iface = "wlan1mon"
+
+# Monitor scripts that operate ONLY on wlan1 and never run `airmon-ng check
+# kill`, so NetworkManager and wlan0 stay up. See the scripts for why.
+main.mon_start_cmd = "/usr/local/sbin/rhodep-pwn-monstart"
+main.mon_stop_cmd  = "/usr/local/sbin/rhodep-pwn-monstop"
+main.no_restart = false
+
+# This is a phone, not a Pi with a Waveshare e-ink hat. No display; use the web
+# UI instead (http://<phone>:8080, or over usb0 at 172.16.42.1:8080).
+ui.display.enabled = false
+ui.web.enabled = true
+ui.web.address = "0.0.0.0"
+ui.web.port = 8080
+ui.web.username = "changeme"
+ui.web.password = "changeme"
+
+# Personality: AUTO by default. Set to true for a listen-only run that never
+# transmits deauths, which is the polite default while testing.
+personality.advertise = true
+personality.deauth = true
+personality.associate = true
+
+# None of the Pi hardware plugins apply here; leave them off. bt-tether, gps,
+# gpio_buttons, pisugar etc. all want hardware this device does not have.
+main.plugins.grid.enabled = true
+main.plugins.grid.report = false      # do not phone home to the pwngrid mesh
+main.plugins.auto-update.enabled = false
+
+bettercap.handshakes = "/etc/pwnagotchi/handshakes"
+
+# The phone has plenty of storage, so do not bother with the tmpfs mounts the
+# Pi image uses to spare an SD card.
+fs.memory.enabled = false

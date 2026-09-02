@@ -1,0 +1,88 @@
+From: rhodep port <none@example.com>
+Date: Tue, 19 Aug 2026 22:45:00 -0300
+Subject: [PATCH] media: s5kjn1: bring the rails up in the documented order
+
+VDDIO feeds the sensor's I2C buffers, so it comes up first: vddio, vdda,
+vddd. That is the order Qualcomm's sensormodule blob for this module
+specifies and the order the vendor device tree repeats; the driver had the
+reverse.
+
+On a Motorola rhodep the difference is measurable. With the driver's order
+reads from the sensor address return a different value every time; with
+this order they are stable.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/drivers/media/i2c/s5kjn1.c
++++ b/drivers/media/i2c/s5kjn1.c
+@@ -1205,30 +1205,32 @@
+ 	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+ 	int ret;
+ 
+-	if (s5kjn1->vddd) {
+-		ret = regulator_enable(s5kjn1->vddd);
++	/*
++	 * Bring the rails up in the order the sensor's own configuration data
++	 * specifies: VDDIO, then VDDA, then VDDD. VDDIO feeds the I2C buffers,
++	 * so powering the core first can leave the part unable to answer on the
++	 * bus. Qualcomm's blob for this module lists them as cam_vio, cam_vana,
++	 * cam_vdig, and the vendor device tree repeats that order.
++	 */
++	if (s5kjn1->vddio) {
++		ret = regulator_enable(s5kjn1->vddio);
+ 		if (ret)
+ 			return ret;
+-
+-		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
++		usleep_range(2000, 3000);
+ 	}
+ 
+ 	if (s5kjn1->vdda) {
+ 		ret = regulator_enable(s5kjn1->vdda);
+ 		if (ret)
+-			goto disable_vddd;
++			goto disable_vddio;
++		usleep_range(2000, 3000);
+ 	}
+ 
+-	if (s5kjn1->vddio) {
+-		ret = regulator_enable(s5kjn1->vddio);
++	if (s5kjn1->vddd) {
++		ret = regulator_enable(s5kjn1->vddd);
+ 		if (ret)
+ 			goto disable_vdda;
+-	}
+-
+-	if (s5kjn1->afvdd) {
+-		ret = regulator_enable(s5kjn1->afvdd);
+-		if (ret)
+-			goto disable_vddio;
++		usleep_range(2000, 3000);
+ 	}
+ 
+ 	ret = clk_prepare_enable(s5kjn1->mclk);
+@@ -1244,19 +1246,14 @@
+ 	if (s5kjn1->afvdd)
+ 		regulator_disable(s5kjn1->afvdd);
+ 
+-disable_vddio:
+-	if (s5kjn1->vddio)
+-		regulator_disable(s5kjn1->vddio);
+-
++	if (s5kjn1->vddd)
++		regulator_disable(s5kjn1->vddd);
+ disable_vdda:
+ 	if (s5kjn1->vdda)
+ 		regulator_disable(s5kjn1->vdda);
+-
+-disable_vddd:
+-	if (s5kjn1->vddd) {
+-		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+-		regulator_disable(s5kjn1->vddd);
+-	}
++disable_vddio:
++	if (s5kjn1->vddio)
++		regulator_disable(s5kjn1->vddio);
+ 
+ 	return ret;
+ }

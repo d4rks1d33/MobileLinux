@@ -1,0 +1,51 @@
+#!/bin/sh
+# rhodep: take the external adapter back out of monitor mode and return it to a
+# normal managed wlan1. Touches only wlan1/wlan1mon; wlan0 is never referenced.
+#
+# End state, deterministically: an interface named "wlan1", type managed, handed
+# back to NetworkManager. That is what a user expects after turning pwnagotchi
+# off -- the name and the mode both restored.
+set -e
+
+PHYS_IFACE=wlan1
+MON_IFACE=wlan1mon
+
+log() { echo "rhodep-pwn-monstop: $*"; }
+
+# Find whichever name the adapter currently has.
+IF=""
+for cand in "$MON_IFACE" "$PHYS_IFACE"; do
+	if ip link show "$cand" >/dev/null 2>&1; then IF="$cand"; break; fi
+done
+if [ -z "$IF" ]; then
+	log "no wlan1/wlan1mon present, nothing to do"
+	exit 0
+fi
+
+case "$IF" in wlan0) log "ERROR: refusing to touch wlan0"; exit 1 ;; esac
+
+# Down, back to managed, and renamed to wlan1 while down.
+ip link set "$IF" down 2>/dev/null || true
+iw dev "$IF" set type managed 2>/dev/null || true
+if [ "$IF" != "$PHYS_IFACE" ]; then
+	if ip link set "$IF" name "$PHYS_IFACE" 2>/dev/null; then
+		log "renamed $IF -> $PHYS_IFACE"
+	else
+		log "WARNING: could not rename $IF to $PHYS_IFACE"
+		PHYS_IFACE="$IF"
+	fi
+fi
+ip link set "$PHYS_IFACE" up 2>/dev/null || true
+
+# Hand it back to NetworkManager so it behaves like a normal client adapter
+# again (it can reconnect / be used by the UI).
+command -v nmcli >/dev/null 2>&1 && \
+	nmcli device set "$PHYS_IFACE" managed yes >/dev/null 2>&1 || true
+
+# Confirm.
+t=$(iw dev "$PHYS_IFACE" info 2>/dev/null | awk '/type/{print $2}')
+if [ "$t" = "managed" ]; then
+	log "OK: $PHYS_IFACE is managed again"
+else
+	log "note: $PHYS_IFACE type is '${t:-unknown}'"
+fi

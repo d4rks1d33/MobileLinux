@@ -1,0 +1,33 @@
+id: router-recon
+device_type: router
+vendor: Generic
+family: router
+requires: {}
+actions:
+  - id: full-recon
+    label: "Full router recon (nmap + banner + UPnP)"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "Combined port scan + service detection + banner grab"
+      - run_tool:
+          tool: nmap
+          args: ["-sV", "-Pn", "-p", "21,22,23,53,80,161,443,1900,7547,8080,8291,8443,37215",
+                 "--script=http-title,http-headers,upnp-info,ssl-cert",
+                 "{{target.ip}}"]
+          timeout: 60
+          save_as: nmap_out
+
+  - id: default-creds
+    label: "Try top-20 LATAM ISP default creds"
+    category: exploit_control
+    dangerous: false
+    steps:
+      - note: "Best-known creds for Huawei/TP-Link/Mitrastar/Nokia/Motorola"
+      - run_tool:
+          tool: hydra
+          args: ["-t", "4", "-f", "-L", "/tmp/nh-iot-users.txt",
+                 "-P", "/tmp/nh-iot-passwords.txt",
+                 "{{target.ip}}", "http-get", "/"]
+          timeout: 120
+          save_as: hydra_out

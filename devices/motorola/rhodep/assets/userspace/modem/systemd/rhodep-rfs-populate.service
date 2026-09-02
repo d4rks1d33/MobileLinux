@@ -1,0 +1,16 @@
+[Unit]
+Description=Populate the modem remote file system from the stock partitions
+Documentation=file:/usr/share/doc/rhodep-modem/README.md
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=tqftpserv.service rmtfs.service
+ConditionPathExists=/dev/disk/by-partlabel
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-rfs-populate
+
+[Install]
+WantedBy=multi-user.target

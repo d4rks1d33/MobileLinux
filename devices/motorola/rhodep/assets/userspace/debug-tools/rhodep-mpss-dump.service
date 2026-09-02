@@ -1,0 +1,14 @@
+[Unit]
+Description=Dump the modem carveout left by the previous boot, then load the modem
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-mpss-dump
+RemainAfterExit=yes
+TimeoutStartSec=600
+
+[Install]
+WantedBy=sysinit.target

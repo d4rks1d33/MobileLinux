@@ -1,0 +1,97 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: add and enable the IPA
+
+Add the IPA node for the Motorola Moto G82 5G (SM6375). Addresses, GSI
+region and interrupts match the downstream Motorola SM6375 kernel
+(blair.dtsi, rhodep's base DT is blair-moto-rhodep-base.dts:
+qcom,ipa@0x5800000 with "ipa-base" 0x5800000 and "gsi-base" 0x5804000,
+GIC_SPI 257/259, RPM_SMD_IPA_CLK, qcom,ipa-hw-ver = <20> = IPAv4.11), and
+the register split follows the mainline IPA v4.5+ layout (ipa-reg at
+base + 0x40000 size 0x8000, ipa-shared at base + 0x50000 size 0x3000, gsi at
+base + 0x4000 size 0x23000), as used by sm6350 (IPA v4.7) and sm8350 (IPA
+v4.9). Note this is NOT the sdm845/sc7180 layout: from IPA v4.5 on, the
+shared SRAM direct access window moved from +0x7000 to +0x10000 relative to
+the register base, which downstream describes as
+
+	[IPA_HW_v3_0][IPA_SW_AREA_RAM_DIRECT_ACCESS_n] = { ... 0x00007000 ... }
+	[IPA_HW_v4_5][IPA_SW_AREA_RAM_DIRECT_ACCESS_n] = { ... 0x00010000 ... }
+
+with ipahal_get_reg_base() == 0x40000. Using the old +0x47000 window makes
+the very first access to the shared SRAM reset the SoC instantly, with no
+CPU exception and no log output at all. The gsi size 0x23000 also matches
+the downstream "gsi-base" region exactly.
+
+The two SMMU stream ids are the AP and the microcontroller context banks
+(downstream ipa_smmu_ap 0x4A0 and ipa_smmu_uc 0x4A2), like sm6350 does with
+0x440/0x442.
+
+The GSI firmware is loaded by the AP through Trust Zone, not by the modem.
+Downstream describes it as a PIL peripheral owned by the application
+processor:
+
+	qcom,ipa_fws {
+		compatible = "qcom,pil-tz-generic";
+		qcom,pas-id = <0xf>;
+		qcom,firmware-name = "ipa_fws";
+		memory-region = <&pil_ipa_fw_mem>;
+	};
+
+PAS id 15 and the pil_ipa_fw_mem region are exactly what mainline
+ipa_firmware_load() uses, so this is qcom,gsi-loader = "self" with
+memory-region = <&pil_ipa_fw_mem>. The signed firmware lives in the modem
+(NON-HLOS) partition as image/ipa_fws.mdt + ipa_fws.b0[0-4] and is shipped
+by firmware-motorola-rhodep, hence the firmware-name path.
+
+The matching "qcom,sm6375-ipa" compatible selects an IPA v4.11 config with
+interconnect_count = 0: mainline has no SM6375 interconnect provider, and
+none is needed, because the RPM keeps bimc/cnoc/snoc voted to INT_MAX on
+its own (rpmcc hands the icc bus clocks off at INT_MAX and never registers
+them with the clock framework, so Linux never clocks DDR at all on this
+SoC).
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -1150,4 +1150,43 @@
+ 				<&gpucc GPU_GX_GDSC>;
+ 		power-domain-names = "cx", "gx";
+ 	};
++
++	ipa: ipa@5840000 {
++		compatible = "qcom,sm6375-ipa";
++
++		iommus = <&apps_smmu 0x4a0 0x0>,
++			 <&apps_smmu 0x4a2 0x0>;
++		reg = <0x0 0x05840000 0x0 0x8000>,
++		      <0x0 0x05850000 0x0 0x3000>,
++		      <0x0 0x05804000 0x0 0x23000>;
++		reg-names = "ipa-reg",
++			    "ipa-shared",
++			    "gsi";
++
++		interrupts-extended = <&intc GIC_SPI 257 IRQ_TYPE_EDGE_RISING>,
++				      <&intc GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>,
++				      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
++				      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "ipa",
++				  "gsi",
++				  "ipa-clock-query",
++				  "ipa-setup-ready";
++
++		clocks = <&rpmcc RPM_SMD_IPA_CLK>;
++		clock-names = "core";
++
++		qcom,smem-states = <&ipa_smp2p_out 0>,
++				   <&ipa_smp2p_out 1>;
++		qcom,smem-state-names = "ipa-clock-enabled-valid",
++					"ipa-clock-enabled";
++
++		/*
++		 * The AP loads the GSI firmware through Trust Zone (PAS id 15),
++		 * like the downstream qcom,ipa_fws PIL node does. The image
++		 * comes from the modem partition (image/ipa_fws.mdt).
++		 */
++		memory-region = <&pil_ipa_fw_mem>;
++		firmware-name = "qcom/sm6375/motorola/rhodep/ipa_fws.mdt";
++		qcom,gsi-loader = "self";
++	};
+ };

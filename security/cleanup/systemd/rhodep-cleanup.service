@@ -1,0 +1,10 @@
+[Unit]
+Description=Reclaim disk space by deleting regenerable junk (caches, journal, coredumps)
+Documentation=file:/usr/share/doc/rhodep-cleanup/README
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-cleanup
+Nice=10
+IOSchedulingClass=idle

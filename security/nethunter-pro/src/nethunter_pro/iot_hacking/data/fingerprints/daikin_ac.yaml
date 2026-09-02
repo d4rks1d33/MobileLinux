@@ -1,0 +1,22 @@
+id: daikin-ac
+version: 1
+device_type: hvac
+vendor: Daikin
+family: daikin-brp
+threshold: 60
+matchers:
+  - name: http-basic-info
+    type: http_body
+    path: /common/basic_info
+    regex: 'ret=OK,type=aircon'
+    confidence: 95
+    extract:
+      type: 'type=([^,]+)'
+      mac: 'mac=([0-9A-F]+)'
+      firmware: 'ver=([^,]+)'
+  - name: port-80
+    type: port
+    port: 80
+    confidence: 10
+metadata:
+  playbook: daikin-ac

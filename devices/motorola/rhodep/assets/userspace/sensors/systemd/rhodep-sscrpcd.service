@@ -1,0 +1,39 @@
+[Unit]
+Description=FastRPC listener for the ADSP sensors PD (rhodep)
+Documentation=file:///usr/share/doc/rhodep-sensors/README.md
+# The sensors PD asks the application processor for its registry over FastRPC
+# the moment a listener registers.  Nothing else on this system answers, and
+# without an answer the registry sensor asserts and takes the ADSP down.
+#
+# Pulled in by udev when /dev/fastrpc-adsp appears (81-rhodep-ssc.rules), which
+# is ten seconds into boot because the ADSP is a remoteproc. WantedBy below is
+# only a backstop for the case where the device was already there.
+After=rhodep-ssc-populate.service
+Wants=rhodep-ssc-populate.service
+ConditionPathExists=/dev/fastrpc-adsp
+ConditionPathExists=/var/lib/rhodep-ssc/.populated
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Service]
+Type=exec
+ExecStartPre=/usr/local/sbin/rhodep-ssc-links
+ExecStart=/usr/local/sbin/rhodep-sscrpcd sensorspd
+# The registry parse takes about a second after the listener attaches.  Holding
+# the unit "activating" until a real sensor answers is what lets
+# iio-sensor-proxy simply order itself After= this one.
+ExecStartPost=/usr/local/sbin/rhodep-ssc-wait --timeout 45 accel ambient_light proximity
+
+# A failure here is an ADSP crash, not a hiccup: the PD takes the whole DSP with
+# it, audio included.  The stock adsprpcd retries every 100 ms, which turns one
+# crash into a reboot storm -- that is why this is not that daemon.  Restart,
+# but slowly, and give up rather than loop.
+Restart=on-failure
+RestartSec=15
+
+# Each libadsprpc client costs two of the five ADSP FastRPC sessions (one for
+# the domain, one for rpcmem, because there is no /dev/dma_heap/system on this
+# kernel).  Do not add more FastRPC daemons without checking that budget.
+
+[Install]
+WantedBy=multi-user.target

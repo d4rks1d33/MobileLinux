@@ -1,0 +1,24 @@
+id: node-red
+device_type: hub
+vendor: Node-RED
+family: node-red
+requires:
+  port: 1880
+actions:
+  - id: settings
+    label: "Dump editor settings (auth check)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:1880/red/settings.json"
+          save_as: settings
+
+  - id: flows
+    label: "Dump all flows (config leak)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:1880/flows"
+          save_as: flows

@@ -1,0 +1,95 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] nfc: nci: enumerate NFCEEs after init (secure element probe)
+
+Card emulation on the S3NRN4V is done by its embedded secure element, not by
+the host: an Android transit app provisions a MIFARE card into the eSE, the
+applet lives in the eSE's own secure storage and survives an OS change, and the
+eSE runs the MIFARE/Crypto1 exchange autonomously once the controller routes
+the RF field to it. Reaching that from Linux starts with learning the eSE's
+NFCEE id, which the controller reports in an NFCEE_DISCOVER_NTF.
+
+The generic NCI core already implements NFCEE_DISCOVER (the command, the
+response and the notification handler that records ndev->hci_dev->nfcee_id),
+but nothing ever issues the command -- the mainline flow only enumerates NFCEEs
+from a driver's discover_se op, and s3fwrn5 has none. Issue NFCEE_DISCOVER once
+at the end of nci_open_device, right after RF_DISCOVER_MAP, so the eSE is
+enumerated on every adapter bring-up. It is best-effort: the NFCC answers with
+num_nfcee = 0 if it has none, and a failure does not stop the adapter coming up.
+
+The S3NRN4V is an NCI 2.0 controller, and the mainline NFCEE code speaks NCI
+1.0 in two places that make an NCI 2.0 part reject the whole exchange:
+
+  - NCI 2.0 dropped the Discovery Action parameter from NFCEE_DISCOVER_CMD, so
+    the command carries no payload. Sending the 1.0 one-byte action to this
+    controller is answered with SYNTAX_ERROR (0x05). Send an empty command on
+    NCI 2.0.
+  - NCI 2.0 shortened NFCEE_DISCOVER_RSP to a single status byte (the NFCEE
+    count and details moved to per-NFCEE NFCEE_DISCOVER_NTFs). The mainline
+    response handler only understood the 1.0 two-byte form and treated the
+    reply as a protocol error. Accept the 2.0 form: on an OK status leave the
+    request pending so a following NFCEE_DISCOVER_NTF completes it.
+
+With both fixes the controller answers NFCEE_DISCOVER with status OK and reports
+its NFCEEs. On rhodep it enumerates two: an embedded secure element at NFCEE id
+0x83 whose only supported protocol is 0x80 (MIFARE) -- this is where the transit
+card lives -- and the UICC. This is the first step towards routing the MIFARE
+listen to the eSE so the provisioned card answers a reader (the remaining work
+is NFCEE_MODE_SET to enable 0x83 and a protocol route MIFARE -> 0x83 in the
+listen mode routing table, plus RF_DISCOVER in listen).
+--- a/net/nfc/nci/core.c	2026-09-01 04:01:08.370033003 +0000
++++ b/net/nfc/nci/core.c	2026-09-01 04:22:30.953203013 +0000
+@@ -530,6 +530,15 @@
+ 				   msecs_to_jiffies(NCI_INIT_TIMEOUT));
+ 	}
+ 
++	/* Enumerate the NFCEEs once the controller is initialised. Card
++	 * emulation on this hardware is done by the embedded secure element
++	 * (which holds a provisioned MIFARE transit card), so the first step is
++	 * to learn the eSE's NFCEE id from the resulting NFCEE_DISCOVER_NTF.
++	 * The NFCC returns num_nfcee = 0 if it has none. Best-effort: a failure
++	 * here must not stop the adapter from coming up. */
++	if (!rc)
++		nci_nfcee_discover(ndev, NCI_NFCEE_DISCOVERY_ACTION_ENABLE);
++
+ 	clear_bit(NCI_INIT, &ndev->flags);
+ 
+ 	if (!rc) {
+@@ -671,6 +680,14 @@
+ 	struct nci_nfcee_discover_cmd cmd;
+ 	__u8 action = (unsigned long)opt;
+ 
++	/* NCI 2.0 dropped the Discovery Action parameter: NFCEE_DISCOVER_CMD
++	 * carries no payload. Sending the 1.0 one-byte action to an NCI 2.0
++	 * controller (the S3NRN4V) is rejected with SYNTAX_ERROR (0x05). */
++	if (ndev->nci_ver & NCI_VER_2_MASK) {
++		nci_send_cmd(ndev, NCI_OP_NFCEE_DISCOVER_CMD, 0, NULL);
++		return;
++	}
++
+ 	cmd.discovery_action = action;
+ 
+ 	nci_send_cmd(ndev, NCI_OP_NFCEE_DISCOVER_CMD, 1, &cmd);
+--- a/net/nfc/nci/rsp.c	2026-09-01 04:08:59.403150013 +0000
++++ b/net/nfc/nci/rsp.c	2026-09-01 04:43:10.773343004 +0000
+@@ -246,6 +246,21 @@
+ {
+ 	const struct nci_nfcee_discover_rsp *discover_rsp;
+ 
++	/* NCI 2.0 shortened NFCEE_DISCOVER_RSP to a single status byte; the
++	 * number of NFCEEs is no longer carried here, each is reported by its
++	 * own NFCEE_DISCOVER_NTF. The S3NRN4V is an NCI 2.0 controller and
++	 * answers with one byte, which the 1.0 parsing below (len != 2) would
++	 * wrongly reject as a protocol error. Accept it: on OK, leave the
++	 * request pending so a following NFCEE_DISCOVER_NTF completes it, and
++	 * on error complete now. */
++	if (ndev->nci_ver & NCI_VER_2_MASK) {
++		u8 status = skb->len ? skb->data[0] : NCI_STATUS_NFCEE_PROTOCOL_ERROR;
++
++		if (status != NCI_STATUS_OK)
++			nci_req_complete(ndev, status);
++		return;
++	}
++
+ 	if (skb->len != 2) {
+ 		nci_req_complete(ndev, NCI_STATUS_NFCEE_PROTOCOL_ERROR);
+ 		return;

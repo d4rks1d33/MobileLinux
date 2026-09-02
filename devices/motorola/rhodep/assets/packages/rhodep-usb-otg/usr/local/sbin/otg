@@ -1,0 +1,106 @@
+#!/bin/sh
+# rhodep: control the single USB-C port. DEFAULT = charging.
+#
+# There is no mainline Type-C driver on this device, so VBUS is not enabled
+# automatically in host mode. The SGM41542 charger provides it in OTG boost
+# mode, and the mainline bq256xx driver only reads that state, it never sets it
+# and exposes no regulator for it -- checked: nothing under /sys/class/regulator
+# looks like an OTG/VBUS supply. So the bit is poked over i2c.
+#
+# In OTG (boost) mode the charger cannot sense an incoming charger
+# (reg 0x08 VBUS_STAT reads OTG), so OTG->charge is NOT automatic: turn OTG off
+# by hand (this command does it).
+#
+# Usage:
+#   otg on       -> host + VBUS boost (for USB WiFi/BT adapters). Stops charging.
+#   otg off      -> device + charging (DEFAULT).
+#   otg status   -> current state.
+
+CHG=0x3b ; REG_CFG=0x01 ; REG_STAT=0x08
+ROLE=/sys/class/usb_role/4e00000.usb-role-switch/role
+OTG_BIT=0x20
+
+# The i2c bus number is NOT fixed. It is assigned in probe order and moves
+# whenever the set of controllers changes: adding the camera's two CCI buses
+# pushed the charger from bus 0 to bus 3, and it shifts again between boots.
+# This script used to hardcode bus 0, so after the camera work every read
+# returned nothing, `otg on` set the USB role but never the OTG bit, and it
+# printed success anyway -- the adapter simply never powered up. Find the bus
+# from the driver binding instead, and refuse to pretend when it is not there.
+find_bus() {
+	for d in /sys/bus/i2c/drivers/bq256xx-charger/*-*; do
+		[ -e "$d" ] || continue
+		b=$(basename "$d")
+		echo "${b%%-*}"
+		return 0
+	done
+	# Driver not bound: fall back to the address, still without guessing a bus.
+	for d in /sys/bus/i2c/devices/*-003b; do
+		[ -e "$d" ] || continue
+		b=$(basename "$d")
+		echo "${b%%-*}"
+		return 0
+	done
+	return 1
+}
+
+I2CBUS=$(find_bus) || {
+	echo "otg: cannot find the SGM41542 charger on any i2c bus." >&2
+	echo "otg: is bq256xx-charger loaded? (ls /sys/bus/i2c/drivers/bq256xx-charger)" >&2
+	exit 1
+}
+
+g() { i2cget -f -y "$I2CBUS" $CHG "$1" 2>/dev/null; }
+s() { i2cset -f -y "$I2CBUS" $CHG "$1" "$2" 2>/dev/null; }
+
+read_cfg() {
+	cur=$(g $REG_CFG)
+	if [ -z "$cur" ]; then
+		echo "otg: cannot read the charger at bus $I2CBUS addr $CHG" >&2
+		exit 1
+	fi
+	echo "$cur"
+}
+
+case "$1" in
+  on|host)
+	echo host > "$ROLE" || exit 1
+	cur=$(read_cfg) || exit 1
+	s $REG_CFG "$(printf 0x%02x $((cur | OTG_BIT)))"
+	new=$(read_cfg) || exit 1
+	if [ $((new & OTG_BIT)) -eq 0 ]; then
+		echo "otg: wrote the OTG bit but it did not stick (reg01=$new)" >&2
+		exit 1
+	fi
+	echo "OTG ON (host, VBUS boost). Not charging until 'otg off'."
+	# Give the adapter a moment and say whether anything actually appeared,
+	# so a silent failure cannot look like success.
+	sleep 2
+	n=$(lsusb 2>/dev/null | grep -vc "root hub")
+	if [ "${n:-0}" -gt 0 ]; then
+		echo "  $n USB device(s) enumerated:"
+		lsusb 2>/dev/null | grep -v "root hub" | sed 's/^/    /'
+	else
+		echo "  no USB device enumerated yet (nothing plugged in, or give it a few seconds)"
+	fi
+	;;
+  off|device|charge)
+	cur=$(read_cfg) || exit 1
+	s $REG_CFG "$(printf 0x%02x $((cur & ~OTG_BIT)))"
+	echo device > "$ROLE"
+	echo "OTG OFF (device, charging enabled)."
+	;;
+  status|"")
+	r=$(cat "$ROLE" 2>/dev/null)
+	c=$(g $REG_CFG); st=$(g $REG_STAT)
+	otg=no
+	[ -n "$c" ] && [ $((c & OTG_BIT)) -ne 0 ] && otg=yes
+	chg=$(cat /sys/class/power_supply/bq256xx-charger/status 2>/dev/null)
+	cap=$(cat /sys/class/power_supply/cw2217-battery/capacity 2>/dev/null)
+	echo "role=$r  OTG=$otg  charger=$chg  bat=${cap}%  (i2c bus $I2CBUS, reg01=${c:-unreadable} reg08=${st:-unreadable})"
+	;;
+  *)
+	echo "usage: otg on|off|status"
+	exit 1
+	;;
+esac

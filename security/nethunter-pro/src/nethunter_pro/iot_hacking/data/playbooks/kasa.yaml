@@ -1,0 +1,26 @@
+id: kasa
+device_type: smart_plug
+vendor: TP-Link
+family: kasa
+requires:
+  port: 9999
+actions:
+  - id: dump-sysinfo
+    label: "Dump device info"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "Kasa UDP 9999 returns sysinfo when queried"
+      - run_tool:
+          tool: nmap
+          args: ["-sU", "-p", "9999", "--script=broadcast-tellstick-status,tplink-smartplug-discover", "{{target.ip}}"]
+          timeout: 20
+          save_as: nmap_out
+
+  - id: toggle-relay
+    label: "Toggle relay ON/OFF"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "This will physically toggle the outlet. Continue?"
+    steps:
+      - note: "Uses python-kasa via the module runtime"

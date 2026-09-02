@@ -1,0 +1,9 @@
+id: modem-at
+kind: diagnostic-tool
+layer: soc
+summary: AT console to the modem over glink (rpmsg)
+install: install.sh
+requires_root: true
+depends:
+  kernel_module: [rpmsg_ctrl]
+notes: works when ModemManager is down and ipa.ko is out of boot.

@@ -1,0 +1,88 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] power: supply: bq256xx: reset the part before configuring it
+
+The regmap is created with a full cache seeded from the static power-on
+defaults, and everything except the input current limit and the status
+block is cached:
+
+	.reg_defaults	= bq2560x_reg_defs,
+	.cache_type	= REGCACHE_FLAT,
+	.volatile_reg	= bq256xx_is_volatile_reg,
+
+so regmap_update_bits() decides whether a write is needed by comparing
+against those defaults instead of against what the part actually holds.
+The driver therefore assumes the charger is at power-on state when it
+probes. That is usually true, but not always.
+
+On a Motorola Moto G82 5G the Android bootloader leaves the charger with
+charging disabled and the watchdog off, so the state survives into Linux.
+The consequences are silent:
+
+  - bq25601 defaults say CHG_CONFIG is set, so an update_bits() that tries
+    to enable charging is dropped as a no-op and the part never charges.
+    Writing "Fast" to charge_type appears to succeed and changes nothing,
+    and reading it back returns "N/A" because the cache is untouched too.
+  - the same applies to any register whose real content happens to differ
+    from the assumed default.
+
+Reset the part at the start of bq256xx_hw_init() so the cache tells the
+truth, and enable charging explicitly rather than relying on the reset
+having done it.
+
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -12,6 +12,7 @@
+ #include <linux/regmap.h>
+ #include <linux/types.h>
+ #include <linux/usb/phy.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/moduleparam.h>
+ #include <linux/slab.h>
+@@ -1563,6 +1564,29 @@
+ 	int ret = 0;
+ 	int i;
+ 
++	/*
++	 * The register cache is seeded from the static power-on defaults, and
++	 * every register except the input current limit and the status block
++	 * is cached, so regmap_update_bits() decides whether to write based on
++	 * those defaults rather than on what the part actually holds. If a
++	 * bootloader or a previous OS left the charger configured, the cache
++	 * lies and writes are silently dropped as no-ops.
++	 *
++	 * Put the part back to its power-on state so the cache tells the
++	 * truth. This also undoes any charging-disabled state left behind,
++	 * since CHG_CONFIG is set at power-on.
++	 */
++	ret = regmap_update_bits(bq->regmap, BQ256XX_PART_INFORMATION,
++				 BQ256XX_REG_RST, BQ256XX_REG_RST);
++	if (ret)
++		return ret;
++
++	/*
++	 * The reset bit clears itself. No cache invalidation is needed: the
++	 * cache was seeded with the same power-on values the part now holds.
++	 */
++	usleep_range(1000, 2000);
++
+ 	for (i = 0; i < BQ256XX_NUM_WD_VAL; i++) {
+ 		if (bq->watchdog_timer == bq256xx_watchdog_time[i]) {
+ 			wd_reg_val = i;
+@@ -1645,6 +1669,16 @@
+ 			return ret;
+ 	}
+ 
++	/*
++	 * Charging is enabled at power-on, but be explicit: the reset above is
++	 * the only thing keeping this true, and a part that comes up with
++	 * charging disabled would otherwise never charge.
++	 */
++	ret = bq->chip_info->bq256xx_set_charge_type(bq,
++						POWER_SUPPLY_CHARGE_TYPE_FAST);
++	if (ret)
++		return ret;
++
+ 	power_supply_put_battery_info(bq->charger, bat_info);
+ 
+ 	return 0;

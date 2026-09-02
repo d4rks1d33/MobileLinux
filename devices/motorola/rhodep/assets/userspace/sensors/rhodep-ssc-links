@@ -1,0 +1,49 @@
+#!/bin/sh
+# rhodep: the two symlinks that put the sensor tree where the ADSP looks for it.
+#
+# The paths are compiled into the ADSP firmware and cannot be changed:
+#   /vendor/etc/sensors/...
+#   /mnt/vendor/persist/sensors/...
+# so the content lives in /var/lib/rhodep-ssc and is reached through symlinks.
+#
+# Separate from rhodep-ssc-populate because this part has to be re-checked on
+# every boot (/mnt is on the rootfs, but a stray rm or a rootfs reinstall would
+# lose the links silently and the only symptom would be no sensors).
+set -e
+
+ROOT=/var/lib/rhodep-ssc
+
+if [ -L /vendor ]; then
+	:
+elif [ -e /vendor ]; then
+	echo "rhodep-ssc: /vendor exists and is not our symlink, refusing" >&2
+	exit 1
+else
+	ln -s "$ROOT/vendor" /vendor
+	echo "rhodep-ssc: created /vendor -> $ROOT/vendor"
+fi
+
+mkdir -p /mnt/vendor
+if [ ! -e /mnt/vendor/persist ]; then
+	ln -s "$ROOT/persist" /mnt/vendor/persist
+	echo "rhodep-ssc: created /mnt/vendor/persist -> $ROOT/persist"
+fi
+
+# Where apps_std looks for loadable DSP skels (DEFAULT_DSP_SEARCH_PATHS on
+# Linux builds of libadsprpc).  Empty here, but its absence produces a stream
+# of confusing "failed for /usr/lib/rfsa/adsp/..." lines in the trace.
+mkdir -p /usr/lib/rfsa/adsp
+
+# The FastRPC libraries are protected as real files, but their soname symlinks
+# are not: restoring a symlink from a content snapshot would turn it into a copy
+# of the library. ldconfig normally makes them; do it here so that a boot after
+# something removed them still works, since the daemon dlopens by soname.
+for lib in libadsprpc libadsp_default_listener; do
+	real=/usr/local/lib/$lib.so.1.0.0
+	[ -f "$real" ] || continue
+	if [ ! -e /usr/local/lib/$lib.so.1 ]; then
+		ln -sf "$real" /usr/local/lib/$lib.so.1
+		echo "rhodep-ssc: recreated $lib.so.1"
+		ldconfig 2>/dev/null || true
+	fi
+done

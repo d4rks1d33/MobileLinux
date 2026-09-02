@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A symbolic car icon for the CARsenal (CAN bus) module. Single-colour,
+     16x16, following the GNOME symbolic icon conventions so it recolours with
+     the theme like every other module icon in the app. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="m 4.5,3 c -0.62,0 -1.16,0.4 -1.36,0.98 L 2.3,6.04 C 1.53,6.2 1,6.86 1,7.64 V 11 c 0,0.28 0.22,0.5 0.5,0.5 H 2 v 0.5 c 0,0.55 0.45,1 1,1 0.55,0 1,-0.45 1,-1 v -0.5 h 8 v 0.5 c 0,0.55 0.45,1 1,1 0.55,0 1,-0.45 1,-1 v -0.5 h 0.5 C 14.78,11.5 15,11.28 15,11 V 7.64 C 15,6.86 14.47,6.2 13.7,6.04 L 12.86,3.98 C 12.66,3.4 12.12,3 11.5,3 Z m 0,1 h 7 c 0.22,0 0.4,0.13 0.47,0.33 L 12.6,6 H 3.4 L 4.03,4.33 C 4.1,4.13 4.28,4 4.5,4 Z M 3.5,7.5 c 0.55,0 1,0.45 1,1 0,0.55 -0.45,1 -1,1 -0.55,0 -1,-0.45 -1,-1 0,-0.55 0.45,-1 1,-1 z m 9,0 c 0.55,0 1,0.45 1,1 0,0.55 -0.45,1 -1,1 -0.55,0 -1,-0.45 -1,-1 0,-0.55 0.45,-1 1,-1 z"/>
+</svg>

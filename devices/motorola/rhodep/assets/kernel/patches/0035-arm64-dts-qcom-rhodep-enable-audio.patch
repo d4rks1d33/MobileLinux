@@ -1,0 +1,291 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: enable audio
+
+Enable the LPASS macros, both soundwire masters and the LPI pin
+controller, and describe the WCD9370 codec and the sound card.
+
+The codec, its supplies and its reset line come from the downstream device
+tree for this device (blair-rhodep-common-overlay.dtsi pulls in
+rhodep-audio-wcd9370-aw882xx-acf-dual-overlay.dtsi): a WCD9370 with the
+TX side at soundwire address 0x01170223 and the RX side at 0x01170224 (so
+device 3 on the VA/TX master and device 4 on the RX master), reset on
+TLMM gpio83, and four DMICs.
+
+This gets the headset path (HPHL/HPHR out, AMIC in) and the digital
+microphones. The loudspeaker and the earpiece are NOT covered: both are
+Awinic smart amplifiers on i2c (qupv3_se10_i2c, 0x34 for the speaker and
+0x35 for the earpiece) driven with a vendor specific ADSP topology, and
+mainline has no driver for that family yet.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -247,6 +247,164 @@
+ 		enable-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+ 		vcc-supply = <&vph_pwr>;
+ 	};
++
++	wcd9370: audio-codec {
++		compatible = "qcom,wcd9370-codec";
++
++		pinctrl-0 = <&wcd_reset_n>;
++		pinctrl-names = "default";
++		reset-gpios = <&tlmm 83 GPIO_ACTIVE_LOW>;
++
++		/*
++		 * Downstream (blair-audio-wcd9370-...-overlay.dtsi):
++		 * cdc-vdd-rxtx and cdc-vddpx come from L11A, cdc-vdd-buck from
++		 * L14A, both at 1.8 V. The mic bias rail is BOB, which the
++		 * mainline RPM regulator driver does not expose for the pm6125,
++		 * so VPH is used instead: it is what BOB boosts from, and the
++		 * actual bias voltage is set by the qcom,micbias*-microvolt
++		 * properties below.
++		 */
++		vdd-rxtx-supply = <&pm6125_l11>;
++		vdd-px-supply = <&pm6125_l11>;
++		vdd-buck-supply = <&pm6125_l14>;
++		vdd-mic-bias-supply = <&vph_pwr>;
++
++		qcom,micbias1-microvolt = <2800000>;
++		qcom,micbias2-microvolt = <2800000>;
++		qcom,micbias3-microvolt = <2800000>;
++
++		qcom,rx-device = <&wcd937x_rx>;
++		qcom,tx-device = <&wcd937x_tx>;
++
++		#sound-dai-cells = <1>;
++	};
++
++	/*
++	 * Dummy I2S sink, so that Secondary MI2S can be exercised as a backend
++	 * without an amplifier driver. The loudspeaker amplifiers hang off this
++	 * port (downstream aw-rx-port-id = <0x1002> is
++	 * AFE_PORT_ID_SECONDARY_MI2S_RX), and this path does NOT go through the
++	 * codec DMA, which is what makes it useful: it tells apart a CDC DMA
++	 * problem from a general ASM/AFE one.
++	 */
++	spdif_dummy: spdif-dummy {
++		compatible = "linux,spdif-dit";
++		#sound-dai-cells = <0>;
++	};
++
++	sound {
++		compatible = "motorola,rhodep-sndcard";
++		model = "Motorola-Moto-G82-5G";
++		pinctrl-0 = <&lpi_i2s2_active>;
++		pinctrl-names = "default";
++
++		audio-routing = "IN1_HPHL", "HPHL_OUT",
++				"IN2_HPHR", "HPHR_OUT",
++				"AMIC1", "MIC BIAS1",
++				"AMIC2", "MIC BIAS2",
++				"AMIC3", "MIC BIAS3",
++				"TX SWR_INPUT1", "ADC1_OUTPUT",
++				"TX SWR_INPUT0", "ADC2_OUTPUT",
++				"VA DMIC0", "VA MIC BIAS1",
++				"VA DMIC1", "VA MIC BIAS1",
++				"VA DMIC2", "VA MIC BIAS3",
++				"VA DMIC3", "VA MIC BIAS3";
++
++		mm1-dai-link {
++			link-name = "MultiMedia1";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++			};
++		};
++
++		mm2-dai-link {
++			link-name = "MultiMedia2";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++			};
++		};
++
++		mm3-dai-link {
++			link-name = "MultiMedia3";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++			};
++		};
++
++		/*
++		 * RX_CODEC_DMA_RX_1 into the RX macro's AIF2, not RX_0 into AIF1.
++		 * This is the pairing the only tested description of this LPASS
++		 * generation uses (the qrb4210-rb2 series on sm6115: "RX1 from
++		 * DSP is connected to rxmacro"), and RX_0/AIF1 makes the ADSP
++		 * hang the SoC as soon as the stream is triggered.
++		 */
++		wcd-playback-dai-link {
++			link-name = "WCD Playback";
++
++			cpu {
++				sound-dai = <&q6afedai RX_CODEC_DMA_RX_1>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&wcd9370 0>, <&swr1 0>, <&rxmacro 1>;
++			};
++		};
++
++		wcd-capture-dai-link {
++			link-name = "WCD Capture";
++
++			cpu {
++				sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&wcd9370 1>, <&swr0 0>, <&txmacro 0>;
++			};
++		};
++
++		mi2s-playback-dai-link {
++			link-name = "Secondary MI2S Playback";
++
++			cpu {
++				sound-dai = <&q6afedai SECONDARY_MI2S_RX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&speaker_amp>, <&earpiece_amp>;
++			};
++		};
++
++		va-dai-link {
++			link-name = "VA Capture";
++
++			cpu {
++				sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&vamacro 0>;
++			};
++		};
++	};
+ };
+ 
+ &gpi_dma0 {
+@@ -703,6 +859,14 @@
+ &tlmm {
+ 	gpio-reserved-ranges = <13 4>;
+ 
++	wcd_reset_n: wcd-reset-n-state {
++		pins = "gpio83";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-disable;
++	};
++
+ 	panel_vci_default: panel-vci-default-state {
+ 		pins = "gpio46";
+ 		function = "gpio";
+@@ -1199,3 +1363,89 @@
+ 		qcom,gsi-loader = "self";
+ 	};
+ };
++
++&lpass_tlmm {
++	status = "okay";
++};
++
++&rxmacro {
++	status = "okay";
++};
++
++&txmacro {
++	status = "okay";
++};
++
++&vamacro {
++	pinctrl-0 = <&dmic01_active>, <&dmic23_active>;
++	pinctrl-names = "default";
++	qcom,dmic-sample-rate = <600000>;
++	status = "okay";
++};
++
++&swr0 {
++	status = "okay";
++
++	/* WCD9370 TX side: downstream swr-phy-dev-addr 0x0A 0x01170223 */
++	wcd937x_tx: codec@0,3 {
++		compatible = "sdw20217010a00";
++		reg = <0 3>;
++		qcom,tx-port-mapping = <1 1 2 3>;
++	};
++};
++
++&swr1 {
++	status = "okay";
++
++	/* WCD9370 RX side: downstream swr-phy-dev-addr 0x0A 0x01170224 */
++	wcd937x_rx: codec@0,4 {
++		compatible = "sdw20217010a00";
++		reg = <0 4>;
++		qcom,rx-port-mapping = <1 2 3 4 5>;
++	};
++};
++
++/*
++ * The two Awinic smart amplifiers live here (downstream qupv3_se10_i2c, 0x34
++ * loudspeaker and 0x35 earpiece). Enabled without any codec node so the chip id
++ * can be read from userspace with i2cget and the right mainline driver picked.
++ */
++&i2c10 {
++	status = "okay";
++
++	/*
++	 * The two AW88261 amplifiers, loudspeaker at 0x34 and earpiece at 0x35,
++	 * matching "sound-channel" 0 and 1 downstream. They are controlled over
++	 * I2C only; the audio reaches them over Secondary MI2S, which is why
++	 * downstream sets "aw-rx-port-id = <0x1002>" on both.
++	 *
++	 * Both need a name prefix, otherwise the two instances register
++	 * identical control and widget names and the card fails to probe.
++	 */
++	speaker_amp: audio-codec@34 {
++		compatible = "awinic,aw88261";
++		reg = <0x34>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Speaker";
++	};
++
++	earpiece_amp: audio-codec@35 {
++		compatible = "awinic,aw88261";
++		reg = <0x35>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Earpiece";
++	};
++};
++
++/*
++ * Secondary MI2S carries the loudspeaker amplifiers. Downstream sets
++ * "qcom,msm-mi2s-lines = <1>" on dai_mi2s1_rx, which is a bitmask, so it means
++ * SD line 0; mainline takes line indices instead, hence <0>. Without this the
++ * port has no data line and q6afe rejects the prepare with -EINVAL.
++ */
++&q6afedai {
++	dai@18 {
++		reg = <SECONDARY_MI2S_RX>;
++		qcom,sd-lines = <0>;
++	};
++};

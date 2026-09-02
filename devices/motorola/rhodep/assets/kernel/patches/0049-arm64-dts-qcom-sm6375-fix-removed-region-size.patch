@@ -1,0 +1,49 @@
+From: rhodep port <none@example.com>
+Date: Tue, 18 Aug 2026 21:00:00 -0300
+Subject: [PATCH] arm64: dts: qcom: sm6375: correct the size of the removed
+ region
+
+The removed region on SM6375 is 0x7100000, not 0x5100000. Linux is
+currently handing 32 MB of firmware-owned memory (0xc5100000-0xc7100000)
+out as ordinary RAM.
+
+The value in mainline matches shima and yupik. It does not match this
+SoC. From the vendor tree (Motorola-SM6375-Devs/android_kernel_motorola_sm6375,
+branch fifteen), arch/arm64/boot/dts/vendor/qcom:
+
+    blair.dtsi   (SM6375, this SoC)  reg = <0x0 0xc0000000 0x0 0x7100000>
+    holi.dtsi    (sibling)           reg = <0x0 0xc0000000 0x0 0x7100000>
+    shima.dtsi                       reg = <0x0 0xc0000000 0x0 0x5100000>
+    yupik.dtsi                       reg = <0x0 0xc0000000 0x0 0x5100000>
+
+rhodep is a blair board: blair-moto-rhodep-base.dts includes blair.dtsi.
+
+Nothing in the device tree references removed_mem; it is a pure no-map
+reservation for the secure firmware, so an undersized reservation
+produces no probe failure, no bus abort and no log message. It gives
+Linux 32 MB that TrustZone believes it owns, and the corruption that
+follows is silent by construction.
+
+Every other fixed reservation in mainline's sm6375.dtsi was checked
+against blair.dtsi and they all match: hyp, xbl_aop, reserved_xbl_uefi,
+smem, fw, pil_wlan, pil_adsp, pil_cdsp, pil_video, pil_ipa_fw,
+pil_ipa_gsi, pil_gpu_micro_code, pil_mpss_wlan and the splash/dfps pair.
+This is the only one that differs.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+ arch/arm64/boot/dts/qcom/sm6375.dtsi | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6375.dtsi b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -612,7 +612,7 @@
+ 		};
+ 
+ 		removed_mem: removed@c0000000 {
+-			reg = <0 0xc0000000 0 0x5100000>;
++			reg = <0 0xc0000000 0 0x7100000>;
+ 			no-map;
+ 		};
+ 

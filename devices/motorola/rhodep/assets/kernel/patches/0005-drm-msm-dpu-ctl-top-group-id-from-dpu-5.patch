@@ -1,0 +1,29 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/msm/dpu: set CTL_TOP group id from DPU 5.0
+
+The vendor driver for this SoC appears not to write bits 31:28 of CTL_TOP
+(sde_hw_ctl.c starts from mode_sel = 0 and only ORs BIT(17) for cmd mode),
+so this was initially assumed to be wrong and a candidate for removal.
+
+Testing on the device proved otherwise: a build without this change is
+clearly worse (the whole screen is corrupted during early boot), so the
+group id does need to be programmed on DPU 6.9. Motorola presumably sets
+it somewhere that was not found in the downstream tree.
+
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+@@ -581,8 +581,13 @@
+ 	/* CTL_TOP[31:28] carries group_id to collate CTL paths
+ 	 * per VM. Explicitly disable it until VM support is
+ 	 * added in SW. Power on reset value is not disable.
++	 *
++	 * The register and the field have existed since DPU 5.0 (the targets
++	 * with CTL_CFG_VERSION_1_0_0), and the downstream driver writes 0xF on
++	 * all of them. Leaving it at 0 groups this CTL with group 0, so it can
++	 * end up waiting on other CTL paths and never complete the frame.
+ 	 */
+-	if (ctx->mdss_ver->core_major_ver >= 7)
++	if (ctx->mdss_ver->core_major_ver >= 5)
+ 		mode_sel = CTL_DEFAULT_GROUP_ID  << 28;
+ 
+ 	if (cfg->intf_mode_sel == DPU_CTL_MODE_SEL_CMD)

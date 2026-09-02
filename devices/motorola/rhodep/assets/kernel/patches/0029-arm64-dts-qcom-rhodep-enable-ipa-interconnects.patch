@@ -1,0 +1,57 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: wire IPA interconnects and enable it
+
+Now that an SM6375 interconnect provider exists, give the IPA its NoC
+bandwidth paths and enable the node. The two paths match the mainline
+ipa_data_v4_11 power data ("memory" and "config"):
+
+  memory: MASTER_IPA (sys_noc) -> SLAVE_EBI (bimc, DDR)
+  config: MASTER_AMPSS_M0 (bimc) -> SLAVE_IPA_CFG (config_noc)
+
+Also point the "qcom,sm6375-ipa" compatible back at the standard
+ipa_data_v4_11 (which has interconnect_count = 2), instead of the
+interconnect-less ipa_data_v4_11_sm6375 variant that was a stop-gap for
+when no provider existed. With the buses voted up the GSI hardware can be
+configured without resetting the SoC, enabling mobile data.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -17,6 +17,7 @@
+ #include <dt-bindings/power/qcom-rpmpd.h>
+ #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
+ #include <dt-bindings/clock/qcom,sm6375-dispcc.h>
++#include <dt-bindings/interconnect/qcom,sm6375.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/thermal/thermal.h>
+ #include "sm6375.dtsi"
+@@ -1181,13 +1182,11 @@
+ 
+ 		qcom,gsi-loader = "modem";
+ 
+-		/*
+-		 * Kept disabled: mainline has no SM6375 interconnect provider,
+-		 * so the IPA has no NoC bandwidth votes. The driver probes with
+-		 * interconnect_count = 0, but configuring the GSI hardware
+-		 * without the buses voted up resets the SoC. Flip to "okay"
+-		 * once an SM6375 interconnect driver exists.
+-		 */
+-		status = "disabled";
++		interconnects = <&system_noc MASTER_IPA &bimc SLAVE_EBI>,
++				<&bimc MASTER_AMPSS_M0 &config_noc SLAVE_IPA_CFG>;
++		interconnect-names = "memory",
++				     "config";
++
++		status = "okay";
+ 	};
+ };
+--- a/drivers/net/ipa/ipa_main.c
++++ b/drivers/net/ipa/ipa_main.c
+@@ -659,7 +659,7 @@
+ 	},
+ 	{
+ 		.compatible	= "qcom,sm6375-ipa",
+-		.data		= &ipa_data_v4_11_sm6375,
++		.data		= &ipa_data_v4_11,
+ 	},
+ 	{
+ 		.compatible	= "qcom,sm8350-ipa",

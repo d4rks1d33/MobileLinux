@@ -1,0 +1,23 @@
+id: tuya
+device_type: smart_plug
+vendor: Tuya
+family: tuya
+requires: {}
+actions:
+  - id: broadcast-info
+    label: "Extract broadcast fingerprint"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "Tuya devices broadcast gwId + productKey on UDP 6666/6667"
+      - note: "LocalKey is NOT included -- pull it from the cloud with tinytuya"
+
+  - id: nmap-tinytuya
+    label: "Nmap scan Tuya-known ports"
+    category: recon
+    dangerous: false
+    steps:
+      - run_tool:
+          tool: nmap
+          args: ["-p", "6666,6667,6668", "-sU", "-sV", "{{target.ip}}"]
+          timeout: 60

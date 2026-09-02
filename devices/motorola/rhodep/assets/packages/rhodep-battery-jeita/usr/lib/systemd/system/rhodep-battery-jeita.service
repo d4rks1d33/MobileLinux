@@ -1,0 +1,13 @@
+[Unit]
+Description=Cold-side battery protection for rhodep (hot side is in the kernel)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rhodep-battery-jeita
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

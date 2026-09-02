@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Does deep cpuidle actually save anything? Measure it properly.
+
+Patch 0061 turned on PSCI power collapse. Its cost is measured: five late
+frames and a 33.6 ms worst case against none and 16.9 ms with it off. Its
+benefit never was. An earlier attempt read 67.5, 71.1 and 72.1 mA across an
+A/B/A and the noise was +-30 to 43 mA, which settles nothing.
+
+Two things make that hard on this phone. The cw2217 exposes no coulomb
+counter, only capacity in whole percent -- about 50 mAh a step, so a 20 minute
+window cannot resolve it -- and current_now is noisy, swinging 245 to 471 mA
+over ten seconds. So: average current over long blocks, and alternate the
+conditions so any drift in the battery falls on both.
+
+The screen has to be off. It draws more than the entire difference being
+looked for. Suspend has to be blocked as well, because a suspended SoC is not
+running cpuidle at all: the states this measures are the ones entered while
+awake and idle. That is the honest scope of the result, and how much it is
+worth depends on how much of the day the phone spends awake with the screen
+off.
+
+usage: rhodep-idle-power-ab [minutes_per_block]
+"""
+
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+BATT = "/sys/class/power_supply/cw2217-battery"
+DPMS = "/sys/class/drm/card0/card0-DSI-1/dpms"
+CPUIDLE = "/sys/devices/system/cpu"
+SAMPLE_S = 1.0
+# state0 is WFI and always stays; these are the two that patch 0061 unlocked.
+DEEP = ("state1", "state2")
+
+
+def read(path, default=""):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def set_deep_idle(enabled: bool):
+    val = "0" if enabled else "1"
+    for cpu in range(8):
+        for st in DEEP:
+            p = "%s/cpu%d/cpuidle/%s/disable" % (CPUIDLE, cpu, st)
+            try:
+                with open(p, "w") as fh:
+                    fh.write(val)
+            except OSError:
+                pass
+
+
+def deep_usage():
+    """How many times the deep states were entered, summed over the cpus."""
+    total = 0
+    for cpu in range(8):
+        for st in DEEP:
+            v = read("%s/cpu%d/cpuidle/%s/usage" % (CPUIDLE, cpu, st), "0")
+            total += int(v or 0)
+    return total
+
+
+def screen_is_off():
+    if read(DPMS) not in ("", "On"):
+        return True
+    # Some stacks leave dpms reading On and just black the panel.
+    return read("/sys/class/backlight/5e94000.dsi.0/bl_power", "0") != "0"
+
+
+def block(label, minutes, enabled):
+    set_deep_idle(enabled)
+    time.sleep(3)
+
+    u0 = deep_usage()
+    samples = []
+    want = int(minutes * 60 / SAMPLE_S)
+    paused = 0
+
+    # Collect a fixed number of screen-off samples rather than running for a
+    # fixed time. Somebody will pick the phone up mid-run, and the panel draws
+    # several times the whole difference being measured, so a block that just
+    # waited out the clock would be ruined by one unlock. This waits instead.
+    while len(samples) < want:
+        if not screen_is_off():
+            if paused == 0:
+                print("      (pantalla encendida, pausado en %d/%d muestras)"
+                      % (len(samples), want), flush=True)
+            paused += 1
+            # Anything entered while the screen was on is not comparable.
+            u0 = deep_usage() - (u0 - u0)
+            time.sleep(2)
+            continue
+        if paused:
+            print("      (reanudado tras %d s)" % (paused * 2), flush=True)
+            paused = 0
+            u0 = deep_usage()
+            samples.clear()
+            time.sleep(20)  # let the panel-off transient pass
+            continue
+        v = read(os.path.join(BATT, "current_now"))
+        if v:
+            # microamps, negative while discharging
+            samples.append(abs(int(v)) / 1000.0)
+        time.sleep(SAMPLE_S)
+    u1 = deep_usage()
+
+    mean = statistics.mean(samples)
+    sd = statistics.stdev(samples) if len(samples) > 1 else 0.0
+    sem = sd / (len(samples) ** 0.5) if samples else 0.0
+    print(
+        "  %-14s %7.1f mA  +-%4.1f (sem)   n=%-5d entradas al estado profundo=%d"
+        % (label, mean, sem, len(samples), u1 - u0),
+        flush=True,
+    )
+    return mean, sem
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("correr como root", file=sys.stderr)
+        return 1
+    if read(os.path.join(BATT, "status")) != "Discharging":
+        print("el telefono esta enchufado; desenchufalo", file=sys.stderr)
+        return 1
+
+    minutes = float(sys.argv[1]) if len(sys.argv) > 1 else 12
+
+    inhibit = subprocess.Popen(
+        ["systemd-inhibit", "--what=idle:sleep", "--who=rhodep-idle-power-ab",
+         "--why=measurement", "--mode=block", "sleep", str(int(minutes * 60 * 4 + 600))]
+    )
+
+    try:
+        print(">>> apaga la pantalla con el boton de encendido. Espero hasta 3 min.",
+              flush=True)
+        waited = 0
+        while not screen_is_off() and waited < 180:
+            time.sleep(5)
+            waited += 5
+        if not screen_is_off():
+            print("la pantalla sigue encendida; abortando", file=sys.stderr)
+            return 1
+
+        print(">>> pantalla apagada, suspension bloqueada. %g min por bloque, "
+              "cuatro bloques.\n" % minutes, flush=True)
+        time.sleep(30)  # let whatever the screen-off triggered settle
+
+        a1, e1 = block("A idle ON", minutes, True)
+        b1, f1 = block("B idle OFF", minutes, False)
+        a2, e2 = block("A idle ON", minutes, True)
+        b2, f2 = block("B idle OFF", minutes, False)
+    finally:
+        inhibit.terminate()
+        set_deep_idle(True)
+
+    on = (a1 + a2) / 2
+    off = (b1 + b2) / 2
+    drift_a = abs(a1 - a2)
+    drift_b = abs(b1 - b2)
+    # The repeat of each condition is the honest noise floor: if the two A
+    # blocks disagree by more than the A-to-B gap, there is no result here.
+    noise = max(drift_a, drift_b)
+
+    print()
+    print("=" * 64)
+    print("  idle profundo ON  : %.1f mA" % on)
+    print("  idle profundo OFF : %.1f mA" % off)
+    print("  diferencia        : %.1f mA  (%.1f%%)" % (off - on, 100.0 * (off - on) / on if on else 0))
+    print("  deriva entre repeticiones: A %.1f mA, B %.1f mA" % (drift_a, drift_b))
+    print("=" * 64)
+    if abs(off - on) <= noise:
+        print("  NO CONCLUYENTE: la diferencia no supera la deriva entre")
+        print("  repeticiones de la misma condicion.")
+    else:
+        print("  El ahorro supera la deriva. 0061 %s." %
+              ("sirve" if off > on else "cuesta bateria, no la ahorra"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

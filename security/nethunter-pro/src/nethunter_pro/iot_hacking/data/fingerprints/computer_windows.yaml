@@ -1,0 +1,26 @@
+id: computer-windows
+version: 1
+device_type: computer
+vendor: Microsoft
+family: windows-pc
+threshold: 60
+matchers:
+  - name: nmap-os-windows
+    type: nmap_os
+    os_regex: 'Windows|Microsoft'
+    confidence: 75
+    extract:
+      os_version: 'Windows[^,]*'
+  - name: port-445-smb
+    type: port
+    port: 445
+    confidence: 25
+  - name: port-139-netbios
+    type: port
+    port: 139
+    confidence: 20
+  - name: port-3389-rdp
+    type: port
+    port: 3389
+    confidence: 30
+metadata: {}

@@ -1,0 +1,15 @@
+Package: rhodep-gpu-opencl
+Version: 4
+Architecture: arm64
+Maintainer: rhodep port
+Depends: mesa-opencl-icd, clinfo
+Description: OpenCL on the Adreno 619 via rusticl for Motorola rhodep
+ Mesa's rusticl provides OpenCL on freedreno, but it ships disabled and only
+ turns on when RUSTICL_ENABLE names the driver. Without it clinfo reports zero
+ platforms and consumers see no GPU. This sets RUSTICL_ENABLE=freedreno
+ system-wide so OpenCL consumers see FD619, and the GPU runs kernels correctly
+ (verified with pyopencl).
+ .
+ Note: hashcat specifically fails with CL_INVALID_WORK_ITEM_SIZE on its own
+ kernels even at local size 1, a hashcat<->rusticl/freedreno issue, not a
+ configuration one - plain OpenCL kernels run fine. Other OpenCL loads work.

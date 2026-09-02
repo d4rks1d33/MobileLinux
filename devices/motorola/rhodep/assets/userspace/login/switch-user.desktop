@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Switch user
+Name[es]=Cambiar usuario
+Comment=Show the GDM user chooser without closing this session
+Comment[es]=Muestra el selector de usuarios de GDM sin cerrar la sesion
+Exec=/usr/local/bin/switch-user
+Icon=system-users-symbolic
+Terminal=false
+Categories=System;
+Keywords=user;switch;login;usuario;
+X-Purism-FormFactor=Workstation;Mobile;
+X-KDE-FormFactor=desktop;tablet;handset;

@@ -1,0 +1,24 @@
+id: airplay
+version: 1
+device_type: speaker
+vendor: Apple / AirPlay
+family: airplay
+threshold: 60
+matchers:
+  - name: mdns-airplay
+    type: mdns
+    mdns_type: _airplay._tcp
+    confidence: 80
+    extract:
+      deviceid: 'deviceid=([0-9A-F:]+)'
+      model: 'model=([^"]+?)(?:"|$)'
+  - name: mdns-raop
+    type: mdns
+    mdns_type: _raop._tcp
+    confidence: 60
+  - name: port-7000
+    type: port
+    port: 7000
+    confidence: 20
+metadata:
+  playbook: airplay

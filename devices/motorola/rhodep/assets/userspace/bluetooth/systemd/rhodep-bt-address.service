@@ -1,0 +1,15 @@
+[Unit]
+Description=Program the real Bluetooth address before bluetoothd starts
+Documentation=file:/usr/share/doc/rhodep-bluetooth/README.md
+After=sys-subsystem-bluetooth-devices-hci0.device
+Wants=sys-subsystem-bluetooth-devices-hci0.device
+Before=bluetooth.service
+ConditionPathExists=/usr/bin/btmgmt
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-bt-address
+
+[Install]
+WantedBy=bluetooth.service

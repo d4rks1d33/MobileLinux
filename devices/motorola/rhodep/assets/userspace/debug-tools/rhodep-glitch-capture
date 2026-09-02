@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Capture DSI errors while a person drives the screen by hand.
+
+The synthetic repaint load in rhodep-repaint-bench measures dropped frames
+well, but across sixteen runs it raised almost no DSI errors: full screen
+damage, a 320 px strip, with and without the backlight moving, all sat at
+zero. The artefact needs the real compositor path with real touch input, so
+the honest instrument is one that watches while someone reproduces it.
+
+Records the backlight at 20 Hz for the whole session, then lines the DSI
+errors up against it, so each error can be attributed to a moment when the
+brightness was moving or not. Also prints the machine state it ran under, so
+two captures can be compared later without relying on memory.
+
+Requires the diagnostic kernel patch (0064) for the register values. Without
+it the error count still works, read from dsi_err_worker instead.
+
+usage: rhodep-glitch-capture [seconds] [label]
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+SAMPLE_HZ = 20.0
+BL = "/sys/class/backlight/5e94000.dsi.0/brightness"
+# A backlight write and the frame it disturbs are not simultaneous; this is how
+# far either side of a sample an error still counts as "while it was moving".
+NEAR_S = 0.30
+
+
+def read(path, default=""):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def uptime():
+    """Seconds on the printk clock.
+
+    Deliberately not /proc/uptime. That counts BOOTTIME, which includes time
+    spent suspended, while printk stamps its lines with a clock that freezes
+    across suspend. This phone suspends on idle, so the two drift apart by the
+    length of every suspend, and comparing a dmesg stamp against an uptime
+    reading silently discards real events. An earlier version of this script
+    did exactly that and reported zero errors during a session that had twenty.
+    """
+    return time.monotonic()
+
+
+def dmesg():
+    try:
+        out = subprocess.run(
+            ["dmesg"], capture_output=True, text=True, check=True
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+    return out
+
+
+def state_summary():
+    idle = []
+    base = "/sys/devices/system/cpu/cpu0/cpuidle"
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            if not name.startswith("state"):
+                continue
+            label = read(os.path.join(base, name, "name"))
+            off = read(os.path.join(base, name, "disable")) == "1"
+            idle.append("%s=%s" % (label, "off" if off else "on"))
+
+    gpu = "/sys/class/devfreq/5900000.gpu"
+    return {
+        "kernel": read("/proc/sys/kernel/osrelease"),
+        "cpuidle": " ".join(idle) or "n/a",
+        "gpu_min": read(os.path.join(gpu, "min_freq"), "n/a"),
+        "brightness": read(BL, "n/a"),
+        "icc": "yes" if os.path.isdir("/sys/kernel/debug/interconnect") else "no",
+    }
+
+
+def main() -> int:
+    duration = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+    label = sys.argv[2] if len(sys.argv) > 2 else "capture"
+
+    if os.geteuid() != 0:
+        print("run as root, dmesg is restricted", file=sys.stderr)
+        return 1
+
+    st = state_summary()
+    print("condition: kernel=%s icc=%s gpu_min=%s" % (st["kernel"], st["icc"], st["gpu_min"]))
+    print("           cpuidle: %s" % st["cpuidle"])
+    print()
+
+    marker = "GLITCH-CAPTURE-%s-%d" % (label, int(time.time()))
+    try:
+        with open("/dev/kmsg", "w") as fh:
+            fh.write(marker + "\n")
+    except OSError:
+        pass
+
+    t0 = uptime()
+
+    # Anchor to the stamp the kernel itself gave the marker, so samples and log
+    # lines are on one clock even if the two drift.
+    t0_kernel = None
+    for _ in range(20):
+        for line in dmesg().splitlines():
+            if marker in line:
+                m = re.match(r"^\[\s*([0-9.]+)\]", line)
+                if m:
+                    t0_kernel = float(m.group(1))
+                break
+        if t0_kernel is not None:
+            break
+        time.sleep(0.05)
+    if t0_kernel is None:
+        print("no pude anclar el marcador en dmesg", file=sys.stderr)
+        return 1
+    print(">>> capturando %d s. Movete: desliza la lista, sube y baja el brillo." % duration)
+    print(">>> (Ctrl-C corta antes)")
+
+    samples = []
+    period = 1.0 / SAMPLE_HZ
+    try:
+        while True:
+            now = uptime()
+            if now - t0 >= duration:
+                break
+            samples.append((now, read(BL, "0")))
+            time.sleep(period)
+    except KeyboardInterrupt:
+        print("\n>>> cortado a mano")
+
+    t1 = uptime()
+    span = max(0.001, t1 - t0)
+
+    # Moments where the level actually moved, which is the part of the session
+    # that the artefact was reported against.
+    moving = []
+    for i in range(1, len(samples)):
+        if samples[i][1] != samples[i - 1][1]:
+            moving.append(samples[i][0])
+
+    log = dmesg()
+    if marker in log:
+        log = log.split(marker, 1)[1]
+
+    ts_re = re.compile(r"^\[\s*([0-9.]+)\]")
+    # One fault emits both a dsi-diag line and a dsi_err_worker line. Count the
+    # diagnostic one when the kernel carries patch 0064, and fall back to the
+    # worker line only when it does not, otherwise every error is counted twice.
+    has_diag = "dsi-diag" in log
+    key = "dsi-diag" if has_diag else "dsi_err_worker"
+
+    errors = []
+    for line in log.splitlines():
+        if key not in line:
+            continue
+        m = ts_re.match(line)
+        if not m:
+            continue
+        stamp = float(m.group(1))
+        if stamp < t0_kernel - 0.5:
+            continue
+        detail = line.split("dsi-diag:", 1)[1].strip() if "dsi-diag:" in line else "(no 0064)"
+        errors.append((stamp, detail))
+
+    # Samples are on the monotonic clock, log lines on the kernel's; shift one
+    # onto the other using the marker as the common origin.
+    moving_k = [t0_kernel + (m - t0) for m in moving]
+
+    near = 0
+    for stamp, _ in errors:
+        if any(abs(stamp - m) <= NEAR_S for m in moving_k):
+            near += 1
+
+    print()
+    print("=" * 62)
+    print("%-22s %s" % ("etiqueta", label))
+    print("%-22s %.1f s" % ("duracion", span))
+    print("%-22s %d" % ("errores DSI", len(errors)))
+    print("%-22s %.1f" % ("errores por minuto", len(errors) * 60.0 / span))
+    print("%-22s %d de %d muestras" % ("brillo en movimiento", len(moving), len(samples)))
+    if errors:
+        print("%-22s %d (%.0f%%)" % ("errores con brillo movil", near, 100.0 * near / len(errors)))
+        print("%-22s %d" % ("errores con brillo quieto", len(errors) - near))
+    print("=" * 62)
+
+    if errors:
+        seen = {}
+        for _, detail in errors:
+            seen[detail] = seen.get(detail, 0) + 1
+        print("\npatrones de registros:")
+        for detail, count in sorted(seen.items(), key=lambda kv: -kv[1]):
+            print("  %4d x %s" % (count, detail))
+
+        print("\nprimeros errores (segundos desde el inicio):")
+        for stamp, _ in errors[:12]:
+            print("  +%.2f" % (stamp - t0_kernel))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,21 @@
+[Unit]
+Description=Answer the modem's memshare (QMI 52) requests
+# The modem asks exactly once during bring-up, before rmtfs releases it, so this
+# has to be published first or the request is missed entirely and the modem is
+# left waiting on an answer that never comes.
+After=qrtr-ns.service
+Before=rmtfs.service
+Wants=qrtr-ns.service
+
+[Service]
+Type=simple
+# No argument means "report zero bytes available", which is the honest answer
+# while there is no reserved region to hand out. Passing a size makes the modem
+# follow up with an allocation request, which is only useful for experiments
+# until that request can actually be satisfied.
+ExecStart=/usr/local/bin/rhodep-memshare
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

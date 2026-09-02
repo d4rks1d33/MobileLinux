@@ -1,0 +1,43 @@
+id: samsung-tv
+version: 1
+device_type: tv
+vendor: Samsung
+family: samsung-tizen
+threshold: 60
+matchers:
+  - name: mdns-samsung-msf
+    type: mdns
+    mdns_type: _samsungmsf._tcp
+    confidence: 80
+  - name: mdns-sec-remote
+    type: mdns
+    mdns_type: _sec-remote._tcp
+    confidence: 70
+  - name: port-8001-tizen-ws
+    type: port
+    port: 8001
+    confidence: 30
+  - name: port-8002-tizen-wss
+    type: port
+    port: 8002
+    confidence: 30
+  - name: port-55000-samsung-legacy
+    type: port
+    port: 55000
+    confidence: 40
+  - name: ssdp-samsung
+    type: ssdp
+    st: "urn:samsung.com"
+    confidence: 60
+  - name: nmap-os-tizen
+    type: nmap_os
+    os_regex: 'Samsung|Tizen'
+    confidence: 40
+  - name: oui-samsung
+    type: mac_oui
+    values: ["E0:9D:13", "00:0F:F7", "20:16:D8", "3C:5A:37",
+             "84:25:3F", "94:D0:29", "B8:5E:7B", "D4:E8:B0",
+             "E4:E0:C5", "E8:50:8B", "F0:25:B7", "FC:F1:36"]
+    confidence: 15
+metadata:
+  playbook: samsung-tv

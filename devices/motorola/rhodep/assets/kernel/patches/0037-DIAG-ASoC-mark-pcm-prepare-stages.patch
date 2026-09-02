@@ -1,0 +1,52 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] DIAG: ASoC: mark the stages of the PCM prepare
+
+Not for upstream. Starting a playback stream resets the SoC instantly on
+this device, with no CPU exception and no output. The ASoC dynamic debug
+trace stops at
+
+	WCD Playback: ASoC: prepare BE WCD Playback
+
+and nothing in the code between that and the reset has a dev_dbg, so mark
+the four stages of __soc_pcm_prepare() to find which one dies.
+
+--- a/sound/soc/soc-pcm.c	2026-08-12 00:54:49.052268011 +0000
++++ b/sound/soc/soc-pcm.c	2026-08-12 00:54:49.068268011 +0000
+@@ -1057,18 +1057,24 @@
+ 
+ 	snd_soc_dpcm_mutex_assert_held(rtd);
+ 
++	/* DIAG (not for upstream) */
++	printk(KERN_EMERG "PCM-DIAG: %s: link_prepare\n", rtd->dai_link->name);
+ 	ret = snd_soc_link_prepare(substream);
+ 	if (ret < 0)
+ 		goto out;
+ 
++	printk(KERN_EMERG "PCM-DIAG: %s: component_prepare\n", rtd->dai_link->name);
+ 	ret = snd_soc_pcm_component_prepare(substream);
+ 	if (ret < 0)
+ 		goto out;
+ 
++	printk(KERN_EMERG "PCM-DIAG: %s: dai_prepare\n", rtd->dai_link->name);
+ 	ret = snd_soc_pcm_dai_prepare(substream);
+ 	if (ret < 0)
+ 		goto out;
+ 
++	printk(KERN_EMERG "PCM-DIAG: %s: dapm_stream_event\n", rtd->dai_link->name);
++
+ 	/* cancel any delayed stream shutdown that is pending */
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
+ 	    rtd->pop_wait) {
+@@ -1079,10 +1085,12 @@
+ 	snd_soc_dapm_stream_event(rtd, substream->stream,
+ 			SND_SOC_DAPM_STREAM_START);
+ 
++	printk(KERN_EMERG "PCM-DIAG: %s: unmute\n", rtd->dai_link->name);
+ 	for_each_rtd_dais(rtd, i, dai) {
+ 		if (!snd_soc_dai_mute_is_ctrled_at_trigger(dai))
+ 			snd_soc_dai_digital_mute(dai, 0, substream->stream);
+ 	}
++	printk(KERN_EMERG "PCM-DIAG: %s: prepare done\n", rtd->dai_link->name);
+ 
+ out:
+ 	/*

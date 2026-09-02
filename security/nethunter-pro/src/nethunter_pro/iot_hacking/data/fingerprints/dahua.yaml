@@ -1,0 +1,26 @@
+id: dahua
+version: 1
+device_type: camera
+vendor: Dahua
+family: dahua
+threshold: 60
+matchers:
+  - name: http-server
+    type: http_header
+    path: /
+    header_regex: 'Server:\s*(Boa|WebServer|DVRDVS-Webs)'
+    confidence: 30
+  - name: http-cgi
+    type: http_body
+    path: /cgi-bin/magicBox.cgi?action=getDeviceType
+    regex: '^type=[A-Z]'   # dahua returns "type=IPC-HDW..." plain text
+    confidence: 90
+    extract:
+      type: 'type=([^\r\n]+)'
+  - name: port-37777
+    type: port
+    port: 37777
+    confidence: 60
+metadata:
+  playbook: dahua
+  known_cves: ["CVE-2021-33044", "CVE-2021-33045"]

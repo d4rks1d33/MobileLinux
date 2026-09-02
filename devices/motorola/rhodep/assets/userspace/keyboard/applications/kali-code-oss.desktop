@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=code-oss
+Comment=Open Source package of vscode
+Exec=code-oss --ozone-platform-hint=auto --enable-features=UseOzonePlatform,WaylandWindowDecorations --enable-wayland-ime --wayland-text-input-version=3 %F
+Icon=kali-code-oss
+StartupNotify=false
+Terminal=false
+Type=Application
+Categories=kali-resource-development;kali-services-and-other-tools
+X-Kali-Package=code-oss
+StartupWMClass=code-oss-dev
+Keywords=vscode

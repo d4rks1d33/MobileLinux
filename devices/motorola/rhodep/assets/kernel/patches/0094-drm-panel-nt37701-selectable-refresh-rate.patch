@@ -1,0 +1,162 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/panel: nt37701: make the refresh rate selectable, and
+ reach the panel's 120 Hz
+
+The panel is a 120 Hz part and the driver has always known its four
+timings -- nt37701_modes[] carries 48, 60, 90 and 120 -- but it only ever
+offered one of them:
+
+	/*
+	 * The power on sequence selects 60 Hz (register 0x2f = 0x03), so
+	 * only that mode is exposed.
+	 */
+	mode = drm_mode_duplicate(connector->dev, &nt37701_modes[1]);
+
+So DRM advertised a single 1080x2400@60 mode and everything above it was
+capped there. That is the real reason scrolling drops frames, and it is
+not the GPU: with the ceiling at 650 MHz and at 840 MHz the repaint bench
+returns the same 59.7 and 59.5 fps, because both are sitting on the panel.
+
+Register 0x2f is what picks the timing. The values are the vendor's, and
+every timing node in dsi-panel-mot-csot-nt37701-655-1080x2400-dsc-cmd
+repeats the same map beside its own write:
+
+	15 01 00 00 08 00 02 2F 02 //08:49Hz 03:60Hz 07:90Hz 02:120Hz 04:144Hz
+
+This phone's panel is that one -- the stock cmdline the port inherits names
+it, qcom,mdss_dsi_mot_csot_nt37701_655_1080x2400_dsc_cmd_v1:timing1, where
+timing1 is the 60 Hz node. The tianma variant rhodep may also ship uses the
+same map, so the driver does not need to tell them apart.
+
+Add a table of the four timings and a `refresh` parameter that selects one,
+used both for the 0x2f write and for the mode handed to DRM. 144 Hz appears
+in the vendor's comment but its timing node is commented out, so it is left
+out here too.
+
+It is a parameter and not simply a change of index because 120 Hz doubles
+what the DSI link carries, and this port already runs the link at the
+theoretical minimum (clk_scale=100 on the cmdline) rather than the 2.3x the
+stock firmware uses. Whether the PHY sustains twice that is a question
+about a phone, not about the driver, so the default stays at the 60 Hz the
+stock firmware boots and a kernel is safe with no cmdline at all. Ask for
+more with:
+
+	panel_novatek_nt37701.refresh=120
+
+Runtime switching is still not there: the rate is programmed once in the
+power on sequence, and changing it would mean sending the vendor's
+timing-switch command from a mode set. Worth doing once 120 Hz is known to
+hold, since it is also how a phone drops back to 60 to save battery.
+
+--- a/drivers/gpu/drm/panel/panel-novatek-nt37701.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt37701.c
+@@ -62,6 +62,48 @@
+ MODULE_PARM_DESC(pps_first, "send PPS before the power on sequence (default 0)");
+ 
+ /*
++ * The panel keeps four timings and register 0x2f picks between them. The values
++ * are the vendor's: every timing node in dsi-panel-mot-csot-nt37701-655 carries
++ * the same map next to its own 0x2f write --
++ *
++ *	08 = 48 Hz   03 = 60 Hz   07 = 90 Hz   02 = 120 Hz   04 = 144 Hz
++ *
++ * 144 is in that comment but its timing node is commented out in the vendor
++ * tree, so it is not offered here either.
++ *
++ * This is a parameter rather than a fixed choice because raising the rate also
++ * doubles what the DSI link has to carry, and whether the PHY sustains it is a
++ * question about a particular phone rather than about the driver. Default stays
++ * at the 60 Hz the stock firmware boots, so a kernel is safe without a cmdline;
++ * ask for more with panel_novatek_nt37701.refresh=120.
++ */
++static const struct nt37701_timing {
++	int hz;
++	u8 reg2f;
++	int mode;
++} nt37701_timings[] = {
++	{  48, 0x08, 0 },
++	{  60, 0x03, 1 },
++	{  90, 0x07, 2 },
++	{ 120, 0x02, 3 },
++};
++
++static int refresh = 60;
++module_param(refresh, int, 0444);
++MODULE_PARM_DESC(refresh, "refresh rate in Hz: 48, 60, 90 or 120 (default 60)");
++
++static const struct nt37701_timing *nt37701_timing(void)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(nt37701_timings); i++)
++		if (nt37701_timings[i].hz == refresh)
++			return &nt37701_timings[i];
++
++	return &nt37701_timings[1];	/* unknown value: the stock 60 Hz */
++}
++
++/*
+  * Send the brightness DCS write in LP escape mode instead of HS.
+  *
+  * This was an attempt at the glitched horizontal lines this panel paints while
+@@ -118,6 +160,7 @@
+ static int nt37701_on(struct nt37701 *ctx)
+ {
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	u8 timing_cmd[] = { 0x2f, 0x00 };
+ 
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0,
+ 				     0x55, 0xaa, 0x52, 0x08, 0x00);
+@@ -164,8 +207,15 @@
+ 	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+ 	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0x0000, 0x0437);
+ 	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0x0000, 0x095f);
+-	/* timing@1 = 60 Hz, the configuration the stock firmware uses */
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x2f, 0x03);
++	/*
++	 * Select the timing; 60 Hz is what the stock firmware boots.
++	 *
++	 * Not mipi_dsi_dcs_write_seq_multi(): that macro builds a static const
++	 * array out of its arguments, so every byte must be a compile-time
++	 * constant and a value chosen at runtime does not compile.
++	 */
++	timing_cmd[1] = nt37701_timing()->reg2f;
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, timing_cmd, sizeof(timing_cmd));
+ 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 120);
+ 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+@@ -349,17 +399,20 @@
+ static int nt37701_get_modes(struct drm_panel *panel,
+ 						       struct drm_connector *connector)
+ {
++	const struct nt37701_timing *t = nt37701_timing();
+ 	struct drm_display_mode *mode;
+ 	int count = 0;
+ 
+ 	/*
+-	 * The power on sequence selects 60 Hz (register 0x2f = 0x03), so only
+-	 * that mode is exposed.
++	 * The power on sequence programs one timing into register 0x2f, so a
++	 * single matching mode is exposed. Switching at runtime would mean
++	 * sending the vendor's timing-switch command on a mode set, which this
++	 * driver does not do yet.
+ 	 *
+ 	 * The clock is scaled by clk_scale so the compressed frame transfer
+ 	 * finishes well before the next TE.
+ 	 */
+-	mode = drm_mode_duplicate(connector->dev, &nt37701_modes[1]);
++	mode = drm_mode_duplicate(connector->dev, &nt37701_modes[t->mode]);
+ 	if (!mode)
+ 		return 0;
+ 
+@@ -371,8 +424,8 @@
+ 	drm_mode_probed_add(connector, mode);
+ 	count = 1;
+ 
+-	connector->display_info.width_mm = nt37701_modes[1].width_mm;
+-	connector->display_info.height_mm = nt37701_modes[1].height_mm;
++	connector->display_info.width_mm = nt37701_modes[t->mode].width_mm;
++	connector->display_info.height_mm = nt37701_modes[t->mode].height_mm;
+ 
+ 	return count;
+ }

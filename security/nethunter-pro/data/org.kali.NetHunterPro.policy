@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>Kali NetHunter</vendor>
+  <!--
+    NetHunter Pro is a single-user security tool on the user's own device, and
+    every action it runs is one the user explicitly asked for by pressing a
+    button. An active local user in a session may run them without a password
+    prompt; remote/inactive callers still must authenticate as admin. This is
+    what makes "authenticate once when the app opens" actually mean once.
+  -->
+  <!--
+    Tried launching the whole app as root via pkexec from the .desktop, so a
+    single auth prompt would give every module the privileges it needs and
+    the pickers could read /root/.config directly. Wayland killed it: kwin
+    on the Kali/Plasma-Mobile port refuses connections from a UID that does
+    not own the session, so `Gdk.Display.get_default()` returns None under
+    root and the app aborts with "Argument 0 does not allow None as a
+    value". Instead the app stays as the login user and elevates per-action
+    with this policy, and world-readable indexes (e.g.
+    /var/lib/nethunter-phishkin3/certs, populated by the phishkin3 launcher)
+    let pickers see enough of /root/ without needing to read it.
+  -->
+  <action id="org.kali.nethunterpro.run">
+    <description>Run a NetHunter Pro privileged action</description>
+    <message>Authentication is required to run NetHunter actions</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

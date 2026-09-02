@@ -1,0 +1,63 @@
+From: rhodep port <none@example.com>
+Date: Sun, 23 Aug 2026 12:05:00 -0300
+Subject: [PATCH] arm64: dts: qcom: rhodep: give the display its interconnect
+ paths
+
+The mdss node has no interconnects property, so
+msm_mdss_parse_data_bus_icc_path() gets NULL from devm_of_icc_get() and
+leaves num_mdp_paths at 0. Every icc_set_bw() in msm_mdss.c then iterates
+over an empty array and the reg bus path is NULL, so the display driver
+runs without ever asking for a single byte of bandwidth. The perf figures
+the DPU catalog carries for this SoC -- min_dram_ib = 1600000,
+min_core_ib = 2500000 in sm6375_perf_data -- are computed and thrown away.
+
+This shows up as DSI HS FIFO underflow. With a diagnostic patch printing
+the raw error registers, every single occurrence reads:
+
+  fifo=88881010 timeout=00000001 ack=00000000 status0=00000005
+  phy=00088888 clk=008037c3 mdp_busy=1 dma_busy=0
+
+DLN0..3_HS_FIFO_UNDERFLOW on all four lanes, with the MDP mid-transfer
+and the command DMA idle. The link is starved, not contended: pclk0 is
+63887989 Hz and carries 3 bytes per cycle without widebus, which is
+191.66 MB/s, and byte0_clk is 47915991 Hz across 4 lanes, which is the
+same 191.66 MB/s. Supply equals demand exactly, by construction, so the
+lane FIFOs only ever hold jitter. Any stall in the DPU's fetch drains
+them, and with no bandwidth vote the fetch is at the mercy of whatever
+else is using DDR.
+
+It reproduces accordingly: 0 errors on an idle screen, 0 under a pure
+memory load with the screen static, 0 driving the backlight 120 times
+with the screen static, and errors only when something repaints -- worst
+while several applications start at once, which is also when the port
+stutters.
+
+Use the same paths sm6115 uses, that being the closest SMD-RPM sibling.
+
+The provider has to be built in rather than modular for this. Once the
+mdss node names an interconnect, its probe defers until the provider
+registers, and the provider is a module that userspace has kept
+blacklisted since kali-boot-v96. Loading it by hand on this device tree
+binds all six buses cleanly -- snoc, the clk/mmrt/mmnrt virtuals, cnoc
+and bimc -- so the blacklist has outlived the bug it was written for
+(fixed in 0027), but a display that cannot come up without a module is
+not a trade worth making.
+
+Signed-off-by: rhodep port <none@example.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -1054,6 +1054,13 @@
+ 
+ 		iommus = <&apps_smmu 0x820 0x2>;
+ 
++		interconnects = <&mmrt_virt MASTER_MDP_PORT0 RPM_ALWAYS_TAG
++				 &bimc SLAVE_EBI RPM_ALWAYS_TAG>,
++				<&bimc MASTER_AMPSS_M0 RPM_ALWAYS_TAG
++				 &config_noc SLAVE_DISPLAY_CFG RPM_ALWAYS_TAG>;
++		interconnect-names = "mdp0-mem",
++				     "cpu-cfg";
++
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+ 		ranges;

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=On-screen keyboard
+Name[es]=Teclado en pantalla
+Comment=Show the keyboard in apps that do not ask for it, such as VS Code
+Comment[es]=Muestra el teclado en apps que no lo piden, como VS Code
+Exec=/usr/local/bin/rhodep-keyboard
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;
+Keywords=keyboard;teclado;osk;

@@ -1,0 +1,34 @@
+id: generic-router
+version: 1
+device_type: router
+vendor: Generic
+family: router
+threshold: 55
+matchers:
+  # Routers typically announce a bunch of WAN-flavoured URNs; matching
+  # any of these three catches Huawei / TP-Link / D-Link / Xiaomi etc.
+  - name: ssdp-igd
+    type: ssdp
+    st: "InternetGatewayDevice"
+    confidence: 60
+  - name: ssdp-wan-conn
+    type: ssdp
+    st: "WANIPConnection"
+    confidence: 40
+  - name: ssdp-wan-common
+    type: ssdp
+    st: "WANCommonInterfaceConfig"
+    confidence: 40
+  - name: ssdp-layer3
+    type: ssdp
+    st: "Layer3Forwarding"
+    confidence: 30
+  - name: upnp-igd-desc
+    type: upnp_dd
+    regex: 'InternetGatewayDevice|WANConnectionDevice|WANIPConnection'
+    confidence: 40
+    extract:
+      manufacturer: '<manufacturer>([^<]+)</manufacturer>'
+      modelName: '<modelName>([^<]+)</modelName>'
+metadata:
+  playbook: router-recon

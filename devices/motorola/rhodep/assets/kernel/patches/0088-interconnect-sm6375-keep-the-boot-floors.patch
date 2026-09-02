@@ -1,0 +1,66 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] interconnect: qcom: sm6375: keep the boot-time floors
+
+Do not register icc_sync_state() on this SoC yet.
+
+icc_node_add() gives every node init_avg = init_peak = INT_MAX when the
+provider has no get_bw(), which is what keeps the buses at the rate the
+RPM handed over at boot. icc_sync_state() then drops those floors once
+every provider has probed:
+
+	if (n->init_avg || n->init_peak) {
+		n->init_avg = 0;
+		n->init_peak = 0;
+		aggregate_requests(n);
+		p->set(n, n);
+	}
+
+That is correct only when every consumer on the SoC declares its
+interconnect paths, because from that moment a node's bandwidth is
+exactly what its consumers ask for -- and a consumer that asks for
+nothing gets nothing. On sm6375 almost nothing declares paths: the
+device tree wires up the display, the IPA and (since the previous patch)
+uart1, and that is all. Everything else is silently dropped to zero the
+instant sync_state runs.
+
+The Bluetooth controller is what noticed. It sits on uart1 at 3.2 Mbps,
+and its firmware download starts timing out:
+
+	Bluetooth: hci0: QCA Downloading qca/crbtfw21.tlv
+	Bluetooth: hci0: command 0xfc00 tx timeout
+	Bluetooth: hci0: QCA Failed to send TLV segment (-110)
+
+The timing is the tell: the two setups that run during boot always
+succeed, because sync_state has not fired yet, and the failures only
+start afterwards. Bisecting boot images agrees -- an image whose kernel
+predates the provider being built in passes 150 controller resets out of
+150, and every image after it fails within one or two.
+
+Keeping the floors gives up bus scaling, which this port has never
+actually had: until the provider was built in it never bound at all, so
+the RPM's boot-time vote was what everything ran on. Nothing regresses;
+the power saving simply stays unclaimed.
+
+Drop this patch once every consumer that matters declares its paths.
+Adding paths one consumer at a time does not work as an interim step:
+uart1 was given its own in the previous patch and Bluetooth still fails,
+because whatever else the transfer depends on is still at zero.
+
+--- a/drivers/interconnect/qcom/sm6375.c
++++ b/drivers/interconnect/qcom/sm6375.c
+@@ -1780,7 +1780,14 @@
+ 	.driver = {
+ 		.name = "qnoc-sm6375",
+ 		.of_match_table = sm6375_noc_of_match,
+-		.sync_state = icc_sync_state,
++		/*
++		 * No .sync_state on purpose: it would drop the INT_MAX floors
++		 * icc_node_add() installs, and on this SoC almost no consumer
++		 * declares interconnect paths yet, so those nodes would go to
++		 * zero. That starves the QUP the Bluetooth UART runs on, which
++		 * is how this was found. Restore it once the device tree wires
++		 * up the consumers -- see the commit message.
++		 */
+ 	},
+ };
+ module_platform_driver(sm6375_noc_driver);

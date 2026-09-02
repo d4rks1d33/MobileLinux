@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The Docker whale for the Docker module: a whale body carrying stacked
+     containers. Single-colour, 16x16, symbolic so it recolours with the theme
+     like every other module icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- stacked containers on the whale's back -->
+  <path d="M 3,5 h 1.6 v 1.6 H 3 Z M 5,5 h 1.6 v 1.6 H 5 Z M 7,5 h 1.6 v 1.6 H 7 Z M 5,3 h 1.6 v 1.6 H 5 Z M 7,3 h 1.6 v 1.6 H 7 Z M 9,5 h 1.6 v 1.6 H 9 Z"/>
+  <!-- whale body and water line -->
+  <path d="M 1,7.2 h 12.1 c 0.6,0 1.1,-0.3 1.5,-0.9 0.2,0.5 0.15,1.1 -0.05,1.6 -0.3,0.8 -1,1.5 -1.85,1.95 C 11.6,10.5 10.3,10.75 9,10.75 H 4.2 C 2.4,10.75 1,9.6 1,7.9 Z m 12.7,-1.1 c 0.15,-0.35 0.5,-0.55 0.9,-0.5 -0.05,0.35 -0.35,0.65 -0.75,0.7 z"/>
+</svg>

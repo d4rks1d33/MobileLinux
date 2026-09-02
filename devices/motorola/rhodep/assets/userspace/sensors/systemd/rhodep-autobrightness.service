@@ -1,0 +1,36 @@
+[Unit]
+Description=Ambient-light brightness for rhodep (sessions with no consumer of their own)
+Documentation=file:///usr/share/doc/rhodep-sensors/README.md
+#
+# This is a USER service, and it has to be. Two reasons:
+#
+#  - iio-sensor-proxy authorises ClaimLight through polkit, and the action is
+#    allow_active=yes / allow_inactive=no. Only a process inside the active seat
+#    session may claim the sensor; the same binary run from an ssh shell gets
+#    "Not Authorized: Sensor claim not allowed".
+#  - brightness is set through PowerDevil on the session bus, so that PowerDevil
+#    stays the owner of the backlight and its slider in the shell follows.
+#    Writing /sys/class/backlight directly works, but leaves the slider showing
+#    a value that is no longer true.
+#
+# Only enable it under a session that has no ambient-light support of its own.
+# Plasma Mobile is such a session: PowerDevil 6.7 has no reference to
+# net.hadess.SensorProxy anywhere in it. Phosh and gsd-power do consume the
+# sensor, so under those this must stay disabled or the two fight.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+# Refuse to run under a session that already handles ambient light, so that
+# enabling this cannot make things worse by accident. Plasma Mobile sets
+# XDG_CURRENT_DESKTOP=KDE (DESKTOP_SESSION=plasma-mobile); Phosh sets
+# XDG_CURRENT_DESKTOP=Phosh:GNOME and consumes the sensor itself.
+ConditionEnvironment=XDG_CURRENT_DESKTOP=KDE
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/rhodep-autobrightness
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

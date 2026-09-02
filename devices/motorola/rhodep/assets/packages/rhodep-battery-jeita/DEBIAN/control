@@ -1,0 +1,7 @@
+Package: rhodep-battery-jeita
+Version: 1
+Architecture: arm64
+Maintainer: rhodep port
+Description: JEITA cold-side battery protection for Motorola rhodep
+ Stops charging below 0C (prevents lithium plating), re-enables at 3C. The hot
+ side (throttle 45C, cutoff 50C) is handled by the kernel DTS thermal zones.

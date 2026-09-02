@@ -1,0 +1,18 @@
+id: wiz
+version: 1
+device_type: smart_bulb
+vendor: Signify (WiZ)
+family: wiz
+threshold: 60
+matchers:
+  - name: udp-38899
+    type: udp_reply
+    port: 38899
+    body_regex: '"mac"|moduleName'
+    confidence: 90
+    extract:
+      mac: '"mac":"([^"]+)"'
+      module: '"moduleName":"([^"]+)"'
+      fw: '"fwVersion":"([^"]+)"'
+metadata:
+  playbook: wiz

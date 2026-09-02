@@ -1,0 +1,19 @@
+id: tasmota
+version: 1
+device_type: smart_switch
+vendor: Tasmota
+family: tasmota
+threshold: 60
+matchers:
+  - name: http-tasmota-server
+    type: http_header
+    path: /
+    header_regex: 'Server:\s*Tasmota'
+    confidence: 90
+  - name: http-tasmota-body
+    type: http_body
+    path: /
+    regex: 'Tasmota'
+    confidence: 30
+metadata:
+  playbook: tasmota

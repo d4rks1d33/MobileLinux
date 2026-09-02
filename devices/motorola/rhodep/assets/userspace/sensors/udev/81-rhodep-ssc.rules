@@ -1,0 +1,39 @@
+# rhodep: let iio-sensor-proxy use the accelerometer and proximity sensor.
+#
+# iio-sensor-proxy already contains ssc-accel and ssc-proximity drivers, but
+# its own rule (80-iio-sensor-proxy.rules) tags the fastrpc node with only
+#
+#     ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-light ssc-compass"
+#
+# so the other two are never even probed.  Both work on this device once the
+# sensors PD has its registry: the accelerometer is a TDK-Invensense icm4x6xx
+# (continuous, 12.5 Hz) and the proximity sensor is the sensortek stk3a5x, the
+# same part as the ambient light sensor.
+#
+# The stock rule is left alone so a package upgrade cannot fight over it; udev
+# appends, and 81- sorts after 80-.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-proximity"
+
+# The accelerometer is 180 degrees out in the screen plane, and the mount matrix
+# that would say so is not available anywhere the software looks:
+#
+#   - libssc reads the DSP's "placement" attribute, and this device's registry
+#     entry icm4x6xx_0_platform.placement is twelve zeros. iio-sensor-proxy says
+#     so ("Mount matrix provided by firmware is all 0") and falls back to identity.
+#   - the registry does carry an orientation, icm4x6xx_0_platform.orient
+#     {x:-x, y:+y, z:-z}, but that is the sensor-to-device transform and the DSP
+#     already applies it: measured with scripts/ssc-stream.py, the raw stream is
+#     in the standard Android device frame (flat screen-up z=+9.4, upright
+#     y=+9.8, left side up x=+9.7).
+#
+# What is left is that this panel is mounted 180 degrees round relative to that
+# frame, which the display side already compensates for -- the static UI is the
+# right way up -- while the accelerometer path does not. Measured, not guessed:
+# held physically normal, iio-sensor-proxy reported "bottom-up".
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp*", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, -1, 0; 0, 0, 1"
+
+# Start the listener when the device shows up rather than ordering the unit
+# against systemd-udev-settle. The ADSP is a remoteproc that takes ten seconds
+# to boot, so a unit with ConditionPathExists=/dev/fastrpc-adsp that is reached
+# too early is skipped outright and never retried.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="rhodep-sscrpcd.service"

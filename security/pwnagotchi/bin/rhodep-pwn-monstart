@@ -1,0 +1,100 @@
+#!/bin/sh
+# rhodep: put the EXTERNAL adapter into monitor mode for pwnagotchi, and touch
+# nothing else.
+#
+# pwnagotchi's stock monstart runs `airmon-ng check kill`, which stops
+# NetworkManager and wpa_supplicant for the whole system. On this phone the
+# internal wlan0 (ath10k / WCN3990) is the only real WiFi and cannot do monitor
+# mode at all -- its firmware reports raw 0 -- so it must keep running as a
+# managed client. Killing the network stack would take it down with everything
+# else and gain nothing, because the capture happens entirely on wlan1
+# (RTL8188EUS, the TP-Link) which NetworkManager already ignores.
+#
+# So this operates ONLY on the external adapter, by name, and never calls
+# check-kill.
+#
+# pwnagotchi's main.iface is wlan1mon; the interface is renamed to that so the
+# name is unambiguous. The order matters on the 8188eu driver: NetworkManager
+# has to release wlan1 BEFORE the type is flipped, or it retakes the interface
+# a second later and drops it straight back to managed. That is scoped to wlan1
+# with `nmcli device set`, no daemon restart, so wlan0 is never affected.
+set -e
+
+PHYS_IFACE=wlan1
+MON_IFACE=wlan1mon
+COUNTRY=${PWN_COUNTRY:-00}
+
+log() { echo "rhodep-pwn-monstart: $*"; }
+
+case "$PHYS_IFACE" in wlan0|"") log "ERROR: refusing to touch '$PHYS_IFACE'"; exit 1 ;; esac
+
+# Already up and actually in monitor?
+if iw dev "$MON_IFACE" info 2>/dev/null | grep -q "type monitor"; then
+	ip link set "$MON_IFACE" up 2>/dev/null || true
+	log "$MON_IFACE already in monitor mode"
+	exit 0
+fi
+
+# Power the port if the adapter is not present.
+if ! ip link show "$PHYS_IFACE" >/dev/null 2>&1 \
+		&& ! ip link show "$MON_IFACE" >/dev/null 2>&1; then
+	if [ -x /usr/local/sbin/otg ]; then
+		log "$PHYS_IFACE not present, powering the USB port (otg on)"
+		/usr/local/sbin/otg on >/dev/null 2>&1 || true
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			ip link show "$PHYS_IFACE" >/dev/null 2>&1 && break
+			sleep 1
+		done
+	fi
+fi
+
+IF="$PHYS_IFACE"
+ip link show "$IF" >/dev/null 2>&1 || IF="$MON_IFACE"
+if ! ip link show "$IF" >/dev/null 2>&1; then
+	log "ERROR: neither $PHYS_IFACE nor $MON_IFACE present. Is the TP-Link plugged in?"
+	log "       check: otg on ; iw dev"
+	exit 1
+fi
+
+myphy=$(basename "$(readlink -f "/sys/class/net/$IF/phy80211")")
+w0phy=$(basename "$(readlink -f /sys/class/net/wlan0/phy80211)" 2>/dev/null)
+if [ "$myphy" = "$w0phy" ]; then
+	log "ERROR: $IF shares a phy with wlan0, refusing"
+	exit 1
+fi
+log "using $IF on $myphy -> $MON_IFACE"
+
+iw reg set "$COUNTRY" 2>/dev/null || true
+
+# Release from NetworkManager FIRST. This is the fix for the 8188eu flip-back:
+# with NM still managing wlan1, it retakes the interface ~1 s after it comes up
+# and forces it back to managed.
+command -v nmcli >/dev/null 2>&1 && \
+	nmcli device set "$IF" managed no >/dev/null 2>&1 || true
+
+# Remove any stray vif on THIS phy (the driver's P2P-device), never wlan0.
+for d in $(iw dev | awk '/^phy#/{p=$0} /Interface/{print p" "$2}' \
+		| awk -v want="phy#${myphy#phy}" '$1==want{print $2}'); do
+	[ "$d" = "$IF" ] && continue
+	log "removing stray vif $d on $myphy"
+	iw dev "$d" del 2>/dev/null || true
+done
+
+ip link set "$IF" down 2>/dev/null || true
+iw dev "$IF" set monitor control 2>/dev/null || iw dev "$IF" set type monitor
+if [ "$IF" != "$MON_IFACE" ]; then
+	ip link set "$IF" name "$MON_IFACE" 2>/dev/null || MON_IFACE="$IF"
+fi
+ip link set "$MON_IFACE" up
+
+# Let the driver settle, then confirm it actually stayed in monitor. On 8188eu
+# the revert-to-managed happens within about a second, so this is the check
+# that catches it rather than reporting a false success.
+sleep 2
+if iw dev "$MON_IFACE" info 2>/dev/null | grep -q "type monitor"; then
+	log "OK: $MON_IFACE is in monitor mode"
+else
+	log "ERROR: $MON_IFACE did not stay in monitor mode"
+	iw dev "$MON_IFACE" info 2>/dev/null | sed 's/^/    /'
+	exit 1
+fi

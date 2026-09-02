@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Dump the firmware-written reserved regions through /dev/mem (needs
+iomem=relaxed). They are nomap, so read() gets EFAULT and mmap is the way in.
+
+Syncs before returning: the reset this is used to investigate is abrupt, and a
+dump left in the page cache does not survive it."""
+import mmap, os, sys
+PS = os.sysconf("SC_PAGE_SIZE")
+REGIONS = (("tzlog", 0xaefa2000, 0x30000),
+           ("wdogctx", 0xaefd2000, 0x2e000),
+           ("annotate", 0xaefa1800, 0x800))
+tag = sys.argv[1]
+for name, base, size in REGIONS:
+    fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+    off = base & ~(PS - 1); delta = base - off
+    m = mmap.mmap(fd, size + delta, mmap.MAP_SHARED, mmap.PROT_READ, offset=off)
+    data = m[delta:delta + size]
+    m.close(); os.close(fd)
+    p = "/root/fw-%s-%s.bin" % (name, tag)
+    with open(p, "wb") as f:
+        f.write(data); f.flush(); os.fsync(f.fileno())
+os.system("sync")
+print("dumped", tag, "and synced")

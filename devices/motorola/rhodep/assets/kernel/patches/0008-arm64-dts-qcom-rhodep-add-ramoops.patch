@@ -1,0 +1,79 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: add ramoops
+
+Add a pstore/ramoops region so that the tail of the kernel log and any
+panic survive a reboot. Without this a bootloop is undebuggable: the ABL
+rewrites the cmdline to console=null, so nothing reaches a serial console
+either, and there is no way to see why the kernel died.
+
+After a failed boot, flash a kernel that does boot (which also needs this
+node) and read /sys/fs/pstore/.
+
+The region is the one the downstream Motorola kernel uses for this very
+device: include/dt-bindings/moto/moto-mem-reserve.h defines
+
+	RAMOOPS_CONSOLE_SIZE	0x40000
+	RAMOOPS_PMSG_SIZE	0x40000
+	RAMOOPS_RECORD_SIZE	0x3f800
+	RAMOOPS_SIZE		(console + pmsg + record) = 0xbf800
+	RAMOOPS_BASE_ADDR	0xaf000000
+
+and blair-pm6125-moto-common-overlay.dtsi (blair = SM6375, rhodep's base
+DT is blair-moto-rhodep-base.dts) instantiates the ramoops node there
+with no-map. That is the address the bootloader is known to preserve
+across a warm reset. The generic holi.dtsi/blair.dtsi node at
+0xd0000000 is explicitly deleted on Motorola boards
+(blair-moto-base.dts: /delete-node/ ramoops) and is NOT preserved, which
+is why nothing was ever recovered from it.
+
+Differences from the vendor node, on purpose:
+
+ - pmsg is not used (CONFIG_PSTORE_PMSG is off), so its 0x40000 are given
+   to the console buffer instead: a full mainline boot log with
+   ignore_loglevel does not fit in 256 KiB.
+ - max-reason = <5> (KMSG_DUMP_MAX) instead of no-dump-oops, so a dump
+   record is written on oops, emergency and even on an orderly reboot.
+   The last one makes the black box self-testable: reboot normally and a
+   dmesg-ramoops-0 file must appear.
+ - mem-type = <1> (unbuffered) so console bytes are written straight to
+   DRAM. With the default write-combining mapping the last writes before
+   a hard reset can still sit in a WC buffer and be lost, which is
+   exactly the window we need to see.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -99,6 +99,34 @@
+ 			reg = <0 0x85200000 0 0xc00000>;
+ 			no-map;
+ 		};
++
++		/*
++		 * Black box for debugging boot loops: pstore/ramoops keeps the
++		 * tail of the console log and the panic in RAM, and both
++		 * survive a reboot. After a failed boot they can be read from a
++		 * kernel that does boot, under /sys/fs/pstore/.
++		 *
++		 * Address and sizes come from the downstream Motorola kernel
++		 * for this device (dt-bindings/moto/moto-mem-reserve.h:
++		 * RAMOOPS_BASE_ADDR 0xaf000000, RAMOOPS_SIZE 0xbf800), which is
++		 * the region the Motorola bootloader preserves. The 0xd0000000
++		 * node from holi.dtsi/blair.dtsi is deleted on Motorola boards
++		 * and is not preserved.
++		 *
++		 * The whole 0xbf800 is split between console (0x80000) and one
++		 * dump record (0x3f800); pmsg is unused.
++		 */
++		ramoops@af000000 {
++			compatible = "ramoops";
++			reg = <0x0 0xaf000000 0x0 0xbf800>;
++			no-map;
++			console-size = <0x80000>;
++			record-size = <0x3f800>;
++			pmsg-size = <0x0>;
++			ftrace-size = <0x0>;
++			mem-type = <1>;
++			max-reason = <5>;
++		};
+ 	};
+ 
+ 	panel_vci: panel-vci-regulator {

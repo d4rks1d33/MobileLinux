@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+chmod 0755 /usr/local/sbin/airmon-safe 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+exit 0

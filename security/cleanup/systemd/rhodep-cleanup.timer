@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly disk-space cleanup
+Documentation=file:/usr/share/doc/rhodep-cleanup/README
+
+[Timer]
+# Weekly, with a catch-up run if the phone was off at the scheduled time (it
+# usually is), and a random delay so it never fights boot for I/O.
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

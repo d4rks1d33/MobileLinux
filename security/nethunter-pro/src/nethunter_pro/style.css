@@ -1,0 +1,14 @@
+/* Terminal-style output views: dark background, green-ish text. */
+.nh-output {
+    background-color: #1a1a24;
+    color: #d4d4dc;
+    font-size: 0.95em;
+}
+.nh-output text {
+    background-color: #1a1a24;
+    color: #d4d4dc;
+}
+.nh-output text selection {
+    background-color: #3584e4;
+    color: #ffffff;
+}

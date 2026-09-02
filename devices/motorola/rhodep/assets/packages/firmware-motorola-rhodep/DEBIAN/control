@@ -1,0 +1,10 @@
+Package: firmware-motorola-rhodep
+Version: 1
+Architecture: arm64
+Maintainer: rhodep port
+Section: non-free/kernel
+Priority: optional
+Description: Vendor firmware for Motorola Moto G82 5G (rhodep, SM6375)
+ WCN3990 WiFi/BT, Adreno 619 GPU (zap/gmu/sqe) and modem PD blobs, extracted
+ from the stock vendor partition. NOT redistributable: see BUILD.md to extract
+ from your own device and build this package. This control file is a template.

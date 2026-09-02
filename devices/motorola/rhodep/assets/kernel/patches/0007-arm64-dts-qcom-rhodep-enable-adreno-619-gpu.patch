@@ -1,0 +1,211 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375-motorola-rhodep: enable the Adreno 619 GPU
+
+The GPU and GMU nodes were present but disabled, with a TODO saying the
+correct GMU PDC addresses for SM6375 were unknown and that the SM6350 ones
+hang the SoC.
+
+They are unknown because they do not exist: the A619 in SM6375 is the
+"holi" variant, which has no real GMU at all. It uses the GMU wrapper, and
+the kernel drives the clocks and power domains directly. The vendor device
+tree states this explicitly in holi-gpu.dtsi:
+
+	compatible = "qcom,kgsl-3d0", "qcom,adreno-gpu-a619-holi";
+	reg-names = "kgsl_3d0_reg_memory", "cx_dbgc", "gmu_wrapper", "cx_misc";
+
+So replace the full GMU node with a "qcom,adreno-gmu-wrapper" node, which
+is what msm/adreno keys on (a6xx_gpu.c: adreno_gpu->gmu_is_wrapper is set
+from of_device_is_compatible(node, "qcom,adreno-gmu-wrapper"), and
+adreno_is_a619_holi() is a619 && has_gmu_wrapper). Modelled on the existing
+sm6115.dtsi, which uses the same scheme for its A610.
+
+Other fixes in the same nodes:
+
+- compatible becomes "qcom,adreno-619.1". find_chipid() turns 619.0 into
+  chip_id 0x06010900, which falls through to the generic A619 catalog entry
+  (with ADRENO_QUIRK_HAS_CACHED_COHERENT and unrelated speedbins) instead
+  of the .machine = "qcom,sm6375" entry, which wants 0x06010901. The vendor
+  blair.dtsi confirms qcom,chipid = <0x06010901>.
+
+- add the cx_dbgc region at 0x5961000 and the six clocks the wrapper needs,
+  since without a GMU nothing else manages them.
+
+- the OPP table now uses the frequencies and levels from
+  qcom,gpu-pwrlevels-0 in the vendor blair.dtsi (266/390/490/650 MHz) with
+  required-opps against rpmpd, instead of invented frequencies with
+  opp-level. Only up to NOM is exposed for now; the turbo bins
+  (770/840/900 MHz) can be added once the GPU is confirmed stable.
+
+The zap shader firmware-name already pointed at a615_zap.mdt, which matches
+both the a6xx catalog (.zapfw = "a615_zap.mdt") and the MDT-format files
+shipped in the modem partition.
+
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -800,102 +800,101 @@
+ 	};
+ 
+ 	gpu: gpu@5900000 {
+-		compatible = "qcom,adreno-619.0", "qcom,adreno";
++		/*
++		 * The A619 in its "holi" variant has no real GMU, it uses the GMU
++		 * wrapper. The vendor DTS says so explicitly:
++		 *   compatible = "qcom,kgsl-3d0", "qcom,adreno-gpu-a619-holi";
++		 *   reg-names = ... "gmu_wrapper" ...
++		 * That is why there is no gmu node with PDC (the SM6350 PDC
++		 * addresses hang the SoC) and the kernel drives the clocks itself.
++		 *
++		 * chipid 0x06010901 => "qcom,adreno-619.1", which is what the
++		 * .machine = "qcom,sm6375" entry of the mainline a6xx catalog wants.
++		 * blair.dtsi del vendor confirma: qcom,chipid = <0x06010901>.
++		 */
++		compatible = "qcom,adreno-619.1", "qcom,adreno";
+ 		reg = <0x0 0x05900000 0x0 0x40000>,
+-		      <0x0 0x0599e000 0x0 0x1000>;
++		      <0x0 0x0599e000 0x0 0x1000>,
++		      <0x0 0x05961000 0x0 0x800>;
+ 		reg-names = "kgsl_3d0_reg_memory",
+-			    "cx_mem";
++			    "cx_mem",
++			    "cx_dbgc";
++
++		/* With no real GMU every clock has to be declared here */
++		clocks = <&gpucc GPU_CC_GX_GFX3D_CLK>,
++			 <&gpucc GPU_CC_AHB_CLK>,
++			 <&gcc GCC_BIMC_GPU_AXI_CLK>,
++			 <&gcc GCC_GPU_MEMNOC_GFX_CLK>,
++			 <&gpucc GPU_CC_CX_GMU_CLK>,
++			 <&gpucc GPU_CC_CXO_CLK>;
++		clock-names = "core",
++			      "iface",
++			      "mem_iface",
++			      "alt_mem_iface",
++			      "gmu",
++			      "xo";
+ 
+ 		interrupts = <GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>;
+ 
+ 		iommus = <&adreno_smmu 0>;
+ 		operating-points-v2 = <&gpu_opp_table>;
+-		qcom,gmu = <&gmu>;
+-		#cooling-cells = <2>;
+-
+ 		/*
+-		 * TODO: the correct GMU PDC addresses for SM6375 are unknown
+-		 * (the SM6350 ones hang the SoC). Enable once they are known.
++		 * The voltage corner that goes with the frequency belongs on the GX
++		 * rail, not CX: the vendor votes on S8A (vdd-parent-supply of
++		 * gpu_gx_gdsc in blair.dtsi). With VDDCX the core is underv olted at
++		 * 650 MHz and the GPU hangs under load.
++		 * sm6115 uses VDDCX because its A610 is fed from CX and that SoC has
++		 * no GX rail; sm6375 does have one (SM6375_VDDGX / gx_rwgx0_lvl).
+ 		 */
+-		status = "disabled";
++		power-domains = <&rpmpd SM6375_VDDGX>;
++		qcom,gmu = <&gmu_wrapper>;
++		#cooling-cells = <2>;
++
++		status = "okay";
+ 
+ 		zap-shader {
+ 			memory-region = <&pil_gpu_micro_code_mem>;
+ 			firmware-name = "qcom/sm6375/motorola/rhodep/a615_zap.mdt";
+ 		};
+ 
++		/*
++		 * Frequencies and levels taken from qcom,gpu-pwrlevels-0 in the
++		 * vendor blair.dtsi. Only up to NOM (650 MHz) is exposed for now;
++		 * the turbo bins (770/840/900) can be added once the GPU has been
++		 * confirmed stable.
++		 */
+ 		gpu_opp_table: opp-table {
+ 			compatible = "operating-points-v2";
+ 
+-			opp-940000000 {
+-				opp-hz = /bits/ 64 <940000000>;
+-				opp-level = <RPM_SMD_LEVEL_TURBO>;
+-			};
+-
+-			opp-840000000 {
+-				opp-hz = /bits/ 64 <840000000>;
+-				opp-level = <RPM_SMD_LEVEL_NOM_PLUS>;
++			opp-266000000 {
++				opp-hz = /bits/ 64 <266000000>;
++				required-opps = <&rpmpd_opp_low_svs>;
+ 			};
+ 
+-			opp-740000000 {
+-				opp-hz = /bits/ 64 <740000000>;
+-				opp-level = <RPM_SMD_LEVEL_NOM>;
++			opp-390000000 {
++				opp-hz = /bits/ 64 <390000000>;
++				required-opps = <&rpmpd_opp_svs>;
+ 			};
+ 
+-			opp-580000000 {
+-				opp-hz = /bits/ 64 <580000000>;
+-				opp-level = <RPM_SMD_LEVEL_SVS_PLUS>;
++			opp-490000000 {
++				opp-hz = /bits/ 64 <490000000>;
++				required-opps = <&rpmpd_opp_svs_plus>;
+ 			};
+ 
+-			opp-435000000 {
+-				opp-hz = /bits/ 64 <435000000>;
+-				opp-level = <RPM_SMD_LEVEL_SVS>;
+-			};
+-
+-			opp-320000000 {
+-				opp-hz = /bits/ 64 <320000000>;
+-				opp-level = <RPM_SMD_LEVEL_LOW_SVS>;
++			opp-650000000 {
++				opp-hz = /bits/ 64 <650000000>;
++				required-opps = <&rpmpd_opp_nom>;
+ 			};
+ 		};
+ 	};
+ 
+-	gmu: gmu@596a000 {
+-		compatible = "qcom,adreno-gmu-619.0", "qcom,adreno-gmu";
+-		reg = <0x0 0x0596a000 0x0 0x31000>,
+-		      <0x0 0x0b290000 0x0 0x10000>,
+-		      <0x0 0x0b490000 0x0 0x10000>;
+-		reg-names = "gmu",
+-			    "gmu_pdc",
+-			    "gmu_pdc_seq";
+-
+-		interrupts = <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>;
+-		interrupt-names = "hfi", "gmu";
+-
+-		clocks = <&gpucc GPU_CC_AHB_CLK>,
+-			 <&gpucc GPU_CC_CX_GMU_CLK>,
+-			 <&gpucc GPU_CC_CXO_CLK>,
+-			 <&gcc GCC_GPU_MEMNOC_GFX_CLK>,
+-			 <&gcc GCC_GPU_SNOC_DVM_GFX_CLK>;
+-		clock-names = "ahb", "gmu", "cxo", "axi", "memnoc";
++	gmu_wrapper: gmu@596a000 {
++		compatible = "qcom,adreno-gmu-wrapper";
++		reg = <0x0 0x0596a000 0x0 0x30000>;
++		reg-names = "gmu";
+ 
+ 		power-domains = <&gpucc GPU_CX_GDSC>,
+ 				<&gpucc GPU_GX_GDSC>;
+ 		power-domain-names = "cx", "gx";
+-
+-		iommus = <&adreno_smmu 5>;
+-
+-		operating-points-v2 = <&gmu_opp_table>;
+-
+-		status = "disabled";
+-
+-		gmu_opp_table: opp-table {
+-			compatible = "operating-points-v2";
+-
+-			opp-200000000 {
+-				opp-hz = /bits/ 64 <200000000>;
+-				opp-level = <RPM_SMD_LEVEL_LOW_SVS>;
+-			};
+-		};
+ 	};
+ };

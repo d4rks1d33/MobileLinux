@@ -1,0 +1,8 @@
+[Unit]
+Description=Verifica que WoWLAN quede armado con wlan0 asociada
+Documentation=man:NetworkManager.conf(5)
+ConditionPathExists=/sys/class/net/wlan0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rhodep-wowlan-check

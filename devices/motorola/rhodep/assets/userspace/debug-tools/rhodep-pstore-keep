@@ -1,0 +1,14 @@
+#!/bin/sh
+# Copy whatever pstore recovered from the previous boot to a name that will
+# not be overwritten, before systemd-pstore archives it under a fixed one.
+#
+# systemd-pstore writes /var/lib/systemd/pstore/console-ramoops-0 every boot,
+# so a crash record survives exactly until the next boot archives over it.
+# Three captures of the same bug were lost that way.
+D=/root/pstore-history
+mkdir -p "$D"
+for f in /sys/fs/pstore/*; do
+	[ -e "$f" ] || continue
+	cp -a "$f" "$D/$(date +%Y%m%d-%H%M%S)-$(basename "$f")" 2>/dev/null
+done
+sync

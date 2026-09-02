@@ -1,0 +1,58 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] arm64: dts: qcom: sm6375: add the TCSR download mode address
+
+Without it, qcom_scm has no way to touch download mode at all:
+
+	qcom_scm firmware:scm: No available mechanism for setting download mode
+
+qcom_scm_set_download_mode() wants either an SCM call this firmware does not
+offer, or a register named by qcom,dload-mode, and sm6375.dtsi provides neither.
+That message is printed only when download mode was asked for; the rest of the
+time the driver silently cannot clear it either, which is the more interesting
+half.
+
+The register is the same one the rest of this family uses. agatti.dtsi, which
+is qcm2290, carries
+
+	qcom,dload-mode = <&tcsr_regs 0x13000>;
+
+added in commit dc231840dca6 ("arm64: dts: qcom: qcm2290: Add TCSR download
+mode address"), whose reasoning applies here word for word: it is "especially
+useful for a clean watchdog reset without entry into download mode", and the
+gap went unnoticed because the error was suppressed.
+
+sm6375 had no TCSR syscon at all to point at, so add one. The base is confirmed
+twice over: sm6115.dtsi has tcsr_regs at 0x3c0000 with a size of 0x40000, and
+agatti.dtsi has it at the same address, while all three SoCs place tcsr_mutex
+at 0x340000. 0x13000 is well inside 0x40000, and nothing else in sm6375.dtsi
+claims anything between 0x340000 and 0x4411000.
+
+Tested on a Motorola Moto G82 5G (SM6375), where the point of it is a silent
+reset that leaves nothing behind: bootreason=watchdog, an empty pstore every
+time, and the reserved ramoops and debug carveouts holding uninitialised DRAM
+rather than data. The PMIC records those resets as PS_HOLD, meaning the SoC
+asked to go down rather than the PMIC deciding, so the reset path runs through
+the secure world, and being unable to tell it which kind of reset to perform is
+a plausible reason for DDR not surviving.
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -307,6 +307,7 @@
+ 			compatible = "qcom,scm-sm6375", "qcom,scm";
+ 			clocks = <&rpmcc RPM_SMD_CE1_CLK>;
+ 			clock-names = "core";
++			qcom,dload-mode = <&tcsr_regs 0x13000>;
+ 			#reset-cells = <1>;
+ 		};
+ 	};
+@@ -823,6 +824,11 @@
+ 			#hwlock-cells = <1>;
+ 		};
+ 
++		tcsr_regs: syscon@3c0000 {
++			compatible = "qcom,sm6375-tcsr", "syscon";
++			reg = <0x0 0x003c0000 0x0 0x40000>;
++		};
++
+ 		tlmm: pinctrl@500000 {
+ 			compatible = "qcom,sm6375-tlmm";
+ 			reg = <0 0x00500000 0 0x800000>;

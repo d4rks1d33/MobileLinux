@@ -1,0 +1,109 @@
+#!/bin/sh
+# rhodep-cleanup: reclaim disk space by deleting only regenerable junk.
+#
+# Everything here comes back on its own with normal use (caches), or is
+# re-downloaded on demand (apt archives, fwupd metadata), or is a rotated copy
+# of a log that still exists. Nothing that the port needs to boot, place a call,
+# or use the radio is touched, and no apt hold is affected: dpkg owns none of
+# these files.
+#
+# Run by hand (`sudo rhodep-cleanup`) or weekly via rhodep-cleanup.timer.
+# Pass -n / --dry-run to print sizes without deleting anything.
+
+set -eu
+
+DRY=0
+case "${1:-}" in
+	-n|--dry-run) DRY=1 ;;
+esac
+
+before=$(df -P / | awk 'NR==2{print $4}')
+
+say() { echo "rhodep-cleanup: $*"; }
+
+# du of a path, silent when it does not exist
+size() { du -sh "$1" 2>/dev/null | cut -f1 || true; }
+
+rm_glob() {
+	# rm -rf the *contents* of a directory, never the directory itself, so
+	# ownership/permissions survive. Args are directories.
+	for d in "$@"; do
+		[ -d "$d" ] || continue
+		if [ "$DRY" -eq 1 ]; then
+			say "would clear $d ($(size "$d"))"
+		else
+			find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+		fi
+	done
+}
+
+# 1. systemd journal. journald.conf already caps it at 100M, but vacuum makes
+#    the reclaim immediate instead of waiting for the next rotation.
+if [ "$DRY" -eq 1 ]; then
+	say "journal now: $(journalctl --disk-usage 2>/dev/null || echo '?')"
+else
+	journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+fi
+
+# 2. apt: downloaded .debs and stale package lists. Re-fetched on next install.
+if [ "$DRY" -eq 1 ]; then
+	say "apt archives: $(size /var/cache/apt/archives)"
+else
+	apt-get clean >/dev/null 2>&1 || true
+	apt-get autoclean >/dev/null 2>&1 || true
+fi
+
+# 3. user caches: GPU shader caches, thumbnails, browser caches. All rebuilt on
+#    demand. Home directories are discovered so a renamed/extra user is covered.
+#
+# KEEP list: some things under ~/.cache are cheap to lose in theory but
+# expensive in practice. ~/.cache/opencode/models.json is opencode's model
+# catalog; deleting it breaks `claude-free` until opencode is run again
+# ("no model catalog ... run opencode once"), so it is preserved. Add more
+# names here if another tool turns out to keep something load-bearing in cache.
+CACHE_KEEP="opencode"
+for home in /root /home/*; do
+	if [ -d "$home/.cache" ]; then
+		for entry in "$home/.cache"/* "$home/.cache"/.[!.]*; do
+			[ -e "$entry" ] || continue
+			name=$(basename "$entry")
+			keep=0
+			for k in $CACHE_KEEP; do [ "$name" = "$k" ] && keep=1; done
+			[ "$keep" -eq 1 ] && continue
+			if [ "$DRY" -eq 1 ]; then
+				say "would remove $entry ($(size "$entry"))"
+			else
+				rm -rf "$entry" 2>/dev/null || true
+			fi
+		done
+	fi
+	[ -d "$home/.npm/_cacache" ] && rm_glob "$home/.npm/_cacache"
+	[ -d "$home/.thumbnails" ] && rm_glob "$home/.thumbnails"
+done
+
+# 4. coredumps: crash dumps, never needed for running the phone.
+rm_glob /var/lib/systemd/coredump
+
+# 5. fwupd metadata cache: re-downloaded when fwupd next refreshes.
+rm_glob /var/cache/fwupd
+
+# 6. rotated / compressed logs. The live log stays; only its old copies go.
+if [ "$DRY" -eq 1 ]; then
+	say "old logs: $(find /var/log -type f \( -name '*.gz' -o -name '*.old' -o -regex '.*\.[0-9]+' \) 2>/dev/null | wc -l) files"
+else
+	find /var/log -type f \( -name '*.gz' -o -name '*.old' -o -regex '.*\.[0-9]+' \) -delete 2>/dev/null || true
+	# truncate (do not delete) any live log that has grown past 20M, so the
+	# open file handle keeps working.
+	find /var/log -type f -name '*.log' -size +20M -exec truncate -s 0 {} + 2>/dev/null || true
+fi
+
+# 7. scratch dirs.
+rm_glob /tmp /var/tmp
+
+after=$(df -P / | awk 'NR==2{print $4}')
+if [ "$DRY" -eq 1 ]; then
+	say "dry run, nothing deleted"
+else
+	freed=$(( (after - before) / 1024 ))
+	say "done, freed ${freed} MB ($(df -h / | awk 'NR==2{print $4}') free)"
+fi

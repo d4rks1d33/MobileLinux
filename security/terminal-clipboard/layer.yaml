@@ -1,0 +1,7 @@
+id: terminal-clipboard
+kind: convenience
+layer: desktop
+summary: copy/paste in the terminal as zsh widgets
+install: install.sh
+depends:
+  apt: [wl-clipboard, zsh]

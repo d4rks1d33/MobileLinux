@@ -1,0 +1,16 @@
+[Unit]
+Description=Populate the ADSP sensor registry tree from the stock partitions (rhodep)
+Documentation=file:///usr/share/doc/rhodep-sensors/README.md
+DefaultDependencies=no
+After=local-fs.target
+Before=rhodep-sscrpcd.service
+ConditionPathExists=!/var/lib/rhodep-ssc/.populated
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-ssc-populate
+ExecStartPost=/usr/local/sbin/rhodep-ssc-links
+
+[Install]
+WantedBy=multi-user.target

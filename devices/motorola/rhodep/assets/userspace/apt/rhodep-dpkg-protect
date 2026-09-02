@@ -1,0 +1,150 @@
+#!/bin/sh
+# Set or clear dpkg's "Protected" flag on this port's held packages.
+#
+# `apt-mark hold` is an apt concept. dpkg does not honour it at all:
+#
+#	apt-mark hold sl && dpkg -P sl
+#	  Removing sl (5.02-1+b2) ...          <- gone
+#
+# so a raw `dpkg -r` or `dpkg -P` walks straight past every apt-side guard this
+# port installs. dpkg has no pre-removal hook to bolt onto, but it does have a
+# field for exactly this case, and it obeys it:
+#
+#	dpkg: error processing package sl (--purge):
+#	 this is a protected package; it should not be removed
+#
+# Both verified on the device, dpkg 1.23.7.
+#
+# The field lives in /var/lib/dpkg/status and there is no dpkg command to set
+# it, so this edits that file. That is the most dangerous file on the system —
+# corrupt it and the phone has no package management — so every precaution here
+# is deliberate:
+#
+#   - never runs while dpkg or apt holds the frontend lock
+#   - writes a copy, validates it, and only then renames it into place, which
+#     is atomic within the filesystem
+#   - validation is `dpkg-query` actually parsing the result and reporting the
+#     same number of packages as before; anything else restores the backup
+#   - a backup is kept at /var/backups/dpkg.status.rhodep
+#   - fails open: any doubt at all and it changes nothing and exits 0
+#
+# The flag is lost whenever dpkg rewrites a package's entry, which is what an
+# upgrade or a reinstall does. rhodep-holds-enforce therefore reapplies it at
+# boot and on its timer.
+#
+# The deliberate way past it is dpkg's own:  dpkg --force-remove-protected
+# and the supported way is to release the hold first, which clears the flag:
+#	rhodep-hold-override release <package> "<reason>"
+set -u
+
+CANON=/usr/local/share/rhodep/apt-holds.txt
+EXCEPT=/etc/rhodep/apt-holds-exceptions
+STATUS=/var/lib/dpkg/status
+BACKUP=/var/backups/dpkg.status.rhodep
+
+log() { logger -t rhodep-dpkg-protect -p daemon.warning -- "$*" 2>/dev/null; echo "rhodep-dpkg-protect: $*"; }
+
+busy() {
+	# Do not touch the status file while anything else might be writing it.
+	for l in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock; do
+		[ -e "$l" ] || continue
+		if command -v fuser >/dev/null 2>&1 && fuser "$l" >/dev/null 2>&1; then
+			return 0
+		fi
+	done
+	pidof dpkg >/dev/null 2>&1 && return 0
+	pidof apt apt-get aptitude >/dev/null 2>&1 && return 0
+	return 1
+}
+
+# want_protected <pkg> -> 0 if this package should carry the flag
+want_protected() {
+	grep -qx "$1" "$CANON" 2>/dev/null || return 1
+	[ -r "$EXCEPT" ] && grep -qx "$1" "$EXCEPT" 2>/dev/null && return 1
+	dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'ok installed' || return 1
+	return 0
+}
+
+has_flag() { [ "$(dpkg-query -W -f='${Protected}' "$1" 2>/dev/null)" = "yes" ]; }
+
+# rewrite <add|del> <pkg...>
+rewrite() {
+	mode=$1; shift
+	[ $# -gt 0 ] || return 0
+
+	if busy; then log "dpkg or apt is running, not touching $STATUS"; return 0; fi
+	[ -w "$STATUS" ] || { log "$STATUS not writable, skipping"; return 0; }
+
+	before=$(dpkg-query -W -f='.' 2>/dev/null | wc -c)
+	[ "$before" -gt 0 ] || { log "dpkg-query gave nothing, refusing to touch $STATUS"; return 0; }
+
+	install -d -m 0755 "$(dirname "$BACKUP")" 2>/dev/null
+	cp -a "$STATUS" "$BACKUP" 2>/dev/null || { log "could not back up $STATUS, skipping"; return 0; }
+
+	tmp="$STATUS.rhodep-new"
+	rm -f "$tmp"
+	awk -v mode="$mode" -v list=" $* " '
+		function target(p) { return index(list, " " p " ") > 0 }
+		/^Package: / { pkg = substr($0, 10); inpkg = target(pkg) }
+		# Drop any existing flag in a target stanza; we re-add it below.
+		inpkg && /^Protected: / { next }
+		{ print }
+		# The field goes immediately after Package:, which is always first.
+		inpkg && /^Package: / && mode == "add" { print "Protected: yes" }
+	' "$STATUS" > "$tmp" 2>/dev/null || { log "awk failed, nothing changed"; rm -f "$tmp"; return 0; }
+
+	# Same number of stanzas, and not truncated.
+	old_n=$(grep -c '^Package: ' "$STATUS" 2>/dev/null)
+	new_n=$(grep -c '^Package: ' "$tmp" 2>/dev/null)
+	if [ "$old_n" != "$new_n" ] || [ ! -s "$tmp" ]; then
+		log "sanity check failed ($old_n vs $new_n packages), nothing changed"
+		rm -f "$tmp"; return 0
+	fi
+
+	chmod --reference="$STATUS" "$tmp" 2>/dev/null
+	mv -f "$tmp" "$STATUS" || { log "rename failed, nothing changed"; rm -f "$tmp"; return 0; }
+
+	# The real test: can dpkg still parse it, and does it see everything?
+	after=$(dpkg-query -W -f='.' 2>/dev/null | wc -c)
+	if [ "$after" != "$before" ]; then
+		log "ALERT: dpkg no longer reads $STATUS the same way ($before -> $after), RESTORING the backup"
+		cp -a "$BACKUP" "$STATUS"
+		return 0
+	fi
+	return 0
+}
+
+case "${1:-apply}" in
+apply)
+	[ -r "$CANON" ] || exit 0
+	add=""
+	while IFS= read -r pkg; do
+		case "$pkg" in ''|\#*) continue ;; esac
+		want_protected "$pkg" || continue
+		has_flag "$pkg" || add="$add $pkg"
+	done < "$CANON"
+	if [ -n "$add" ]; then
+		log "marking as protected in dpkg (blocks dpkg -r/-P):$add"
+		# shellcheck disable=SC2086
+		rewrite add $add
+	fi
+	;;
+clear)
+	shift
+	[ $# -gt 0 ] || { echo "usage: rhodep-dpkg-protect clear <package>..." >&2; exit 1; }
+	log "clearing dpkg protection for: $*"
+	rewrite del "$@"
+	;;
+status)
+	[ -r "$CANON" ] || exit 0
+	while IFS= read -r pkg; do
+		case "$pkg" in ''|\#*) continue ;; esac
+		printf '  %-28s hold=%s dpkg-protected=%s\n' "$pkg" \
+			"$(apt-mark showhold 2>/dev/null | grep -qx "$pkg" && echo yes || echo NO)" \
+			"$(has_flag "$pkg" && echo yes || echo NO)"
+	done < "$CANON"
+	;;
+*)
+	echo "usage: rhodep-dpkg-protect [apply|clear <pkg>...|status]" >&2; exit 1 ;;
+esac
+exit 0

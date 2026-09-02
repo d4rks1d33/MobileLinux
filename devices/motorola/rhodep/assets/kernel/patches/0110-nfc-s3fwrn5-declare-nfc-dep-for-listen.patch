@@ -1,0 +1,31 @@
+From: Kali NetHunter rhodep port
+Subject: [PATCH] nfc: s3fwrn5: declare NFC-DEP so the chip can enter listen mode
+
+The s3fwrn5 device is allocated with six poll/reader protocols and no target
+protocol, so `nfc_genl_start_poll` rejects any `tm_protocols` the client asks
+for and the controller never enters listen mode. The whole listen path in the
+NCI core -- `nci_set_listen_parameters()`, the `NCI_NFC_A_PASSIVE_LISTEN_MODE`
+config in `nci_rf_discover_req()`, the `NCI_LISTEN_ACTIVE` state machine -- is
+already there, but it is gated on `NFC_PROTO_NFC_DEP_MASK`, which this driver
+does not advertise.
+
+Add it. With NFC-DEP declared, a START_POLL carrying
+`tm_protocols = NFC_PROTO_NFC_DEP_MASK` makes the core send a RF_DISCOVER with
+NFC-A/F passive listen, and the S3NRN4V does the NFC-A anticollision in
+hardware -- so an external reader sees a card. That is the first step toward
+card emulation on this chip, which Android drives on the same silicon.
+
+This is the minimum to prove listen mode works on the hardware. Presenting a
+specific tag (fixed UID, Type 2/Type 4 responses) is follow-up work in the NCI
+core, tracked in docs/nfc.md.
+
+--- a/drivers/nfc/s3fwrn5/core.c
++++ b/drivers/nfc/s3fwrn5/core.c
+@@ -16,6 +16,7 @@
+ #define S3FWRN5_NFC_PROTOCOLS  (NFC_PROTO_JEWEL_MASK | \
+ 				NFC_PROTO_MIFARE_MASK | \
+ 				NFC_PROTO_FELICA_MASK | \
++				NFC_PROTO_NFC_DEP_MASK | \
+ 				NFC_PROTO_ISO14443_MASK | \
+ 				NFC_PROTO_ISO14443_B_MASK | \
+ 				NFC_PROTO_ISO15693_MASK)

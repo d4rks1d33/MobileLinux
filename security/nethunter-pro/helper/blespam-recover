@@ -1,0 +1,143 @@
+#!/bin/sh
+# blespam-recover -- last-resort recovery for a wedged Bluetooth chip.
+#
+# When the QCA WCN399x on this phone gets into the "Operation not
+# supported (95)" state, HCI Reset / down-up / rfkill block-unblock all
+# refuse to help. The one thing that consistently brings it back --
+# short of a reboot -- is unbinding the serdev driver from the UART
+# node and binding it again, which makes the kernel run
+# `qca_serdev_remove` (regulators off, GPIO down) followed by
+# `qca_serdev_probe` (regulators up, firmware TLV+NVM re-download).
+#
+# Invoked by the blespam module via the DBus helper. Runs as root.
+# Idempotent; safe to call even when the chip is already healthy (in
+# that case the unbind still fires but the rebind hands the chip back
+# in the same state).
+#
+# Exit codes:
+#   0  chip came back up, hci0 is UP RUNNING
+#   1  chip did not come back after unbind/bind
+#   2  no serdev driver found (rare -- USB dongle instead of UART?)
+
+set -eu
+
+# The chip is manufacturer-locked to the SoC UART on this phone, so the
+# serdev entry is always serial0-0 (only one UART bluetooth exists in
+# the platform devicetree). Fall back to autodiscovery for anyone who
+# ports the app to a different phone.
+find_serdev_dev() {
+    if [ -e /sys/bus/serial/devices/serial0-0/driver ]; then
+        echo serial0-0
+        return 0
+    fi
+    for d in /sys/bus/serial/devices/*; do
+        [ -e "$d/driver" ] || continue
+        drv=$(readlink "$d/driver" | xargs basename)
+        case "$drv" in
+            hci_uart_qca|hci_qca|serdev-hci|hci_uart_*)
+                basename "$d"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+find_serdev_drv() {
+    dev=$1
+    if [ -e /sys/bus/serial/devices/"$dev"/driver ]; then
+        readlink /sys/bus/serial/devices/"$dev"/driver | xargs basename
+        return 0
+    fi
+    return 1
+}
+
+DEV=$(find_serdev_dev) || {
+    echo "no bluetooth serdev device found (USB dongle?)"
+    exit 2
+}
+DRV=$(find_serdev_drv "$DEV") || {
+    echo "serdev driver path for $DEV not readable"
+    exit 2
+}
+
+echo "recovering hci0 via serdev $DEV (driver $DRV)"
+
+# 1) Stop bluetoothd if it happens to be up. It sometimes holds an mgmt
+#    socket open, and an open mgmt socket makes the unbind path wait
+#    on I/O we can't observe -- it eventually succeeds but takes 10s+
+#    which is longer than the DBus helper's default timeout. Masking is
+#    the boring, effective belt-and-braces move.
+if command -v systemctl >/dev/null 2>&1; then
+    timeout 5 systemctl stop bluetooth >/dev/null 2>&1 || true
+    timeout 5 systemctl mask bluetooth >/dev/null 2>&1 || true
+fi
+pkill -9 bluetoothd >/dev/null 2>&1 || true
+
+# 2) Unbind. The serdev "unbind" file takes the device name -- printf
+#    with no newline is the syntax the sysfs driver expects.
+UNBIND=/sys/bus/serial/drivers/"$DRV"/unbind
+BIND=/sys/bus/serial/drivers/"$DRV"/bind
+if [ ! -w "$UNBIND" ]; then
+    echo "cannot write to $UNBIND (are we root?)"
+    exit 1
+fi
+printf '%s' "$DEV" > "$UNBIND"
+echo "unbound"
+
+# 3) Give the regulators time to fully discharge. Empirically 500 ms is
+#    not enough on this phone -- some VDDPA rails need a full second to
+#    let go so the WCN chip actually sees the power cycle. 2 s is the
+#    sweet spot from the field notes.
+sleep 2
+
+# 4) Bind. The probe re-runs firmware download; that adds another few
+#    seconds on top of the sleep.
+printf '%s' "$DEV" > "$BIND"
+echo "rebound; waiting for firmware..."
+
+# 5) Wait for hci0 to reappear. dmesg would tell us the same thing but
+#    reading /sys is race-free.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -e /sys/class/bluetooth/hci0 ]; then
+        break
+    fi
+    sleep 0.5
+done
+if [ ! -e /sys/class/bluetooth/hci0 ]; then
+    echo "hci0 did not reappear after bind"
+    exit 1
+fi
+
+# 6) Bring it up. On this phone the driver leaves hci0 in DOWN+INIT
+#    for a moment after probe -- if we `hciconfig up` too early the
+#    ioctl succeeds but the state never leaves DOWN. The firmware TLV
+#    + NVM download takes 2-4 s after bind so we wait until we get a
+#    clean UP RUNNING or 12 s pass, whichever comes first.
+sleep 2
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    hciconfig hci0 up 2>/dev/null || true
+    sleep 1
+    STATE=$(hciconfig hci0 2>/dev/null | grep -o 'UP RUNNING' || true)
+    if [ "$STATE" = "UP RUNNING" ]; then
+        break
+    fi
+done
+if [ "$STATE" != "UP RUNNING" ]; then
+    echo "recovery failed: hci0 state = $(hciconfig hci0 2>/dev/null | head -3 | tail -1)"
+    exit 1
+fi
+
+# 7) Unmask AND restart bluetooth. The unbind path masked the unit to
+#    stop bluetoothd from grabbing the controller mid-recover; if we
+#    only unmask, the user's phone Bluetooth stays visibly off until
+#    they toggle it in Phosh. Starting it here (capped so a wedged
+#    controller can't block us) matches what the user expects: a
+#    Recover click hands the radio back to the system.
+if command -v systemctl >/dev/null 2>&1; then
+    timeout 5 systemctl unmask bluetooth >/dev/null 2>&1 || true
+    timeout 15 systemctl start bluetooth >/dev/null 2>&1 || true
+fi
+
+echo "OK: hci0 is UP RUNNING, bluetooth service started"
+exit 0

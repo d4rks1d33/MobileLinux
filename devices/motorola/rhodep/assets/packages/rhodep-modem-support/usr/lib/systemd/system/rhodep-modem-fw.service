@@ -1,0 +1,14 @@
+[Unit]
+Description=rhodep: expose modem/adsp/cdsp firmware from modem_a partition
+DefaultDependencies=no
+After=readonly-firmware.mount local-fs.target
+Requires=readonly-firmware.mount
+Before=rmtfs.service pd-mapper.service tqftpserv.service qcom-modem-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rhodep-fw-symlinks.sh
+
+[Install]
+WantedBy=multi-user.target

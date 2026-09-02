@@ -1,0 +1,69 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] nfc: s3fwrn5: make the NCI_PROP_FW_CFG clock settings tunable
+
+s3fwrn5_nci_rf_configure() sends NCI_PROP_FW_CFG with clk_type, clk_speed
+and clk_req hardcoded to 0x01, 0xff and 0xff before it uploads the RF
+registers. Those are not universal. The vendor stack on this phone sets
+FW_CFG_CLK_SPEED to 0x11 in libnfc-sec-vendor.conf, extracted from the
+LineageOS vendor image alongside the register blobs themselves.
+
+The failure mode this produces is quiet and misleading: a part whose clock
+is configured wrongly still answers NCI, still reports its protocols, still
+accepts RF_DISCOVER with status 0, and simply never finds a card. Every
+digital-side check passes. That is exactly the state this phone is in --
+the registers upload cleanly, "rfreg configuration update: success", and an
+EMV card and a MIFARE card passed repeatedly produce no interrupt at all.
+
+Make the three settable so the value can be swept without rebuilding, since
+the only way to find the right one here is to try. Defaults are unchanged,
+so this is a no-op for every board that works today.
+
+This is not yet known to fix anything. It is the one documented difference
+left between what the vendor sends this part and what mainline sends it.
+
+--- a/drivers/nfc/s3fwrn5/nci.c
++++ b/drivers/nfc/s3fwrn5/nci.c
+@@ -45,6 +45,18 @@
+ 
+ #define S3FWRN5_RFREG_SECTION_SIZE 252
+ 
++static int clk_type = 0x01;
++module_param(clk_type, int, 0644);
++MODULE_PARM_DESC(clk_type, "NCI_PROP_FW_CFG clock type (default 0x01, external crystal)");
++
++static int clk_speed = 0xff;
++module_param(clk_speed, int, 0644);
++MODULE_PARM_DESC(clk_speed, "NCI_PROP_FW_CFG clock speed (default 0xff; this phone's vendor stack uses 0x11)");
++
++static int clk_req = 0xff;
++module_param(clk_req, int, 0644);
++MODULE_PARM_DESC(clk_req, "NCI_PROP_FW_CFG clock request (default 0xff)");
++
+ int s3fwrn5_nci_rf_configure(struct s3fwrn5_info *info, const char *fw_name)
+ {
+ 	struct device *dev = &info->ndev->nfc_dev->dev;
+@@ -66,11 +78,19 @@
+ 	for (i = 0; i < fw->size; i += 4)
+ 		checksum += *((u32 *)(fw->data+i));
+ 
+-	/* Set default clock configuration for external crystal */
+-
+-	fw_cfg.clk_type = 0x01;
+-	fw_cfg.clk_speed = 0xff;
+-	fw_cfg.clk_req = 0xff;
++	/*
++	 * Clock configuration.
++	 *
++	 * These three have always been hardcoded, and 0xff is not what every
++	 * board wants: the vendor stack for this phone sets FW_CFG_CLK_SPEED to
++	 * 0x11 in libnfc-sec-vendor.conf. A part whose clock is configured
++	 * wrongly will still answer NCI and still accept RF_DISCOVER -- the
++	 * digital side is fine -- and simply never see a card, which is exactly
++	 * the symptom that led here.
++	 */
++	fw_cfg.clk_type = clk_type;
++	fw_cfg.clk_speed = clk_speed;
++	fw_cfg.clk_req = clk_req;
+ 	ret = nci_prop_cmd(info->ndev, NCI_PROP_FW_CFG,
+ 		sizeof(fw_cfg), (__u8 *)&fw_cfg);
+ 	if (ret < 0)

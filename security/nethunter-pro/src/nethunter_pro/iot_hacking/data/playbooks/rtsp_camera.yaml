@@ -1,0 +1,29 @@
+id: rtsp-camera
+device_type: camera
+vendor: Generic
+family: rtsp
+requires:
+  port: 554
+actions:
+  - id: cameradar
+    label: "Cameradar: brute-force RTSP paths + creds"
+    category: recon
+    dangerous: false
+    steps:
+      - run_tool:
+          tool: cameradar
+          args: ["--targets", "{{target.ip}}", "--ports", "554,8554"]
+          timeout: 90
+          save_as: cams
+
+  - id: describe
+    label: "RTSP DESCRIBE probe (no auth)"
+    category: recon
+    dangerous: false
+    steps:
+      - tcp_send:
+          host: "{{target.ip}}"
+          port: 554
+          payload: "DESCRIBE rtsp://{{target.ip}}:554/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: nethunter-pro\r\n\r\n"
+          read: 1024
+          save_as: describe_out

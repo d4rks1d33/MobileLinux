@@ -1,0 +1,100 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] drm/msm/dpu: cmd mode tearcheck ordering and INTF_CONFIG2 for DPU 5.0+
+
+Two changes needed for a DSC command mode panel on DPU 6.9 (SM6375):
+
+1) Program the tearcheck simple-buffer registers with the vsync counter
+   disabled and enable it afterwards, and program INTF_TEAR_WR_PTR_IRQ.
+   This mirrors the vendor driver exactly (sde_hw_intf.c: write cfg
+   without BIT(19), then WR_PTR_IRQ, then set BIT(19) and rewrite).
+
+2) Install program_intf_cmd_cfg() from DPU 5.0 instead of 7.0 and assign
+   INTF_CONFIG2 rather than OR-ing into it, so stale bits cannot survive.
+   DCE_DATA_COMPRESS stays gated to DPU 7.0+, matching the vendor's
+   _check_and_set_comp_bit(), which only sets BIT(12) for SDE >= 700 or
+   for SDE 6.x with dsc_4hs_merge.
+
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+@@ -377,20 +377,35 @@
+ 
+ 	c = &intf->hw;
+ 
+-	cfg = BIT(19); /* VSYNC_COUNTER_EN */
++	cfg = te->vsync_count;
+ 	if (te->hw_vsync_mode)
+ 		cfg |= BIT(20);
+ 
+-	cfg |= te->vsync_count;
+-
++	/*
++	 * Sequence taken from the downstream driver: the registers below are
++	 * single buffered, so the vsync counter (BIT(19)) has to be off while
++	 * they are programmed and switched on afterwards. Programming them
++	 * with the counter running can leave SYNC_WRCOUNT badly latched, which
++	 * stalls the command mode transfer after the first line (TE keeps
++	 * arriving and there is no underrun).
++	 */
+ 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
++	wmb();
++
+ 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_HEIGHT, te->sync_cfg_height);
+ 	DPU_REG_WRITE(c, INTF_TEAR_VSYNC_INIT_VAL, te->vsync_init_val);
+ 	DPU_REG_WRITE(c, INTF_TEAR_RD_PTR_IRQ, te->rd_ptr_irq);
++	/* downstream programs the write pointer too; mainline left it out */
++	DPU_REG_WRITE(c, INTF_TEAR_WR_PTR_IRQ, 1);
+ 	DPU_REG_WRITE(c, INTF_TEAR_START_POS, te->start_pos);
+ 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_THRESH,
+ 			((te->sync_threshold_continue << 16) |
+ 			 te->sync_threshold_start));
++
++	cfg |= BIT(19); /* VSYNC_COUNTER_EN */
++	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
++	wmb();
++
+ 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT,
+ 			(te->start_pos + te->sync_threshold_start + 1));
+ 
+@@ -590,9 +605,19 @@
+ static void dpu_hw_intf_program_intf_cmd_cfg(struct dpu_hw_intf *intf,
+ 					     struct dpu_hw_intf_cmd_mode_cfg *cmd_mode_cfg)
+ {
+-	u32 intf_cfg2 = DPU_REG_READ(&intf->hw, INTF_CONFIG2);
++	u32 intf_cfg2 = 0;
+ 
+-	if (cmd_mode_cfg->data_compress)
++	/*
++	 * Assign instead of OR: the bootloader can leave bits set that this SoC
++	 * does not support (DATABUS_WIDEN on a DSI 6G v2.4, for instance), and
++	 * that stalls the transfer after the first line. The downstream driver
++	 * always rewrites this register on every command mode enable.
++	 *
++	 * DCE_DATA_COMPRESS only belongs on DPU >= 7: the vendor driver
++	 * (_check_and_set_comp_bit) does not set it on SDE 6.x except
++	 * en topologias 4hs-merge.
++	 */
++	if (cmd_mode_cfg->data_compress && intf->mdss_ver->core_major_ver >= 7)
+ 		intf_cfg2 |= INTF_CFG2_DCE_DATA_COMPRESS;
+ 
+ 	if (cmd_mode_cfg->wide_bus_en)
+@@ -661,11 +686,16 @@
+ 		c->ops.disable_autorefresh = dpu_hw_intf_disable_autorefresh;
+ 	}
+ 
+-	/* Technically, INTF_CONFIG2 is present for DPU 5.0+, but
+-	 * we can configure it for DPU 7.0+ since the wide bus and DSC flags
+-	 * would not be set for DPU < 7.0 anyways
++	/*
++	 * INTF_CONFIG2 has existed since DPU 5.0. So far it was only programmed
++	 * on DPU 7.0+, assuming no earlier DPU used DSC or widebus, but SM6375
++	 * (DPU 6.9) has a command mode DSC panel and needs the
++	 * DCE_DATA_COMPRESS bit: without it the INTF counts uncompressed pixels
++	 * and the transfer stalls after the first line.
++	 * The data_compress and wide_bus_en flags are only set when the hardware
++	 * actually uses them, so enabling this from 5.0 on is safe.
+ 	 */
+-	if (mdss_rev->core_major_ver >= 7)
++	if (mdss_rev->core_major_ver >= 5)
+ 		c->ops.program_intf_cmd_cfg = dpu_hw_intf_program_intf_cmd_cfg;
+ 
+ 	return c;

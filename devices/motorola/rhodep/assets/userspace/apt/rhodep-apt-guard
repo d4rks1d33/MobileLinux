@@ -1,0 +1,86 @@
+#!/bin/sh
+# Refuse to let apt remove or purge a package this port holds.
+#
+# `apt-mark hold` does NOT protect against an explicit purge. It stops apt from
+# upgrading or autoremoving a package, and it stops it being pulled out as a
+# dependency, but `apt purge <name>` goes through regardless, and so does a
+# purge that lists a held package as collateral. On this device that means one
+# command can take out the audio stack, the modem transport, the WiFi firmware
+# or the on-screen keyboard, with no warning that anything unusual is happening.
+#
+# This runs as a DPkg::Pre-Install-Pkgs hook, which apt calls *before* handing
+# anything to dpkg and which can abort the whole transaction by exiting
+# non-zero. Nothing has been removed at that point, so refusing here is safe.
+#
+# It is a guard rail, not a lock: `apt-mark unhold <name>` still works and is
+# the intended way to remove something on purpose.
+#
+# The apt protocol, version 2, arrives on stdin as:
+#
+#     VERSION 2
+#     <configuration space, one key=value per line>
+#     <blank line>
+#     <pkgname> <old-version> <direction> <new-version> <action>
+#
+# where <action> is the path to a .deb, or **REMOVE** for a removal.
+
+set -u
+
+# Fail open. A bug in this script must never be able to wedge package
+# management on a phone, so anything unexpected lets the transaction proceed.
+holds=$(apt-mark showhold 2>/dev/null) || exit 0
+[ -n "$holds" ] || exit 0
+
+blocked=""
+seen_blank=0
+
+while IFS= read -r line; do
+	# Skip the version banner and the configuration space that follows it.
+	if [ "$seen_blank" -eq 0 ]; then
+		[ -z "$line" ] && seen_blank=1
+		continue
+	fi
+
+	[ -z "$line" ] && continue
+
+	# The action is the last field; a removal is spelled **REMOVE**.
+	case "$line" in
+		*"**REMOVE**") ;;
+		*) continue ;;
+	esac
+
+	pkg=${line%% *}
+	# Strip any :arch suffix, since apt-mark reports bare names.
+	pkg=${pkg%%:*}
+
+	for held in $holds; do
+		if [ "$pkg" = "$held" ]; then
+			blocked="$blocked $pkg"
+			break
+		fi
+	done
+done
+
+[ -n "$blocked" ] || exit 0
+
+cat >&2 <<EOF
+
+*** refusing to remove packages this port depends on ***
+
+   $(echo "$blocked" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
+
+These are on hold because removing them breaks something that is hard to notice
+and harder to put back: the audio stack, the modem transport, the WiFi firmware
+or the on-screen keyboard. A hold stops upgrades and autoremove but not an
+explicit purge, which is why this check exists.
+
+If you really mean it:
+
+   sudo apt-mark unhold <package>
+
+then run the command again. See userspace/apt/apply-holds.sh for why each one is
+held.
+
+EOF
+
+exit 1

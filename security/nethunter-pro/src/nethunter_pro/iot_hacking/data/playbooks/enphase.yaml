@@ -1,0 +1,32 @@
+id: enphase
+device_type: solar
+vendor: Enphase
+family: enphase
+requires: {}
+actions:
+  - id: production
+    label: "Read production (unauth in fw<7)"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/production.json"
+          save_as: prod
+
+  - id: inventory
+    label: "Enumerate microinverters"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/inventory.json"
+          save_as: inv
+
+  - id: info-xml
+    label: "Envoy info.xml"
+    category: recon
+    dangerous: false
+    steps:
+      - http_request:
+          url: "http://{{target.ip}}/info.xml"
+          save_as: info

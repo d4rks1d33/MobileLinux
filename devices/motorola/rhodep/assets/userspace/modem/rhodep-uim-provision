@@ -1,0 +1,82 @@
+#!/bin/sh
+# Activate the modem's primary GW provisioning session.
+#
+# On this modem the UICC application is only detected, never initialised, until
+# somebody opens a provisioning session for it:
+#
+#	Provisioning applications:
+#		Primary GW:   session doesn't exist
+#	Application [1]:
+#		Application state: 'detected'
+#		Personalization state: 'unknown'
+#
+# and in that state ModemManager gives up with "Couldn't check unlock status"
+# and reports failed/sim-missing. One QMI call fixes it:
+#
+#	--uim-change-provisioning-session=activate=yes,
+#	    session-type=primary-gw-provisioning,slot=1,aid=<AID>
+#	-> Application state: 'ready', Personalization state: 'ready'
+#
+# and the modem then registers on the network.
+#
+# This is not a workaround: it is what the vendor stack does. On Android
+# QCRIL/qcrild issues QMI_UIM_CHANGE_PROVISIONING_SESSION during its UIM
+# bring-up. ModemManager 1.24 does not, because most QMI modems auto-provision
+# the first card; this one does not, and the session is not remembered across a
+# reboot even with a read/write EFS (tested, see HANDOFF-SESSION4.md session 14).
+#
+# Runs before ModemManager so MM's single probe sees a card that is ready.
+set -u
+
+DEV=qrtr://0
+DEADLINE=$(( $(date +%s) + 120 ))
+
+log() { echo "rhodep-uim-provision: $*"; }
+
+card_status() { qmicli -d "$DEV" --uim-get-card-status 2>/dev/null; }
+
+# Wait for the UIM service (11) to be up and answering, and for the card to
+# have reported its applications. The modem is a remoteproc, this takes ~15 s
+# from boot and longer on a cold start.
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+	status=$(card_status)
+	case "$status" in
+		*"Application ID:"*) break ;;
+	esac
+	sleep 2
+done
+
+if [ -z "${status:-}" ] || ! echo "$status" | grep -q "Application ID:"; then
+	log "no UICC application reported before the deadline, nothing to do"
+	exit 0
+fi
+
+if ! echo "$status" | grep -q "Primary GW:   session doesn't exist"; then
+	log "primary GW session already exists, nothing to do"
+	exit 0
+fi
+
+# First usim application: take the AID that follows its "Application type:
+# 'usim'" line and strip the colons qmicli prints.
+aid=$(echo "$status" | awk '
+	/Application type: +.usim/ { want = 1 }
+	want && /Application ID:/   { getline; gsub(/[: \t]/, ""); print; exit }
+')
+
+if [ -z "$aid" ]; then
+	log "could not find a usim application ID; card status was:"
+	echo "$status" | sed 's/^/  /'
+	exit 0
+fi
+
+log "activating primary GW provisioning session for aid=$aid"
+if ! qmicli -d "$DEV" --uim-change-provisioning-session="activate=yes,session-type=primary-gw-provisioning,slot=1,aid=$aid"; then
+	log "provisioning session activation FAILED"
+	exit 1
+fi
+
+# Give MMGSDI a moment to run the application up to 'ready', purely so the log
+# records what happened.
+sleep 5
+card_status | sed -n '/Application \[1\]/,/PIN1 state/p' | sed 's/^/  /'
+exit 0

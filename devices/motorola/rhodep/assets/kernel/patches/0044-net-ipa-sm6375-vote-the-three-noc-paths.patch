@@ -1,0 +1,93 @@
+From: postmarketOS rhodep port
+Subject: [PATCH] net: ipa: sm6375: vote the three NoC paths, including IMEM
+
+ipa_data_v4_11_sm6375 was given interconnect_count = 0 by patch 0025, on the
+reasoning that mainline has no SM6375 interconnect provider and that the RPM
+holds bimc/cnoc/snoc at INT_MAX anyway. That got the IPA to probe, and it was
+verified that far and no further: the modem never reached a network at the
+time, so the IPA never actually moved anything.
+
+It does now, and the SoC watchdog-resets a few minutes after the modem
+registers. The bisection is in HANDOFF-SESSION4.md session 14: ipa.ko loaded
+with the modem registered dies in 3-10 minutes, either one alone runs
+indefinitely, and with the radio on but *not* registered it survives 13+
+minutes — that is, it needs the modem to actually attach, which is when the
+modem installs its filter and route tables in IMEM.
+
+The IPA reaches into IMEM here. That is not inference: before patch 0042 the
+SMMU caught the access at iova=0x0c123080 from cbfrsynra=0x4a0, the IPA AP
+context bank. And mainline only ever *maps* that window (ipa_imem_init); it
+never tells the modem about it, so the modem firmware already knows the tables
+live there and the AP's only job is to make the path work.
+
+Nothing votes for that path. The vendor asks for three:
+
+	blair.dtsi:3196, qcom,ipa@0x5800000
+		interconnects = <&system_noc MASTER_IPA &bimc SLAVE_EBI>,
+				<&system_noc MASTER_IPA &system_noc SLAVE_OCIMEM>,
+				<&bimc MASTER_AMPSS_M0 &config_noc SLAVE_IPA_CFG>;
+		interconnect-names = "ipa_to_ebi1", "ipa_to_imem", "appss_to_ipa";
+
+while ipa_data-v4.11.c, which SM6375 borrows from qcm2290/sm6115, declares only
+"memory" and "config". sdm845 (ipa_data-v3.5.1.c) declares "imem" too, so the
+driver supports the path; this IPA version's data simply never needed it.
+
+An on-chip SRAM slave with no voted path to it, touched by a DMA master, on a
+SoC that resets without printing a character when a slave does not answer, is
+a good enough explanation to test.
+
+Bandwidths: "memory" and "config" keep the values the other v4.11 SoCs use.
+"imem" takes sdm845's 350 MBps peak, which is the only figure mainline offers
+for this path; the vendor expresses the same thing as bus vectors per
+performance level rather than as a single number, and its NOMINAL row is of the
+same order.
+
+Needs the SM6375 interconnect provider (patch 0027) and the DT wiring
+(patches 0028 and 0045).
+
+--- a/drivers/net/ipa/data/ipa_data-v4.11.c
++++ b/drivers/net/ipa/data/ipa_data-v4.11.c
+@@ -416,6 +416,36 @@
+ 	.interconnect_count	= 0,
+ };
+ 
++/* Interconnect rates for SM6375, which unlike the other IPA v4.11 SoCs needs a
++ * path to IMEM: the modem's filter and route tables live there and the IPA
++ * reads them through its own context bank. See blair.dtsi, ipa node,
++ * interconnect-names = "ipa_to_ebi1", "ipa_to_imem", "appss_to_ipa".
++ */
++static const struct ipa_interconnect_data ipa_interconnect_data_sm6375[] = {
++	{
++		.name			= "memory",
++		.peak_bandwidth		= 600000,	/* 600 MBps */
++		.average_bandwidth	= 150000,	/* 150 MBps */
++	},
++	/* Average rate is unused for the next two interconnects */
++	{
++		.name			= "imem",
++		.peak_bandwidth		= 350000,	/* 350 MBps */
++		.average_bandwidth	= 0,		/* unused */
++	},
++	{
++		.name			= "config",
++		.peak_bandwidth		= 74000,	/* 74 MBps */
++		.average_bandwidth	= 0,		/* unused */
++	},
++};
++
++static const struct ipa_power_data ipa_power_data_sm6375 = {
++	.core_clock_rate	= 60 * 1000 * 1000,	/* Hz */
++	.interconnect_count	= ARRAY_SIZE(ipa_interconnect_data_sm6375),
++	.interconnect_data	= ipa_interconnect_data_sm6375,
++};
++
+ /* Configuration data for an SoC having IPA v4.11 */
+ const struct ipa_data ipa_data_v4_11 = {
+ 	.version		= IPA_VERSION_4_11,
+@@ -439,5 +469,5 @@
+ 	.endpoint_data		= ipa_gsi_endpoint_data,
+ 	.resource_data		= &ipa_resource_data,
+ 	.mem_data		= &ipa_mem_data_sm6375,
+-	.power_data		= &ipa_power_data_no_icc,
++	.power_data		= &ipa_power_data_sm6375,
+ };

@@ -268,7 +268,10 @@ install:
     required: true
     method: pmos-debug-shell
     boot_image: build            # built from a known-good pmOS boot image
-    build_from: assets/boot/boot-base.img
+    # The base boot image is non-redistributable (contains the pmOS initramfs +
+    # vendor DTB). Provide a known-good boot.img via --input, or build one from
+    # the pmaports kernel with assets/scripts/make-boot-from-apk.sh.
+    build_from: "@INPUT_BOOT_IMG@"
     transport: telnet://172.16.42.1:23
     notes: >
       Rescue image = pmOS kernel+DTB+initramfs with 'pmos.debug-shell' appended.
