@@ -1,0 +1,352 @@
+schema_version: 1
+
+id: rhodep
+vendor: motorola
+model: Moto G82 5G
+codename: rhodep
+aliases: [motorola-rhodep, XT2225-1]
+year: 2022
+chassis: handset
+architecture: aarch64
+maturity: community
+
+soc:
+  vendor: qualcomm
+  family: sm6375
+  marketing_name: Snapdragon 695 5G
+  platform: holi
+
+kernel:
+  type: mainline
+  version: 7.2-rc5
+  source: https://cdn.kernel.org/pub/linux/kernel/  # torvalds tarball
+  config: assets/kernel/config-motorola-rhodep.aarch64
+  # NetHunter symbols + BTF-mismatch are already merged into the base config;
+  # kept here to document the distro-specific fragment for other distros.
+  config_fragments: [assets/kernel/nethunter-config.fragment]
+  patches_dir: assets/kernel/patches
+  build:
+    toolchain: llvm
+    method: pmbootstrap
+    pmaports_pkg: linux-motorola-rhodep
+    # The Motorola ABL bootloader resets on a self-decompressing EFI-zboot
+    # image, so a FLAT Image (not Image.gz) must be used.
+    image: Image
+
+device_tree:
+  dtb: sm6375-motorola-rhodep.dtb
+  append_dtb: true          # DTB concatenated to the kernel Image (Android append_dtb)
+  source: in-kernel
+
+firmware:
+  redistributable: false     # proprietary; extracted from the device, never in git
+  package: firmware-motorola-rhodep
+  provides: [wifi, bluetooth, gpu, modem, adsp, cdsp, audio, nfc]
+  extract_from_device:
+    - { name: "ath10k/WCN3990/hw1.0/board-2.bin", source: "stock vendor", provides: wifi }
+    - { name: "ath10k/WCN3990/hw1.0/firmware-5.bin", source: "stock vendor", provides: wifi }
+    - { name: "qca/crbtfw21.tlv", source: "stock vendor", provides: bluetooth }
+    - { name: "qca/crnv21.bin", source: "stock vendor", provides: bluetooth }
+    - { name: "qcom/a619_gmu.bin", source: "stock vendor", provides: gpu }
+    - { name: "qcom/a630_sqe.fw", source: "stock vendor", provides: gpu }
+    - { name: "qcom/sm6375/motorola/rhodep/a615_zap.mdt", source: "stock vendor", provides: gpu }
+    - { name: "aw88261_acf.bin", source: "stock vendor (super)", dest: "firmware/aw88261_acf.bin", provides: audio }
+  runtime_mounts:
+    # WiFi/BT PDs live inside the modem; the .mbn firmware is served from modem_a.
+    - { source: /dev/disk/by-partlabel/modem_a, target: /readonly/firmware, fstype: ext4, options: "ro,nosuid,nodev,noexec" }
+
+hardware:
+  display:
+    status: partial
+    driver: msm-dsi + DSC1.1 cmd-mode + Novatek NT37701 panel
+    evidence: docs/display-cmd-dma-window-wip; patch 0098 auto-recovery verified
+    notes: 1080x2400 AMOLED, 60Hz exposed
+    caveats:
+      - "brightness-change underflow glitch under compositor; auto-recovers (modeset), prevention unresolved"
+    test: display
+  touchscreen:
+    status: supported
+    driver: Goodix GT9916S (SPI)
+    evidence: README 'What works'; HARDWARE-FACTS.md
+    test: touch
+  gpu:
+    status: supported
+    driver: Adreno 619 (freedreno/msm, a6xx GMU-wrapper)
+    evidence: OpenGL(KWin composites), Vulkan(Turnip), OpenCL(rusticl) all working
+    test: gpu
+  storage:
+    status: supported
+    driver: UFS + SDHCI (microSD UHS-I SDR104)
+    evidence: README; microSD enumerates at 202MHz
+    test: storage
+  usb:
+    status: supported
+    driver: dwc3 + role-switch; VBUS via SGM41542 (no mainline Type-C, enabled by I2C)
+    evidence: gadget+SSH; rhodep-usb-otg package
+    caveats: ["host-mode VBUS not automatic; enabled over I2C via 'otg' helper"]
+    test: usb
+  wifi:
+    status: supported
+    driver: ath10k_snoc (WCN3990)
+    evidence: README 'Internal WiFi + Bluetooth (WCN3990)'
+    caveats: ["monitor mode not feasible on internal chip (firmware raw 0); use USB WiFi for injection"]
+    test: wifi
+  bluetooth:
+    status: supported
+    driver: hci_qca (WCN3990)
+    evidence: docs/bluetooth-warm-reset-wip 150/150 pass; A2DP works
+    caveats: ["BT address is firmware default (locally-administered), not the assigned one"]
+    test: bluetooth
+  audio:
+    status: supported
+    driver: WCD9370 codec + 2x AW88261 amps via ADSP (q6/PipeWire)
+    evidence: AUDIO-SM6375.md speaker/earpiece/headphones/both mics/jack
+    caveats: ["in-call audio does not exist (no q6voice in mainline)", "requires non-redistributable AW88261 ACF blob"]
+    test: audio
+  battery:
+    status: supported
+    driver: CW2217 fuel gauge + SGM41542 charger
+    evidence: README; kernel hot-side thermal + userspace JEITA cold-side
+    test: battery
+  charging:
+    status: supported
+    driver: SGM41542
+    evidence: rhodep-battery-jeita package (cold-side JEITA protection)
+    test: charging
+  modem:
+    status: partial
+    driver: qrtr/rmtfs/pd-mapper + ModemManager; QDSP6 modem
+    evidence: docs/watchdog-ipa-lte-wip
+    notes: "GSM/2G voice+SMS+GPRS work and are stable across reboots"
+    caveats:
+      - "LTE/mobile-data BROKEN: with ipa.ko loaded and LTE attach, the SoC watchdog-resets in 3-10min; ipa.ko is blocked at boot"
+      - "no in-call audio"
+    test: modem
+  gnss:
+    status: partial
+    driver: QMI LOC over qrtr
+    evidence: GNSS-SM6375.md
+    notes: "cell-id positioning works (NMEA, survives)"
+    caveats: ["standalone GNSS session watchdog-resets the SoC in <1s"]
+    test: gnss
+  nfc:
+    status: partial
+    driver: s3fwrn5 (Samsung S3NRN4V), patches 0101-0105
+    evidence: docs/nfc.md reader verified on HW
+    notes: "reads NFC-A/B/F/V (MIFARE, EMV, FeliCa, ISO15693)"
+    caveats: ["card emulation (HCE) is WIP"]
+    test: nfc
+  fingerprint:
+    status: untested
+    evidence: no driver or documentation found
+  camera:
+    status: broken
+    driver: CAMSS present; sensor probe fails
+    evidence: CAMERA-SENSORS-FEASIBILITY.md; tools/camdiag (s5kjn1 probe fails)
+    notes: "stock blobs are Android HALs, not loadable on mainline"
+    test: camera
+  sensors:
+    status: supported
+    driver: SSC (Snapdragon Sensor Core) in ADSP via FastRPC; iio-sensor-proxy
+    evidence: README; auto-rotation works without kernel changes
+    caveats: ["sensors PD must be stopped before suspend or the ADSP asserts"]
+    test: sensors
+  vibrator:
+    status: supported
+    driver: gpio-vibrator (tlmm 100)
+    evidence: README; INPUT_GPIO_VIBRA
+    test: vibrator
+
+# Declarative form of the old rhodep-*.deb + userspace installers.
+device_packages:
+  - name: rhodep-modem-support
+    layer: soc
+    critical: true
+    kind: deb
+    purpose: "mounts modem_a, symlinks .mbn firmware, starts remoteprocs, ath10k-late; without it: no radio/WiFi/BT"
+    source: assets/packages/rhodep-modem-support
+  - name: rhodep-usb-otg
+    layer: vendor
+    critical: true
+    kind: deb
+    purpose: "USB-C port defaults to charge, OTG host over I2C (SGM41542); without it: USB dongles won't enumerate"
+    source: assets/packages/rhodep-usb-otg
+  - name: rhodep-battery-jeita
+    layer: device
+    critical: true
+    kind: deb
+    purpose: "stops charging below 0C (prevents lithium plating); without it: cold charging damages the cell"
+    source: assets/packages/rhodep-battery-jeita
+  - name: rhodep-gpu-vulkan
+    layer: device
+    kind: deb
+    purpose: "points Vulkan loader at Turnip freedreno ICD (Adreno 619)"
+    source: assets/packages/rhodep-gpu-vulkan
+  - name: rhodep-gpu-opencl
+    layer: device
+    kind: deb
+    purpose: "enables OpenCL via rusticl/freedreno (Adreno 619)"
+    source: assets/packages/rhodep-gpu-opencl
+  - name: rhodep-audio
+    layer: soc
+    kind: config
+    purpose: "UCM2/PipeWire/WirePlumber routing so audio starts without manual commands"
+    source: assets/userspace/audio
+  - name: rhodep-sensors
+    layer: soc
+    kind: installer-script
+    purpose: "FastRPC SSC listener + registry populate + suspend hook (ADSP safety)"
+    source: assets/userspace/sensors
+  - name: rhodep-ipa-hold
+    layer: soc
+    critical: true
+    kind: modprobe
+    purpose: "blacklists ipa.ko (LTE attach watchdog-resets the SoC); trade-off: no mobile data/MM"
+    source: assets/userspace/modem/rhodep-ipa-hold.conf
+
+first_boot:
+  mask_services:
+    - droid-juicer.service      # extracts fw from Android partitions; hangs boot without Android
+    - systemd-repart.service    # unnecessary and fails on gpt-in-partition layout
+  resize_rootfs: true           # grow ext4 to fill userdata on first boot
+  enable_services: []
+
+boot:
+  method: android-bootimg
+  android_bootimg:
+    header_version: 2
+    pagesize: 4096
+    base: "0x00000000"
+    offsets:
+      kernel: "0x00008000"
+      ramdisk: "0x01000000"
+      tags: "0x00000100"
+      second: "0x00000000"
+      dtb: "0x01f00000"
+    cmdline: "earlycon pmos_root_uuid=@ROOT_UUID@ pmos_rootfsopts=defaults panel_novatek_nt37701.clk_scale=100 ignore_loglevel watchdog_thresh=5 rootwait"
+    os_patch_level: "2026-07-01"
+  initramfs:
+    type: postmarketos
+    modules: [spi_geni_qcom, goodix_berlin_core, goodix_berlin_spi]
+    features: [usb-gadget-net, debug-shell, loop-gpt-4096]
+
+storage:
+  rootfs_layout: gpt-in-partition   # rootfs image is a GPT disk written inside userdata
+  rootfs_sector_size: 4096          # UFS native 4K
+  partitions:
+    - name: boot_a
+      role: boot
+      device_path: /dev/disk/by-partlabel/boot_a
+      writable_via: [fastboot]
+    - name: userdata
+      role: rootfs
+      device_path: /dev/disk/by-partlabel/userdata
+      writable_via: [dd]            # fastboot flash userdata is DENIED by Motorola ABL
+      notes: "contains a full GPT Linux disk (p1 boot vfat + p2 root ext4), sector 4096"
+    - name: modem_a
+      role: firmware
+      device_path: /dev/disk/by-partlabel/modem_a
+      writable_via: []
+      notes: "mounted read-only to serve modem/WiFi/BT firmware"
+    - name: super
+      role: vendor
+      device_path: /dev/sde25
+      writable_via: []
+      notes: "Android dynamic partitions; not used by the port"
+
+install:
+  strategy: rescue-dd
+  ab_slots: true
+  slots: [a, b]
+  fastbootd: false
+  unlock_required: true
+  boot_partition: boot_a
+  rootfs_target:
+    partition: userdata
+    method: dd
+  rescue:
+    required: true
+    method: pmos-debug-shell
+    boot_image: build            # built from a known-good pmOS boot image
+    build_from: assets/boot/boot-base.img
+    transport: telnet://172.16.42.1:23
+    notes: >
+      Rescue image = pmOS kernel+DTB+initramfs with 'pmos.debug-shell' appended.
+      Brings up USB-gadget networking and a root telnet WITHOUT mounting root,
+      so userdata can be dd-written. Also used for recovery.
+  steps:
+    - action: message
+      description: "rescue-dd: userdata cannot be written by fastboot on this device"
+    - action: flash-partition
+      description: "Flash the rescue image to the boot slot"
+      partition: boot_a
+      image: rescue
+      via: fastboot
+      destructive: true
+    - action: set-active-slot
+      slot: a
+      via: fastboot
+    - action: reboot
+      via: fastboot
+    - action: wait-transport
+      description: "Wait for the rescue telnet at 172.16.42.1:23"
+    - action: dd-partition
+      description: "Stream the Kali GPT disk into userdata"
+      partition: userdata
+      image: rootfs
+      via: dd
+      destructive: true
+    - action: flash-partition
+      description: "Flash the distro boot image"
+      partition: boot_a
+      image: boot
+      via: fastboot
+      destructive: true
+    - action: set-active-slot
+      slot: a
+      via: fastboot
+    - action: reboot
+      via: fastboot
+    - action: message
+      description: "First boot resizes the rootfs and starts the desktop"
+
+ota:
+  strategy: ab
+  rollback: true
+  slots: [a, b]
+  bootloader_integration:
+    type: android-bootctl        # slot selection via Android misc (qbootctl)
+    backend: rauc-custom
+  updatable:
+    rootfs: true
+    kernel: true
+    initramfs: true
+    device_packages: true
+    firmware: false
+    bootloader: false            # never auto-update the Motorola bootloader
+
+tests:
+  - boot
+  - display
+  - touch
+  - gpu
+  - storage
+  - usb
+  - wifi
+  - bluetooth
+  - audio
+  - battery
+  - charging
+  - modem
+  - gnss
+  - nfc
+  - sensors
+  - vibrator
+
+sources:
+  imported_from: nethunter-rhodep-repo
+  postmarketos_wiki: https://wiki.postmarketos.org/wiki/Motorola_Moto_G82_5G_(motorola-rhodep)
+  pmaports: device/testing/device-motorola-rhodep
+  notes: >
+    Migrated from nethunter-rhodep-repo. Hardware statuses are evidence-based
+    from that repo's docs/ WIP notes and README 'What works' as of 2026-09.

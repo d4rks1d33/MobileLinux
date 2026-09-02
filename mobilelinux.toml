@@ -1,0 +1,24 @@
+# MobileLinux repository configuration.
+# This file marks the repository root and configures default paths.
+# The CLI discovers it by walking up from the current directory.
+
+[repo]
+name = "mobilelinux"
+schema_version = 1
+
+[paths]
+# All paths are relative to the repository root (the directory holding this file).
+devices = "devices"
+distros = "distros"
+desktops = "desktops"
+security = "security"
+schema = "schema"
+# Where build artifacts (kernels, rootfs, images) are written.
+output = "out"
+# Where the reference repo lives (read-only source of assets for migration).
+reference_repo = "../nethunter-rhodep-repo"
+
+[defaults]
+distro = "kali"
+desktop = "phosh"
+channel = "stable"

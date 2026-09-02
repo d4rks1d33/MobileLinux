@@ -1,0 +1,32 @@
+# Build output / artifacts
+/out/
+*.img
+*.img.xz
+*.tar.xz
+*.raucb
+*.deb
+!schema/**/*.deb
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Signing keys (NEVER commit private release keys)
+/keys/
+*.key
+*.pem
+!keys/README.md
+
+# Local firmware blobs (non-redistributable)
+**/assets/firmware/**/*.bin
+**/assets/firmware/**/*.mbn
+**/assets/firmware/**/*.mdt
+
+# Editor
+.DS_Store
+*.swp

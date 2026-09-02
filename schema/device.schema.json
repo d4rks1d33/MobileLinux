@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mobilelinux.dev/schema/device.schema.json",
+  "title": "MobileLinux Device Definition",
+  "description": "Declarative definition of a phone/tablet: identity, SoC, kernel, device-tree, firmware, hardware status, boot, install/flash strategy, OTA capabilities and hardware tests. This is the single source of truth for a device; adding a new device should mostly mean adding one of these files plus assets.",
+  "type": "object",
+  "required": ["schema_version", "id", "vendor", "model", "codename", "architecture", "soc", "kernel", "hardware", "boot", "install"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Version of this schema the file targets. Bump when the schema changes incompatibly."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Short unique id, usually the codename (e.g. 'rhodep')."
+    },
+    "vendor": { "type": "string", "description": "Manufacturer slug, e.g. 'motorola', 'pine64'." },
+    "model": { "type": "string", "description": "Human model name, e.g. 'Moto G82 5G'." },
+    "codename": { "type": "string", "description": "Vendor/pmOS codename, e.g. 'rhodep'." },
+    "aliases": {
+      "type": "array", "items": { "type": "string" },
+      "description": "Other names this device is known by (marketing names, alt codenames)."
+    },
+    "year": { "type": "integer" },
+    "chassis": {
+      "type": "string",
+      "enum": ["handset", "tablet", "laptop", "convertible", "desktop", "watch", "embedded"],
+      "default": "handset"
+    },
+    "architecture": {
+      "type": "string",
+      "enum": ["aarch64", "armv7", "armhf", "x86_64", "riscv64"],
+      "description": "CPU architecture (aarch64 for arm64 phones)."
+    },
+    "soc": {
+      "type": "object",
+      "required": ["vendor", "family"],
+      "additionalProperties": false,
+      "properties": {
+        "vendor": { "type": "string", "description": "SoC vendor: qualcomm, allwinner, samsung, nxp, mediatek, ..." },
+        "family": { "type": "string", "description": "SoC family/platform, e.g. 'sm6375', 'sdm845', 'a64', 'exynos4412', 'imx8mq'." },
+        "marketing_name": { "type": "string", "description": "e.g. 'Snapdragon 695 5G'." },
+        "platform": { "type": "string", "description": "pmOS soc-glue / platform group, e.g. 'holi', 'qcom-sdm845'." }
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "required": ["type", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "enum": ["mainline", "stable", "downstream", "vendor"],
+          "description": "mainline = torvalds/linux; stable = x.y.z stable tree; downstream/vendor = forked BSP kernel." },
+        "version": { "type": "string", "description": "Kernel version string, e.g. '7.2-rc5', '6.6.30'." },
+        "source": { "type": "string", "description": "Git URL or tarball URL of the kernel source." },
+        "branch": { "type": "string" },
+        "tag": { "type": "string" },
+        "config": { "type": "string", "description": "Path (relative to device dir) to the kernel .config, or name of a shared config." },
+        "config_fragments": { "type": "array", "items": { "type": "string" },
+          "description": "Optional Kconfig fragments merged on top of config (e.g. distro-specific like nethunter)." },
+        "patches_dir": { "type": "string", "description": "Path (relative to device dir) to a directory of ordered *.patch files." },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "toolchain": { "type": "string", "enum": ["gcc", "llvm"], "default": "gcc" },
+            "method": { "type": "string", "enum": ["pmbootstrap", "make", "kbuild"], "default": "make",
+              "description": "How the kernel image is produced. 'pmbootstrap' reuses a pmaports APKBUILD." },
+            "pmaports_pkg": { "type": "string", "description": "If method=pmbootstrap, the linux-* package name." },
+            "image": { "type": "string", "enum": ["Image", "Image.gz", "zImage", "uImage", "Image.gz-dtb"], "default": "Image",
+              "description": "Which arch/*/boot image to use. Some bootloaders (Motorola ABL) require flat 'Image', not 'Image.gz'." }
+          }
+        }
+      }
+    },
+    "device_tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dtb": { "type": "string", "description": "DTB filename produced by the kernel build, e.g. 'sm6375-motorola-rhodep.dtb'." },
+        "append_dtb": { "type": "boolean", "default": false,
+          "description": "If true, DTB is concatenated to the kernel Image (Android append_dtb). Required by some Motorola bootloaders." },
+        "overlays": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string", "description": "In-tree, out-of-tree path, or 'in-kernel'." }
+      }
+    },
+    "firmware": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "redistributable": { "type": "boolean", "default": true,
+          "description": "False if blobs are proprietary and must be extracted from the device (not shipped in git)." },
+        "package": { "type": "string", "description": "Name of the firmware package, e.g. 'firmware-motorola-rhodep'." },
+        "provides": {
+          "type": "array", "items": { "type": "string" },
+          "description": "Which subsystems the firmware serves: wifi, bluetooth, gpu, modem, adsp, cdsp, audio, nfc, display."
+        },
+        "extract_from_device": {
+          "type": "array",
+          "description": "Blobs that must be extracted from the running/stock device (non-redistributable).",
+          "items": {
+            "type": "object",
+            "required": ["name", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "source": { "type": "string", "description": "Where on the stock device it lives (partition/path)." },
+              "dest": { "type": "string", "description": "Where it must land in the rootfs firmware tree." },
+              "provides": { "type": "string" }
+            }
+          }
+        },
+        "runtime_mounts": {
+          "type": "array",
+          "description": "Partitions mounted read-only at runtime to serve firmware (e.g. modem_a for the .mbn/.bNN blobs).",
+          "items": {
+            "type": "object",
+            "required": ["source", "target"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "description": "e.g. /dev/disk/by-partlabel/modem_a" },
+              "target": { "type": "string", "description": "e.g. /readonly/firmware" },
+              "fstype": { "type": "string", "default": "ext4" },
+              "options": { "type": "string", "default": "ro,nosuid,nodev,noexec" }
+            }
+          }
+        }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "description": "Per-feature support status. Statuses MUST be evidence-based. Never claim 'supported' without a passing test or documented evidence.",
+      "additionalProperties": { "$ref": "#/$defs/hardwareFeature" },
+      "properties": {
+        "display": { "$ref": "#/$defs/hardwareFeature" },
+        "touchscreen": { "$ref": "#/$defs/hardwareFeature" },
+        "gpu": { "$ref": "#/$defs/hardwareFeature" },
+        "storage": { "$ref": "#/$defs/hardwareFeature" },
+        "usb": { "$ref": "#/$defs/hardwareFeature" },
+        "wifi": { "$ref": "#/$defs/hardwareFeature" },
+        "bluetooth": { "$ref": "#/$defs/hardwareFeature" },
+        "audio": { "$ref": "#/$defs/hardwareFeature" },
+        "battery": { "$ref": "#/$defs/hardwareFeature" },
+        "charging": { "$ref": "#/$defs/hardwareFeature" },
+        "modem": { "$ref": "#/$defs/hardwareFeature" },
+        "gnss": { "$ref": "#/$defs/hardwareFeature" },
+        "nfc": { "$ref": "#/$defs/hardwareFeature" },
+        "fingerprint": { "$ref": "#/$defs/hardwareFeature" },
+        "camera": { "$ref": "#/$defs/hardwareFeature" },
+        "sensors": { "$ref": "#/$defs/hardwareFeature" },
+        "vibrator": { "$ref": "#/$defs/hardwareFeature" }
+      }
+    },
+    "device_packages": {
+      "type": "array",
+      "description": "Device-specific packages/config that make the hardware work (the declarative form of the old rhodep-*.deb and userspace installers). These are applied on top of any distro rootfs.",
+      "items": {
+        "type": "object",
+        "required": ["name", "layer", "purpose"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "layer": { "type": "string", "enum": ["generic", "soc", "vendor", "device"],
+            "description": "Reuse scope: generic=any phone, soc=same SoC family, vendor=same manufacturer, device=this device only. Maps to audit classes A/B/C/D." },
+          "purpose": { "type": "string", "description": "One line: what breaks if this is absent." },
+          "source": { "type": "string", "description": "Path (relative to device or shared layer dir) to the package source / installer." },
+          "kind": { "type": "string", "enum": ["deb", "installer-script", "systemd-dropin", "modprobe", "udev", "config"], "default": "deb" },
+          "critical": { "type": "boolean", "default": false, "description": "If true, must be present for a usable phone (radio/boot/display)." }
+        }
+      }
+    },
+    "first_boot": {
+      "type": "object",
+      "description": "Actions applied on first boot (the declarative form of the manual 'first boot fixes').",
+      "additionalProperties": false,
+      "properties": {
+        "mask_services": { "type": "array", "items": { "type": "string" },
+          "description": "systemd units to mask, e.g. droid-juicer.service, systemd-repart.service." },
+        "enable_services": { "type": "array", "items": { "type": "string" } },
+        "resize_rootfs": { "type": "boolean", "default": false, "description": "Grow the root filesystem to fill its partition on first boot." },
+        "run": { "type": "array", "items": { "type": "string" }, "description": "Extra commands to run once." }
+      }
+    },
+    "boot": {
+      "type": "object",
+      "required": ["method"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "enum": ["android-bootimg", "uboot-extlinux", "uboot-raw", "efi", "custom"],
+          "description": "How the kernel is booted." },
+        "android_bootimg": {
+          "type": "object",
+          "description": "Parameters for building an Android boot image (when method=android-bootimg).",
+          "additionalProperties": false,
+          "properties": {
+            "header_version": { "type": "integer", "enum": [0, 1, 2, 3, 4], "default": 2 },
+            "pagesize": { "type": "integer", "default": 2048 },
+            "base": { "type": "string" },
+            "offsets": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kernel": { "type": "string" }, "ramdisk": { "type": "string" },
+                "tags": { "type": "string" }, "second": { "type": "string" }, "dtb": { "type": "string" }
+              }
+            },
+            "cmdline": { "type": "string", "description": "Kernel command line baked into the boot image." },
+            "os_version": { "type": "string" },
+            "os_patch_level": { "type": "string" },
+            "extra_args": { "type": "string" }
+          }
+        },
+        "initramfs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "enum": ["postmarketos", "dracut", "mkinitcpio", "initramfs-tools", "custom"], "default": "postmarketos" },
+            "modules": { "type": "array", "items": { "type": "string" },
+              "description": "Kernel modules needed in the initramfs (e.g. spi_geni_qcom, goodix_berlin for touch)." },
+            "features": { "type": "array", "items": { "type": "string" },
+              "description": "e.g. 'usb-gadget-net', 'debug-shell', 'loop-gpt-4096'." }
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "description": "Storage / partition facts needed by install and OTA.",
+      "additionalProperties": false,
+      "properties": {
+        "rootfs_layout": { "type": "string", "enum": ["plain", "gpt-in-partition", "whole-disk"], "default": "plain",
+          "description": "'gpt-in-partition' = the rootfs image is itself a GPT disk written inside an Android partition (rhodep userdata case)." },
+        "rootfs_sector_size": { "type": "integer", "enum": [512, 4096], "default": 512,
+          "description": "Logical sector size of the rootfs image (UFS devices use 4096)." },
+        "partitions": {
+          "type": "array",
+          "description": "Named partitions relevant to install/OTA (NOT a full GPT dump).",
+          "items": {
+            "type": "object",
+            "required": ["name", "role"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "description": "Partition label, e.g. 'userdata', 'boot_a', 'modem_a'." },
+              "role": { "type": "string", "enum": ["boot", "rootfs", "firmware", "vendor", "misc", "vbmeta", "dtbo", "persist", "other"] },
+              "device_path": { "type": "string", "description": "e.g. /dev/disk/by-partlabel/userdata" },
+              "writable_via": { "type": "array", "items": { "type": "string", "enum": ["fastboot", "fastbootd", "dd", "heimdall", "uuu", "recovery"] },
+                "description": "Which mechanisms are ALLOWED to write this partition on this device. rhodep userdata: ['dd'] only (fastboot denied)." },
+              "notes": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "required": ["strategy"],
+      "additionalProperties": false,
+      "description": "How the device is installed/flashed. This is a first-class, per-device concern. Do NOT assume fastboot userdata works.",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["fastboot", "fastbootd", "rescue-dd", "adb-shell-dd", "heimdall", "heimdall-isorec", "sdcard", "recovery", "uuu", "mtkclient", "custom"],
+          "description": "The installation strategy. Each maps to an installer backend. Chosen from strategies observed on REAL devices."
+        },
+        "ab_slots": { "type": "boolean", "default": false, "description": "Does the device use Android A/B slots?" },
+        "slots": { "type": "array", "items": { "type": "string" }, "description": "e.g. ['a','b']." },
+        "fastbootd": { "type": "boolean", "default": false, "description": "Does the device have fastbootd (userspace fastboot)?" },
+        "unlock_required": { "type": "boolean", "default": true, "description": "Bootloader unlock required before flashing." },
+        "boot_partition": { "type": "string", "description": "Partition the boot image is flashed to, e.g. 'boot_a', 'boot', 'BOOT'." },
+        "rootfs_target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "partition": { "type": "string", "description": "Partition that receives the rootfs image, e.g. 'userdata'." },
+            "method": { "type": "string", "enum": ["fastboot", "fastbootd", "dd", "heimdall", "uuu", "sdcard-image"],
+              "description": "How the rootfs is written." }
+          }
+        },
+        "rescue": {
+          "type": "object",
+          "description": "Optional rescue/debug environment used to write partitions the bootloader won't (and reused for recovery).",
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean", "default": false },
+            "method": { "type": "string", "enum": ["pmos-debug-shell", "recovery", "jumpdrive", "uuu-ramboot", "sdcard-boot", "custom"] },
+            "boot_image": { "type": "string", "description": "Asset path of the prebuilt rescue image, or 'build' to build it." },
+            "build_from": { "type": "string", "description": "Base boot image the rescue image is derived from." },
+            "transport": { "type": "string", "description": "How the host reaches the rescue env, e.g. 'telnet://172.16.42.1:23', 'ssh://user@172.16.42.1'." },
+            "notes": { "type": "string" }
+          }
+        },
+        "steps": {
+          "type": "array",
+          "description": "Ordered, declarative install steps. The installer backend interprets these; they are NOT raw shell for arbitrary devices.",
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "additionalProperties": false,
+            "properties": {
+              "action": { "type": "string", "enum": [
+                "flash-partition", "dd-partition", "set-active-slot", "reboot", "reboot-bootloader",
+                "reboot-fastbootd", "enter-rescue", "wait-transport", "run-remote", "sideload", "message"] },
+              "description": { "type": "string" },
+              "partition": { "type": "string" },
+              "image": { "type": "string", "description": "Artifact key: 'boot', 'rootfs', 'rescue', or a filename." },
+              "slot": { "type": "string" },
+              "via": { "type": "string", "enum": ["fastboot", "fastbootd", "dd", "heimdall", "uuu", "recovery"] },
+              "destructive": { "type": "boolean", "default": false },
+              "command": { "type": "string", "description": "For run-remote: command executed inside the rescue/OS env." }
+            }
+          }
+        }
+      }
+    },
+    "ota": {
+      "type": "object",
+      "description": "Over-the-air update capabilities. Declares what the hardware allows; the framework degrades gracefully.",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": { "type": "string", "enum": ["ab", "single-rootfs"], "default": "single-rootfs" },
+        "rollback": { "type": "boolean", "default": false },
+        "slots": { "type": "array", "items": { "type": "string" } },
+        "bootloader_integration": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "enum": ["android-bootctl", "uboot-bootcount", "efi-boot-assessment", "none"], "default": "none",
+              "description": "How slot selection / boot success is recorded. android-bootctl uses the Android misc partition (qbootctl)." },
+            "backend": { "type": "string", "enum": ["rauc-custom", "rauc-uboot", "rauc-grub", "none"], "default": "none" }
+          }
+        },
+        "updatable": {
+          "type": "object",
+          "description": "Which components an OTA may update on this device.",
+          "additionalProperties": false,
+          "properties": {
+            "rootfs": { "type": "boolean", "default": true },
+            "kernel": { "type": "boolean", "default": true },
+            "initramfs": { "type": "boolean", "default": true },
+            "device_packages": { "type": "boolean", "default": true },
+            "firmware": { "type": "boolean", "default": false },
+            "bootloader": { "type": "boolean", "default": false, "description": "Almost always false; never auto-update bootloader without an extremely clear, safe mechanism." }
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "array",
+      "description": "Which hardware test modules apply to this device (see testing/tests/).",
+      "items": { "type": "string" }
+    },
+    "sources": {
+      "type": "object",
+      "description": "Provenance: where this device support comes from.",
+      "additionalProperties": false,
+      "properties": {
+        "postmarketos_wiki": { "type": "string" },
+        "pmaports": { "type": "string", "description": "Path in pmaports.git, e.g. 'device/community/device-oneplus-enchilada'." },
+        "imported_from": { "type": "string", "enum": ["pmaports", "manual", "nethunter-rhodep-repo"], "default": "manual" },
+        "notes": { "type": "string" }
+      }
+    },
+    "maturity": {
+      "type": "string",
+      "enum": ["main", "community", "testing", "downstream", "experimental"],
+      "default": "testing",
+      "description": "Overall maturity tier (mirrors pmOS categories)."
+    }
+  },
+  "$defs": {
+    "hardwareFeature": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["supported", "partial", "broken", "untested", "unsupported", "not-present"],
+          "description": "supported=works; partial=works with caveats; broken=present but breaks/unsafe; untested=no evidence; unsupported=won't work on mainline; not-present=device lacks the hardware."
+        },
+        "weight": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Relative importance for the overall support percentage. Core features (display/boot) weigh more."
+        },
+        "driver": { "type": "string", "description": "Kernel driver / mechanism, e.g. 'msm-dsi + NT37701 panel', 'ath10k_snoc'." },
+        "evidence": { "type": "string", "description": "Where the status comes from (doc path, test name, wiki). REQUIRED in spirit for 'supported'." },
+        "notes": { "type": "string" },
+        "caveats": { "type": "array", "items": { "type": "string" } },
+        "test": { "type": "string", "description": "Name of the test module that verifies this feature." }
+      }
+    }
+  }
+}

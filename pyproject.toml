@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobilelinux"
+version = "0.1.0"
+description = "Automated device porting platform for mobile Linux (portable across devices and distros)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "MobileLinux contributors" }]
+keywords = ["linux", "mobile", "postmarketos", "kali", "porting", "ota", "fastboot"]
+
+# Runtime deps are intentionally minimal. PyYAML is the only hard dep; the
+# framework degrades gracefully (dry-run) when external build/flash tools are
+# absent, and jsonschema is optional (a bundled minimal validator is used if
+# it is not installed).
+dependencies = [
+    "PyYAML>=5.3",
+]
+
+[project.optional-dependencies]
+validate = ["jsonschema>=4.0"]
+dev = ["jsonschema>=4.0", "pytest>=7.0"]
+
+[project.scripts]
+mobilelinux = "mobilelinux.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mobilelinux = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
