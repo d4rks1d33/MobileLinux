@@ -1,0 +1,236 @@
+schema_version: 1
+
+id: google-sargo
+vendor: google
+model: Pixel 3a
+codename: google-sargo
+aliases: [sargo, bonito]   # bonito = Pixel 3a XL sibling
+year: 2019
+chassis: handset
+architecture: aarch64
+maturity: community
+
+soc:
+  vendor: qualcomm
+  family: sdm670
+  marketing_name: Snapdragon 670
+  platform: qcom-sdm845   # shares SDM845-family soc-glue (soc-qcom-sdm845*)
+
+kernel:
+  type: mainline
+  version: 6.6.30
+  source: https://gitlab.com/postmarketOS/pmaports   # linux-postmarketos-qcom-sdm670
+  build:
+    toolchain: gcc
+    method: pmbootstrap
+    pmaports_pkg: linux-postmarketos-qcom-sdm670
+    image: Image.gz
+
+device_tree:
+  dtb: sdm670-google-sargo.dtb
+  append_dtb: true          # deviceinfo_append_dtb="true"
+  source: in-kernel
+
+firmware:
+  redistributable: true
+  provides: [wifi, bluetooth, gpu, modem, audio]
+
+hardware:
+  display:
+    status: supported
+    driver: msm-dsi + panel (1080x2220)
+    evidence: research-pmos-devices.md 'Device 3 — Google Pixel 3a'; wiki feature matrix
+    notes: 1080x2220
+    test: display
+  touchscreen:
+    status: supported
+    driver: mainline touch (sdm670)
+    evidence: research-pmos-devices.md 'Device 3 — Google Pixel 3a'
+    test: touch
+  gpu:
+    status: supported
+    driver: Adreno 615 (freedreno/msm, a6xx)
+    evidence: research-pmos-devices.md; accelerated
+    test: gpu
+  storage:
+    status: supported
+    driver: eMMC/UFS; Android dynamic (super) partitions
+    evidence: research-pmos-devices.md; deviceinfo_super_partitions mmcblk0p68/69
+    notes: "logical userdata lives inside super container"
+    test: storage
+  usb:
+    status: supported
+    driver: dwc3
+    evidence: research-pmos-devices.md; fastboot/gadget flows
+    test: usb
+  wifi:
+    status: supported
+    driver: ath10k (QCA)
+    evidence: research-pmos-devices.md; linux-firmware-ath10k/-qca
+    test: wifi
+  bluetooth:
+    status: supported
+    driver: hci_qca
+    evidence: research-pmos-devices.md 'Device 3 — Google Pixel 3a'
+    test: bluetooth
+  audio:
+    status: supported
+    driver: q6/PipeWire (alsa-ucm-conf-qcom-sdm670, q6voiced)
+    evidence: research-pmos-devices.md; alsa-ucm-conf-qcom-sdm670
+    test: audio
+  battery:
+    status: supported
+    driver: mainline fuel gauge / charger
+    evidence: research-pmos-devices.md
+    test: battery
+  charging:
+    status: supported
+    driver: mainline charger
+    evidence: research-pmos-devices.md
+    test: charging
+  modem:
+    status: supported
+    driver: hexagonrpcd (soc-qcom-sdm845-modem); QDSP6 modem
+    evidence: research-pmos-devices.md; hexagonrpcd, soc-qcom-sdm845-modem
+    caveats:
+      - "per-feature statuses synthesized from pmaports depends; re-verify on live wiki"
+    test: modem
+  gnss:
+    status: partial
+    driver: QMI LOC via modem
+    evidence: research-pmos-devices.md 'GNSS ✔ via modem'; unverified on live wiki
+    caveats: ["depends on the modem stack; not independently verified"]
+    test: gnss
+  nfc:
+    status: partial
+    driver: mainline NFC (WIP)
+    evidence: research-pmos-devices.md 'NFC Partial'
+    test: nfc
+  fingerprint:
+    status: broken
+    driver: rear sensor; no working mainline driver
+    evidence: research-pmos-devices.md 'Fingerprint ✘/partial (rear sensor)'
+  camera:
+    status: partial
+    driver: CAMSS present; WIP
+    evidence: research-pmos-devices.md 'Camera Partial/WIP'
+    test: camera
+  sensors:
+    status: supported
+    driver: SSC (Snapdragon Sensor Core) via ADSP; iio-sensor-proxy
+    evidence: research-pmos-devices.md; sdm845-family glue
+    test: sensors
+  vibrator:
+    status: supported
+    driver: mainline vibrator
+    evidence: research-pmos-devices.md
+    test: vibrator
+
+boot:
+  method: android-bootimg
+  android_bootimg:
+    header_version: 2
+    pagesize: 4096
+    offsets:
+      kernel: "0x00008000"
+      ramdisk: "0x01000000"
+      tags: "0x00000100"
+
+storage:
+  rootfs_layout: gpt-in-partition   # rootfs image is a GPT disk written inside a logical partition
+  rootfs_sector_size: 4096
+  partitions:
+    - name: boot
+      role: boot
+      device_path: /dev/disk/by-partlabel/boot
+      writable_via: [fastboot]
+    - name: userdata
+      role: rootfs
+      device_path: /dev/disk/by-partlabel/userdata
+      writable_via: [fastbootd]     # logical partition inside super; bootloader fastboot cannot address it
+      notes: "logical partition in super, requires fastbootd (userspace fastboot in recovery ramdisk); super = /dev/mmcblk0p68 /dev/mmcblk0p69"
+    - name: vbmeta
+      role: vbmeta
+      device_path: /dev/disk/by-partlabel/vbmeta
+      writable_via: [fastboot]
+    - name: super
+      role: vendor
+      device_path: /dev/disk/by-partlabel/super
+      writable_via: []
+      notes: "Android dynamic (super) container; make-dynpart-mappings maps logical volumes (mmcblk0p68/69)"
+
+install:
+  strategy: fastbootd            # dynamic/super partitions: reboot into userspace fastboot to write logical userdata
+  ab_slots: true
+  slots: [a, b]
+  fastbootd: true
+  unlock_required: true
+  boot_partition: boot
+  rootfs_target:
+    partition: userdata
+    method: fastbootd
+  steps:
+    - action: flash-partition
+      description: >
+        Flash vbmeta with verification disabled. On some Android-9 bootloaders
+        the vbmeta must be built with --flags 2 (pmbootstrap flash_vbmeta) or
+        boot fails verified-boot. Flashed in normal (bootloader-mode) fastboot.
+      partition: vbmeta
+      image: vbmeta
+      via: fastboot
+      destructive: true
+    - action: flash-partition
+      description: "Flash the distro boot image (Android boot.img) in normal fastboot"
+      partition: boot
+      image: boot
+      via: fastboot
+      destructive: true
+    - action: reboot-fastbootd
+      description: "fastboot reboot fastboot: enter userspace fastboot in the recovery ramdisk to address logical partitions in super"
+    - action: dd-partition
+      description: "Write the rootfs into the logical userdata inside super via fastbootd"
+      partition: userdata
+      image: rootfs
+      via: fastbootd
+      destructive: true
+    - action: set-active-slot
+      slot: a
+      via: fastboot
+    - action: reboot
+      via: fastboot
+
+ota:
+  strategy: ab
+  rollback: true
+  slots: [a, b]
+  bootloader_integration:
+    type: android-bootctl        # slot selection via Android misc (qbootctl / soc-qcom-sdm845-qbootctl)
+    backend: rauc-custom
+
+tests:
+  - boot
+  - display
+  - touch
+  - gpu
+  - storage
+  - usb
+  - wifi
+  - bluetooth
+  - audio
+  - battery
+  - charging
+  - modem
+  - gnss
+  - nfc
+  - sensors
+  - vibrator
+
+sources:
+  imported_from: pmaports
+  postmarketos_wiki: https://wiki.postmarketos.org/wiki/Google_Pixel_3a_(google-sargo)
+  pmaports: device/community/device-google-sargo
+  notes: >
+    Hardware statuses synthesized from research-pmos-devices.md 'Device 3 —
+    Google Pixel 3a (google-sargo)' (pmaports depends/firmware/SoC-glue
+    evidence). Wiki matrix could not be fetched (Anubis JS challenge); modem/
+    gnss/nfc/camera/fingerprint should be re-verified on the live wiki.

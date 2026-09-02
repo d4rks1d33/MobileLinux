@@ -1,0 +1,218 @@
+schema_version: 1
+
+id: samsung-m0
+vendor: samsung
+model: Galaxy S III (GT-I9300)
+codename: samsung-m0
+aliases: [m0, GT-I9300, i9300]
+year: 2012
+chassis: handset
+architecture: armv7
+maturity: community
+
+soc:
+  vendor: samsung
+  family: exynos4412
+  marketing_name: Exynos 4412 (4x Cortex-A9)
+  platform: exynos4
+
+kernel:
+  type: mainline
+  version: "6.6"
+  # Community mainline for Exynos4; packaged as linux-postmarketos-exynos4.
+  build:
+    method: pmbootstrap
+    pmaports_pkg: linux-postmarketos-exynos4
+    # Exynos S-Boot expects the DTB concatenated to the (zImage) kernel.
+    image: zImage
+
+device_tree:
+  dtb: exynos4412-i9300.dtb
+  append_dtb: true          # deviceinfo_append_dtb="true"
+  source: in-kernel
+
+firmware:
+  redistributable: true
+  provides: [wifi, bluetooth]
+  # WiFi/BT firmware shipped via pmOS firmware packages
+  # (firmware-samsung-midas-wifi / firmware-samsung-midas-bluetooth).
+
+hardware:
+  display:
+    status: supported
+    driver: exynos-drm (MIPI-DSI) + s6e8aa0 AMOLED panel
+    evidence: research-pmos-devices.md Device 4 (720x1280)
+    notes: 720x1280 AMOLED
+    test: display
+  touchscreen:
+    status: supported
+    driver: atmel_mxt_ts
+    evidence: research-pmos-devices.md Device 4 (Touch works)
+    test: touch
+  gpu:
+    status: supported
+    driver: Mali-400 (Lima)
+    evidence: research-pmos-devices.md Device 4 (accelerated flag set)
+    test: gpu
+  storage:
+    status: supported
+    driver: dw_mmc-exynos (eMMC)
+    evidence: research-pmos-devices.md Device 4 (eMMC)
+    test: storage
+  usb:
+    status: supported
+    driver: dwc2 (Exynos USB OTG)
+    evidence: research-pmos-devices.md Device 4 (gadget/USB used for install)
+    test: usb
+  wifi:
+    status: supported
+    driver: brcmfmac (firmware-samsung-midas-wifi)
+    evidence: research-pmos-devices.md Device 4 (WiFi works)
+    test: wifi
+  bluetooth:
+    status: supported
+    driver: hci over UART (firmware-samsung-midas-bluetooth)
+    evidence: research-pmos-devices.md Device 4 (Bluetooth works)
+    test: bluetooth
+  audio:
+    status: supported
+    driver: ALSA UCM "Midas"
+    evidence: research-pmos-devices.md Device 4 (Audio works)
+    test: audio
+  battery:
+    status: supported
+    driver: max17040/max77693 fuel gauge (Midas PMIC)
+    evidence: research-pmos-devices.md Device 4 (functional platform)
+    test: battery
+  charging:
+    status: supported
+    driver: max77693 charger
+    evidence: research-pmos-devices.md Device 4 (functional platform)
+    test: charging
+  modem:
+    status: partial
+    driver: Intel XMM6260 (xmm6260 / smdk) — WIP
+    evidence: research-pmos-devices.md Device 4 (Modem Partial/WIP)
+    notes: "2G/3G modem support is limited/WIP on mainline"
+    caveats: ["modem functionality is incomplete; not reliable"]
+    test: modem
+  gnss:
+    status: partial
+    evidence: research-pmos-devices.md Device 4 (GNSS ✘/partial)
+    caveats: ["GPS support limited/unverified"]
+  nfc:
+    status: partial
+    evidence: research-pmos-devices.md Device 4 (NFC ✘/partial)
+    caveats: ["NFC support limited/unverified"]
+  fingerprint:
+    status: not-present
+    evidence: research-pmos-devices.md Device 4 (Fingerprint none)
+  camera:
+    status: partial
+    evidence: research-pmos-devices.md Device 4 (Camera ✘/partial)
+    caveats: ["camera support limited/unverified"]
+  sensors:
+    status: untested
+    evidence: no explicit evidence in research; conservative default
+  vibrator:
+    status: untested
+    evidence: no explicit evidence in research; conservative default
+
+boot:
+  method: android-bootimg
+  android_bootimg:
+    header_version: 0        # legacy Android boot.img
+    pagesize: 2048           # deviceinfo_flash_pagesize="2048"
+    base: "0x10000000"       # deviceinfo_flash_offset_base="0x10000000"
+    offsets:
+      kernel: "0x00008000"   # deviceinfo_flash_offset_kernel="0x00008000"
+  initramfs:
+    type: postmarketos
+
+storage:
+  rootfs_layout: plain              # plain ext4 rootfs on the data partition
+  rootfs_sector_size: 512           # eMMC 512-byte sectors
+  partitions:
+    - name: BOOT
+      role: boot
+      writable_via: [heimdall]
+      notes: "boot.img flashed here via 'heimdall flash --BOOT boot.img'"
+    - name: USERDATA
+      role: rootfs
+      writable_via: [heimdall]
+      notes: "data partition; receives the plain ext4 rootfs via heimdall"
+
+install:
+  strategy: heimdall
+  ab_slots: false
+  fastbootd: false
+  unlock_required: false            # Samsung download mode needs no bootloader unlock
+  boot_partition: BOOT
+  rootfs_target:
+    partition: USERDATA
+    method: heimdall
+  rescue:
+    required: false
+    method: recovery              # "recovery" == Samsung Odin/download mode here
+    transport: "odin/heimdall download mode (Vol-Down+Home+Power)"
+    notes: >
+      No fastboot, no A/B, no fastbootd, no TWRP. The rescue path is simply
+      Samsung download mode (S-Boot in BROM), driven on Linux by the
+      open-source Heimdall tool over the Odin protocol — essentially
+      unbrickable for normal flashes. The heimdall-isorec variant (for older
+      Samsungs whose bootloader ignores a separate initramfs) bakes the
+      initramfs into the kernel and stores the real initfs on RECOVERY.
+  steps:
+    - action: message
+      description: "Enter Samsung download mode: hold Vol-Down + Home + Power"
+    - action: flash-partition
+      description: "Flash the Android boot.img to the BOOT partition via Heimdall"
+      partition: BOOT
+      image: boot
+      via: heimdall
+      destructive: true
+    - action: dd-partition
+      description: "Write the plain ext4 rootfs to the data partition via Heimdall"
+      partition: USERDATA
+      image: rootfs
+      via: heimdall
+      destructive: true
+    - action: reboot
+      description: "Reboot into pmOS"
+
+ota:
+  strategy: single-rootfs
+  rollback: false                   # no A/B slots
+  updatable:
+    rootfs: true
+    kernel: true
+    initramfs: true
+    device_packages: true
+    firmware: false
+    bootloader: false
+
+tests:
+  - boot
+  - display
+  - touch
+  - gpu
+  - storage
+  - usb
+  - wifi
+  - bluetooth
+  - audio
+  - battery
+  - charging
+  - modem
+
+sources:
+  imported_from: pmaports
+  postmarketos_wiki: https://wiki.postmarketos.org/wiki/Samsung_Galaxy_S_III_(samsung-m0)
+  pmaports: device/community/device-samsung-m0
+  notes: >
+    Hardware statuses synthesized from docs/research-pmos-devices.md
+    "Device 4 — Samsung Galaxy S III (samsung-m0)". Note: Samsung download
+    mode has a KNOX warranty bit that trips on flashing non-Samsung images;
+    no bootloader unlock is otherwise required. Partial/untested marks
+    (modem/gnss/nfc/camera/sensors/vibrator) should be re-verified against
+    the live wiki.
