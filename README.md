@@ -2,6 +2,11 @@
 
 **Automated device-porting platform for mobile Linux.**
 
+MobileLinux is an open platform for bringing mainline Linux to mobile hardware.
+It separates device support from distributions and desktop environments,
+enabling the same device platform to run Kali, Debian, Ubuntu, Arch, and other
+Linux distributions with reproducible builds, hardware testing, and OTA updates.
+
 MobileLinux turns the hard, one-off work of porting a Linux distribution to a
 phone into a declarative, repeatable pipeline. The hardware support for a
 device lives in a single **device definition**; distributions, desktops and
