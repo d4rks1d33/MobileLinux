@@ -1,0 +1,181 @@
+# Curated catalog of Kali/NetHunter kernel symbols.
+#
+# Groups the pentest-oriented Kconfig symbols (the delta over the pmOS base)
+# into human categories, so `mobilelinux kernel-config <device> --flavor kali`
+# can present them meaningfully and toggle whole categories or single symbols.
+#
+# 'default' is the recommended state for the full NetHunter flavor:
+#   y = built-in, m = module, n = disabled.
+# Symbols that belong to the hardware-enabling base (not pentest) are marked
+# base: true and are NOT offered for removal by presets (removing them breaks HW).
+
+version: 1
+
+categories:
+  usb_wifi_injection:
+    title: USB Wi-Fi injection & monitor mode
+    description: >
+      External USB Wi-Fi adapters that support monitor mode + packet injection
+      (the internal WCN3990 cannot). Ralink/Realtek/Atheros/MediaTek chipsets.
+    symbols:
+      CONFIG_RT2X00: { default: m }
+      CONFIG_RT2X00_LIB: { default: m }
+      CONFIG_RT2X00_LIB_USB: { default: m }
+      CONFIG_RT2X00_LIB_FIRMWARE: { default: y }
+      CONFIG_RT2X00_LIB_CRYPTO: { default: y }
+      CONFIG_RT2X00_LIB_LEDS: { default: y }
+      CONFIG_RT2800_LIB: { default: m }
+      CONFIG_RT2800USB: { default: m }
+      CONFIG_RT2800USB_RT33XX: { default: y }
+      CONFIG_RT2800USB_RT35XX: { default: y }
+      CONFIG_RT2800USB_RT3573: { default: y }
+      CONFIG_RT2800USB_RT53XX: { default: y }
+      CONFIG_RT2800USB_RT55XX: { default: y }
+      CONFIG_RT2800USB_UNKNOWN: { default: y }
+      CONFIG_RT2500USB: { default: m }
+      CONFIG_RT73USB: { default: m }
+      CONFIG_RTL8187: { default: m }
+      CONFIG_RTL8187_LEDS: { default: y }
+      CONFIG_RTLWIFI: { default: m }
+      CONFIG_RTLWIFI_USB: { default: m }
+      CONFIG_RTLWIFI_DEBUG: { default: y }
+      CONFIG_RTL8192CU: { default: m }
+      CONFIG_RTL8192C_COMMON: { default: m }
+      CONFIG_CARL9170: { default: m }
+      CONFIG_CARL9170_LEDS: { default: y }
+      CONFIG_CARL9170_WPC: { default: y }
+      CONFIG_ATH6KL: { default: m }
+      CONFIG_ATH6KL_USB: { default: m }
+      CONFIG_MT7601U: { default: m }
+      CONFIG_ZD1211RW: { default: m }
+      CONFIG_MAC80211_MESH: { default: y }
+      CONFIG_CFG80211_WEXT: { default: y }
+      CONFIG_WEXT_CORE: { default: y }
+      CONFIG_WEXT_PROC: { default: y }
+
+  sdr:
+    title: Software-Defined Radio
+    description: HackRF / Airspy / MSI2500 USB SDR receivers and tuners.
+    symbols:
+      CONFIG_USB_HACKRF: { default: m }
+      CONFIG_USB_AIRSPY: { default: m }
+      CONFIG_USB_MSI2500: { default: m }
+      CONFIG_MEDIA_TUNER_MSI001: { default: m }
+
+  badusb_hid:
+    title: BadUSB / HID gadget
+    description: USB gadget HID so the phone can act as a keyboard (HID attacks).
+    symbols:
+      CONFIG_USB_CONFIGFS_F_HID: { default: y }
+      CONFIG_USB_F_HID: { default: m }
+
+  can_bus:
+    title: CAN bus (automotive)
+    description: CAN interfaces + USB CAN adapters for car/ICS testing.
+    symbols:
+      CONFIG_CAN_ISOTP: { default: m }
+      CONFIG_CAN_VCAN: { default: m }
+      CONFIG_CAN_SLCAN: { default: m }
+      CONFIG_CAN_MCP251X: { default: m }
+      CONFIG_CAN_HI311X: { default: m }
+      CONFIG_CAN_8DEV_USB: { default: m }
+      CONFIG_CAN_EMS_USB: { default: m }
+      CONFIG_CAN_ESD_USB: { default: m }
+      CONFIG_CAN_GS_USB: { default: m }
+      CONFIG_CAN_KVASER_USB: { default: m }
+      CONFIG_CAN_PEAK_USB: { default: m }
+
+  nfs_server:
+    title: NFS server & client
+    description: Network file sharing (loot exf/staging, mounting targets).
+    symbols:
+      CONFIG_NFSD: { default: m }
+      CONFIG_NFSD_V4: { default: y }
+      CONFIG_NFS_FS: { default: m }
+      CONFIG_NFS_V2: { default: m }
+      CONFIG_NFS_V3: { default: y }
+      CONFIG_NFS_V4: { default: m }
+      CONFIG_SUNRPC: { default: m }
+      CONFIG_SUNRPC_GSS: { default: m }
+      CONFIG_RPCSEC_GSS_KRB5: { default: m }
+      CONFIG_LOCKD: { default: m }
+      CONFIG_GRACE_PERIOD: { default: m }
+      CONFIG_PNFS_FILE_LAYOUT: { default: m }
+      CONFIG_PNFS_FLEXFILE_LAYOUT: { default: m }
+
+  netfilter:
+    title: Extended netfilter / legacy iptables
+    description: NAT, masquerade and legacy iptables for MITM / pivoting.
+    symbols:
+      CONFIG_NF_CONNTRACK: { default: y }
+      CONFIG_NF_NAT: { default: y }
+      CONFIG_NETFILTER_XTABLES_LEGACY: { default: y }
+      CONFIG_NETFILTER_XT_TARGET_MASQUERADE: { default: y }
+      CONFIG_IP_NF_IPTABLES: { default: y }
+      CONFIG_IP_NF_IPTABLES_LEGACY: { default: y }
+      CONFIG_IP_NF_FILTER: { default: y }
+      CONFIG_IP_NF_MANGLE: { default: y }
+      CONFIG_IP_NF_NAT: { default: y }
+      CONFIG_IP_NF_TARGET_MASQUERADE: { default: y }
+      CONFIG_COMPAT_NETLINK_MESSAGES: { default: y }
+
+  bluetooth_usb:
+    title: USB Bluetooth adapters
+    description: External USB BT controllers (extra HCI transports) + vhci.
+    symbols:
+      CONFIG_BT_HCIBCM203X: { default: m }
+      CONFIG_BT_HCIBPA10X: { default: m }
+      CONFIG_BT_HCIBFUSB: { default: m }
+      CONFIG_BT_HCIVHCI: { default: m }
+
+  usb_serial:
+    title: USB serial adapters
+    description: CH341 / generic USB-serial for hardware hacking, UART, etc.
+    symbols:
+      CONFIG_USB_SERIAL_CH341: { default: m }
+      CONFIG_USB_SERIAL_GENERIC: { default: y }
+
+  android_binder:
+    title: Android binder (Waydroid)
+    description: binder IPC so Waydroid / Android tooling can run.
+    symbols:
+      CONFIG_ANDROID_BINDER_IPC: { default: y }
+      CONFIG_ANDROID_BINDERFS: { default: y }
+      CONFIG_ANDROID_BINDER_DEVICES: { default: y }
+
+  module_tools:
+    title: Module & debug tooling
+    description: Force module unload, dynamic debug, watchdog governors.
+    symbols:
+      CONFIG_MODULE_FORCE_UNLOAD: { default: y }
+      CONFIG_DYNAMIC_DEBUG: { default: y }
+      CONFIG_DYNAMIC_DEBUG_CORE: { default: y }
+      CONFIG_WATCHDOG_PRETIMEOUT_GOV: { default: y }
+      CONFIG_WATCHDOG_PRETIMEOUT_GOV_NOOP: { default: y }
+      CONFIG_WATCHDOG_PRETIMEOUT_GOV_PANIC: { default: y }
+      CONFIG_WATCHDOG_PRETIMEOUT_GOV_SEL: { default: y }
+      CONFIG_WATCHDOG_PRETIMEOUT_DEFAULT_GOV_PANIC: { default: y }
+
+  distro_compat:
+    title: Distro compatibility (do not remove)
+    description: >
+      Symbols required for Debian/Kali to work at all. Removing these breaks
+      module loading or hardware; presets never disable them.
+    symbols:
+      CONFIG_MODULE_ALLOW_BTF_MISMATCH: { default: y, base: true }
+      CONFIG_INTERCONNECT_QCOM_SM6375: { default: y, base: true }
+      CONFIG_REGULATOR_FAN53870: { default: m, base: true }
+
+# Presets: named selections of categories, for quick starts.
+presets:
+  nethunter-full:
+    description: Everything (the reference Kali flavor).
+    categories: [usb_wifi_injection, sdr, badusb_hid, can_bus, nfs_server,
+                 netfilter, bluetooth_usb, usb_serial, android_binder,
+                 module_tools, distro_compat]
+  nethunter-minimal:
+    description: WiFi injection + netfilter + HID only (smaller kernel).
+    categories: [usb_wifi_injection, netfilter, badusb_hid, distro_compat]
+  wifi-only:
+    description: Just USB Wi-Fi injection (+ required distro compat).
+    categories: [usb_wifi_injection, distro_compat]

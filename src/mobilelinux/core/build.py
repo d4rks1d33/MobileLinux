@@ -21,6 +21,17 @@ from ..distros import get_backend
 from ..installer.artifacts import ArtifactSet
 
 
+def _is_debian_based(ctx, distro: str) -> bool:
+    """True if the distro's family is debian (consumes .deb kernels)."""
+    import yaml
+    dpath = ctx.repo.distros_dir / distro / "distro.yaml"
+    if dpath.is_file():
+        d = yaml.safe_load(dpath.read_text()) or {}
+        return d.get("family") == "debian"
+    # Fallback: known debian-based names.
+    return distro in ("kali", "debian", "ubuntu")
+
+
 def _load_defaults(repo_root: Path) -> dict:
     cfg = repo_root / "mobilelinux.toml"
     if cfg.is_file():
@@ -58,7 +69,9 @@ def build_command(
     if flavor_name:
         kernel_apk = kernelstage.build_kernel(device, distro, flavor_name,
                                               out_dir=out_dir, runner=runner)
-        if device.kernel.get("build", {}).get("deb_package"):
+        # Only Debian-based distros consume a linux-image .deb; Alpine/pmOS uses
+        # the apk directly. Gate on the distro family, not just the device flag.
+        if device.kernel.get("build", {}).get("deb_package") and _is_debian_based(ctx, distro):
             kernelstage.build_linux_image_deb(device, kernel_apk, out_dir=out_dir, runner=runner)
     else:
         _build_kernel(device, runner)

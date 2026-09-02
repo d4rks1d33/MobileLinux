@@ -19,7 +19,7 @@ Migrated assets and where they now live:
 | `extra-tools/nethunter-pro-app` | `security/nethunter-pro/` | E |
 | `extra-tools/pwnagotchi` | `security/pwnagotchi/` | E |
 | `extra-tools/{terminal-keyboard,terminal-clipboard,cleanup,claude-free,modem-at}` | `security/*` | E/A |
-| debos flow + `wip.toml` | `distros/kali/` + `KaliBackend` (device.toml generated) | E/F |
+| debos flow + `wip.toml` | `os-distros/kali/` + `KaliBackend` (device.toml generated) | E/F |
 
 Non-redistributable blobs (proprietary firmware: WCN3990 WiFi/BT, Adreno zap,
 modem/adsp/cdsp `.mbn`, AW88261 ACF, NFC S3NRN4V) are **not** copied; they must

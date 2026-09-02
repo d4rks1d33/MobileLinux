@@ -43,7 +43,7 @@ class DistroBackend:
 
     @property
     def dir(self) -> Path:
-        return self.repo_root / "distros" / self.name
+        return self.repo_root / "os-distros" / self.name
 
     def build_rootfs(self, req: BuildRequest) -> RootfsResult:  # pragma: no cover - interface
         raise NotImplementedError

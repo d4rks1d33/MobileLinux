@@ -9,7 +9,7 @@ schema_version = 1
 [paths]
 # All paths are relative to the repository root (the directory holding this file).
 devices = "devices"
-distros = "distros"
+distros = "os-distros"
 desktops = "desktops"
 security = "security"
 schema = "schema"

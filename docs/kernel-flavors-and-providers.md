@@ -120,6 +120,48 @@ fragment is the *intended* delta, reviewed on its own. MobileLinux reconstructs
 the Kali config from `base + kali.fragment` and it matches the original to
 within one cosmetic line.
 
+## Editing modules interactively
+
+You rarely want to hand-edit a fragment. Use the interactive editor, which is
+backed by a **curated catalog** (`os-distros/kali/kernel-catalog.yaml`) that
+groups the pentest symbols into human categories with descriptions and presets:
+
+```bash
+# show the current state, grouped by category
+mobilelinux kernel-config rhodep --flavor kali --show
+
+# interactive terminal menu (toggle categories, set symbols, apply presets)
+mobilelinux kernel-config rhodep --flavor kali
+
+# non-interactive one-liners
+mobilelinux kernel-config rhodep --flavor kali --preset wifi-only
+mobilelinux kernel-config rhodep --flavor kali --enable CONFIG_USB_HACKRF
+mobilelinux kernel-config rhodep --flavor kali --disable CONFIG_CAN_ISOTP
+
+# defer to the kernel's native menuconfig (needs a prepared kernel tree)
+mobilelinux kernel-config rhodep --flavor kali --menuconfig
+```
+
+Categories in the Kali catalog include: **USB Wi-Fi injection** (RT2800USB,
+RTL8187, CARL9170, MT7601U, ZD1211RW…), **SDR** (HackRF/Airspy/MSI2500),
+**BadUSB/HID gadget**, **CAN bus**, **NFS server**, **extended netfilter /
+legacy iptables**, **USB Bluetooth**, **USB serial**, **Android binder**, and
+**module/debug tooling**. A special **distro-compat** category holds the
+symbols that must never be removed (`MODULE_ALLOW_BTF_MISMATCH`,
+`INTERCONNECT_QCOM_SM6375`, `REGULATOR_FAN53870`).
+
+Presets:
+
+| Preset | What it enables |
+|--------|-----------------|
+| `nethunter-full` | everything (the reference Kali flavor) |
+| `nethunter-minimal` | WiFi injection + netfilter + HID |
+| `wifi-only` | just USB Wi-Fi injection |
+
+Changes are written back to the flavor's fragment, so they flow into the next
+`mobilelinux kernel <device> --flavor kali` build. To add categories/symbols for
+a new distro, drop a `kernel-catalog.yaml` in that distro's `os-distros/<distro>/`.
+
 ## For porters
 
 To support a new distro on an existing device, you usually only add **one

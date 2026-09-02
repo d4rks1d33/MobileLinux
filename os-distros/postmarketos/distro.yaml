@@ -1,0 +1,42 @@
+id: postmarketos
+name: postmarketOS
+base: alpine
+family: alpine
+package_manager: apk
+builder: pmbootstrap
+suite: edge
+architectures: [aarch64, armv7, x86_64, riscv64]
+default_desktop: phosh
+
+# postmarketOS is the device-support base for every device here (it provides the
+# shared kernel aport). As a DISTRO it is also a first-class target: a clean
+# Alpine + Phosh image built directly with pmbootstrap (no debos, no .deb
+# conversion). It is the pentest-free baseline; Kali is this same kernel work
+# plus the NetHunter config flavor and a Debian userland.
+build:
+  method: pmbootstrap
+  # pmbootstrap install produces the rootfs image itself (it carries its own
+  # boot/root subpartition table), so there is no separate debos/chroot phase.
+  install_cmd: [pmbootstrap, install]
+
+# The pmOS kernel flavor is the base config (no NetHunter delta).
+kernel_flavor: pmos
+
+# Security model: pmOS/Alpine rolling (edge) — apk upgrade.
+security:
+  model: rolling
+  update_command: [apk, upgrade]
+  cve_source: alpine-secdb
+
+defaults:
+  user: user
+  locale: en_US.UTF-8
+
+sources:
+  imported_from: postmarketos
+  wiki: https://wiki.postmarketos.org/
+  notes: >
+    Clean Alpine + Phosh baseline. On rhodep this corresponds to the standalone
+    port (github.com/d4rks1d33/postmarketos-motorola-rhodep), the same tree the
+    pmaports MR is based on. Same working hardware as Kali, without the pentest
+    tooling.

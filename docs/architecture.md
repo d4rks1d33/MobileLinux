@@ -36,7 +36,7 @@ distros.**
 | Device definitions | `devices/<vendor>/<codename>/device.yaml` + `assets/` | One file per device + its assets. |
 | Core (models, registry, tools, images) | `src/mobilelinux/core/` | Repo discovery, loader, tool detection, image assembly, build orchestration. |
 | Install/flash strategies | `src/mobilelinux/installer/` | `Strategy` base + `rescue-dd`, `fastboot`, `fastbootd`, `heimdall`, `sdcard`, `uuu`, `adb-shell-dd`. |
-| Distro backends | `src/mobilelinux/distros/` + `distros/` | `KaliBackend` builds a Debian rootfs with debos. |
+| Distro backends | `src/mobilelinux/distros/` + `os-distros/` | `KaliBackend` (debos) + `PostmarketosBackend` (pmbootstrap). |
 | Desktops | `desktops/` | Manifests only; content is applied as a layer. |
 | Security tools | `security/` | Optional, distro-level, not device-coupled. |
 | Testing | `src/mobilelinux/testing/` | Compatibility checker + modular hardware tests. |

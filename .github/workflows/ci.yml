@@ -67,6 +67,12 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Build rhodep (dry-run; reports missing tools)
         run: mobilelinux --dry-run build rhodep --distro kali
+      - name: Build rhodep on postmarketOS (dry-run)
+        run: mobilelinux --dry-run build rhodep --distro postmarketos
+      - name: Kernel-config catalog (show + preset dry-run)
+        run: |
+          mobilelinux kernel-config rhodep --flavor kali --show
+          mobilelinux --dry-run kernel-config rhodep --flavor kali --preset wifi-only
       - name: Check compatibility report
         run: mobilelinux check rhodep
       - name: OTA sign/verify round-trip

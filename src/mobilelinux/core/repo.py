@@ -25,7 +25,7 @@ class Repo:
 
     @property
     def distros_dir(self) -> Path:
-        return self.root / "distros"
+        return self.root / "os-distros"
 
     @property
     def desktops_dir(self) -> Path:

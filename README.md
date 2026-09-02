@@ -18,7 +18,7 @@ security tools are separate, swappable layers on top.
                      │
         ┌────────────┼────────────┐
         │            │            │
-      Kali         Debian        Arch        (distros/  — only Kali implemented today)
+      Kali         Debian        Arch        (os-distros/ — Kali + postmarketOS today)
         │            │            │
       Phosh        Plasma       Lomiri       (desktops/ — swappable, not coupled to HW)
 ```
@@ -83,21 +83,21 @@ and tells you how to install what's missing, so you can install it and re-run.
 | `schema/device.schema.json` | The device-definition JSON Schema (single source of truth). |
 | `src/mobilelinux/core/` | Schema, models, registry, tool detection, build orchestration. |
 | `src/mobilelinux/installer/` | Install/flash strategy abstraction (fastboot, rescue-dd, heimdall, …). |
-| `src/mobilelinux/distros/` | Distribution backends (Kali). |
+| `src/mobilelinux/distros/` | Distribution backends (Kali, postmarketOS). |
 | `src/mobilelinux/desktops/` | Desktop layers (Phosh/Plasma/Lomiri). |
 | `src/mobilelinux/security/` | Optional security-tool layers (NetHunter Pro, pwnagotchi). |
 | `src/mobilelinux/testing/` | Compatibility checker + modular hardware test suite. |
 | `src/mobilelinux/ota/` | Release/OTA/security-update machinery. |
 | `src/mobilelinux/importers/` | pmaports → device-definition importer. |
 | `devices/<vendor>/<codename>/` | Device definitions + assets. |
-| `distros/` `desktops/` `security/` | Layer content (recipes, package lists, config). |
+| `os-distros/` `desktops/` `security/` | Layer content (recipes, package lists, config). |
 | `docs/` | User, porter and developer documentation. |
 
 ## Documentation
 
 - User: [install](docs/install.md), [build](docs/build.md), [flash](docs/flash.md), [recover](docs/recovery.md), [troubleshooting](docs/troubleshooting.md)
 - Porter: [add a device](docs/porting.md), [device schema](docs/device-schema.md), [import from pmOS](docs/import-pmos.md)
-- Developer: [architecture](docs/architecture.md), [installer abstraction](docs/installer.md), [testing](docs/testing.md)
+- Developer: [architecture](docs/architecture.md), [kernel flavors & providers](docs/kernel-flavors-and-providers.md), [OS distros](docs/os-distros.md), [testing](docs/testing.md)
 - OTA/security: [ota](docs/ota.md), [security updates](docs/security-updates.md), [release process](docs/release-process.md), [signing](docs/signing.md), [CVE management](docs/cve-management.md), [SBOM](docs/sbom.md), [recovery](docs/recovery.md)
 - Research background: [pmOS device model + 5 devices](docs/research-pmos-devices.md), [OTA architecture decision](docs/research-ota-architecture.md)
 

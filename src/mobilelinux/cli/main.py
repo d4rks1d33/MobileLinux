@@ -70,6 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--distro", default=None, help="distro whose flavor to build")
     sp.add_argument("--flavor", default=None, help="explicit kernel flavor (e.g. pmos, kali)")
 
+    sp = add("kernel-config", "interactively enable/disable kernel modules in a flavor")
+    sp.add_argument("device")
+    sp.add_argument("--flavor", default=None, help="kernel flavor to edit (e.g. kali)")
+    sp.add_argument("--distro", default=None, help="distro whose flavor to edit")
+    sp.add_argument("--preset", default=None, help="apply a catalog preset (e.g. nethunter-full)")
+    sp.add_argument("--enable", action="append", help="enable a symbol (repeatable)")
+    sp.add_argument("--disable", action="append", help="disable a symbol (repeatable)")
+    sp.add_argument("--show", action="store_true", help="print current state and exit")
+    sp.add_argument("--menuconfig", action="store_true", help="defer to kernel's make menuconfig")
+
     sp = add("flash", "install/flash a device using its declared strategy")
     sp.add_argument("device")
     sp.add_argument("--recovery", action="store_true", help="use the recovery/rescue flow")

@@ -160,6 +160,16 @@ def cmd_kernel(ctx: Context, args: argparse.Namespace) -> int:
     return kernel_command(ctx, d, distro=args.distro, flavor=args.flavor)
 
 
+def cmd_kernel_config(ctx: Context, args: argparse.Namespace) -> int:
+    from ..core.kconfig import kernel_config_command
+    d = ctx.registry.get(args.device, validate_schema=False)
+    return kernel_config_command(
+        ctx, d, flavor=args.flavor, distro=args.distro, preset=args.preset,
+        enable=args.enable, disable=args.disable, show=args.show,
+        menuconfig=args.menuconfig,
+    )
+
+
 def cmd_flash(ctx: Context, args: argparse.Namespace) -> int:
     from ..installer.flash import flash_command
     d = ctx.registry.get(args.device, validate_schema=False)
@@ -219,6 +229,7 @@ _HANDLERS = {
     "detect": cmd_detect,
     "build": cmd_build,
     "kernel": cmd_kernel,
+    "kernel-config": cmd_kernel_config,
     "flash": cmd_flash,
     "test": cmd_test,
     "release": cmd_release,
