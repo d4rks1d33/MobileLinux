@@ -95,8 +95,17 @@ and tells you how to install what's missing, so you can install it and re-run.
 
 ## Documentation
 
-- User: [install](docs/install.md), [build](docs/build.md), [flash](docs/flash.md), [recover](docs/recovery.md), [troubleshooting](docs/troubleshooting.md)
-- Porter: [add a device](docs/porting.md), [device schema](docs/device-schema.md), [import from pmOS](docs/import-pmos.md)
+**Start at the [documentation index](docs/README.md).** The two end-to-end guides:
+
+- **[Build & flash, end to end](docs/build-and-flash.md)** — build an image, see
+  exactly where every artifact lands, and flash with the right strategy.
+- **[Porting a new device, end to end](docs/porting-guide.md)** — for developers
+  adding a phone.
+
+By audience:
+
+- User: [install](docs/install.md), [build+flash](docs/build-and-flash.md), [build ref](docs/build.md), [flash ref](docs/flash.md), [recover](docs/recovery.md), [troubleshooting](docs/troubleshooting.md)
+- Porter: [porting guide](docs/porting-guide.md), [porting ref](docs/porting.md), [device schema](docs/device-schema.md), [import from pmOS](docs/import-pmos.md)
 - Developer: [architecture](docs/architecture.md), [kernel flavors & providers](docs/kernel-flavors-and-providers.md), [OS distros](docs/os-distros.md), [testing](docs/testing.md)
 - OTA/security: [ota](docs/ota.md), [security updates](docs/security-updates.md), [release process](docs/release-process.md), [signing](docs/signing.md), [CVE management](docs/cve-management.md), [SBOM](docs/sbom.md), [recovery](docs/recovery.md)
 - Research background: [pmOS device model + 5 devices](docs/research-pmos-devices.md), [OTA architecture decision](docs/research-ota-architecture.md)
