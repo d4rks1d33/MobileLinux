@@ -46,8 +46,22 @@ def build_command(
 
     backend = get_backend(distro, ctx.repo.root)
 
-    # -- Stage: kernel ------------------------------------------------------
-    _build_kernel(device, runner)
+    # -- Stage: kernel (shared base + per-distro flavor) --------------------
+    from . import kernel as kernelstage
+    flavor_name = None
+    kernel_apk = None
+    if device.kernel_flavors:
+        try:
+            flavor_name = kernelstage.resolve_flavor(device, distro, None)
+        except BuildError as exc:
+            ui.warn(str(exc))
+    if flavor_name:
+        kernel_apk = kernelstage.build_kernel(device, distro, flavor_name,
+                                              out_dir=out_dir, runner=runner)
+        if device.kernel.get("build", {}).get("deb_package"):
+            kernelstage.build_linux_image_deb(device, kernel_apk, out_dir=out_dir, runner=runner)
+    else:
+        _build_kernel(device, runner)
 
     # -- Stage: rootfs ------------------------------------------------------
     from ..distros.base import BuildRequest

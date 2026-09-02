@@ -73,7 +73,20 @@ def deviceinfo_to_schema(info: dict[str, str]) -> dict:
         "kernel": {
             "type": "mainline",
             "version": "unknown",
-            "build": {"method": "pmbootstrap", "pmaports_pkg": f"linux-{codename_full}"},
+            "provider": {
+                # If the device is upstream in pmaports, set upstreamed: true and
+                # point pmaports_ref at it. If it's your own not-yet-merged port,
+                # set kind: custom and source: <your repo>.
+                "kind": "postmarketos",
+                "upstreamed": False,
+                "source": "https://gitlab.com/postmarketOS/pmaports",
+                "linux_pkg": f"linux-{codename_full}",
+                "device_pkg": f"device-{codename_full}",
+            },
+            "flavors": {
+                "pmos": {"config_fragment": "", "distros": ["postmarketos"]},
+            },
+            "build": {"method": "pmbootstrap"},
         },
         "device_tree": {
             "dtb": (info.get("dtb", "") + ".dtb") if info.get("dtb") else "",

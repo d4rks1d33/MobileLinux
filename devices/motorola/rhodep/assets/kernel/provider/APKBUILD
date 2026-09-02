@@ -1,0 +1,277 @@
+# Reference: <https://postmarketos.org/vendorkernel>
+# Config based on arm64 defconfig plus the options required by postmarketOS.
+
+maintainer="d4rks1d3 <teogorqui1@hotmail.es>"
+pkgname=linux-motorola-rhodep
+pkgver=7.2_rc5
+pkgrel=0
+pkgdesc="Mainline kernel for the Motorola Moto G82 5G"
+url="https://kernel.org"
+arch="aarch64"
+license="GPL-2.0-only"
+_kver=${pkgver//_/-}
+makedepends="
+	bison
+	clang
+	elfutils-dev
+	findutils
+	flex
+	linux-headers
+	lld
+	llvm
+	openssl-dev
+	pahole
+	perl
+	postmarketos-installkernel
+	python3
+	zstd
+"
+source="
+	$pkgname-$pkgver.tar.gz::https://git.kernel.org/torvalds/t/linux-$_kver.tar.gz
+	config-motorola-rhodep.aarch64
+	0001-arm64-dts-qcom-add-Motorola-Moto-G82-5G.patch
+	0002-drm-msm-dsi-fix-pclk-for-dsc-without-widebus.patch
+	0003-drm-panel-add-novatek-nt37701.patch
+	0004-drm-msm-dpu-cmd-mode-tearcheck-and-intf-config2.patch
+	0005-drm-msm-dpu-ctl-top-group-id-from-dpu-5.patch
+	0006-drm-msm-dsi-fix-dsc-range-max-qp-8bpp-10bpc.patch
+	0007-arm64-dts-qcom-rhodep-enable-adreno-619-gpu.patch
+	0008-arm64-dts-qcom-rhodep-add-ramoops.patch
+	0009-arm64-dts-qcom-rhodep-enable-wifi-and-bt.patch
+	0010-arm64-dts-qcom-rhodep-enable-usb-host-otg.patch
+	0011-arm64-dts-qcom-rhodep-enable-charger-i2c-buses.patch
+	0012-power-supply-add-cellwise-cw2217-fuel-gauge.patch
+	0013-arm64-dts-qcom-rhodep-add-battery.patch
+	0014-drm-msm-a6xx-sm6375-use-gmu-wrapper-funcs.patch
+	0015-arm64-dts-qcom-sm6375-gpu-smmu-adreno.patch
+	0016-power-supply-bq256xx-add-sgm41542.patch
+	0017-arm64-dts-qcom-rhodep-add-charger.patch
+	0018-power-supply-bq256xx-reset-part-before-configuring.patch
+	0019-power-supply-bq256xx-honour-battery-charge-limits.patch
+	0020-arm64-dts-qcom-sm6375-thermal-cooling-maps.patch
+	0021-arm64-dts-qcom-rhodep-throttle-gpu.patch
+	0022-power-supply-bq256xx-charge-current-cooling-device.patch
+	0023-power-supply-bq256xx-report-device-scope.patch
+	0024-arm64-dts-qcom-rhodep-battery-thermal-zone.patch
+	0025-net-ipa-add-sm6375-without-interconnects.patch
+	0026-arm64-dts-qcom-rhodep-enable-ipa.patch
+	0032-arm64-dts-qcom-sm6375-add-apr-audio-services.patch
+	0033-arm64-dts-qcom-sm6375-add-lpass-macros-and-soundwire.patch
+	0034-ASoC-qcom-add-motorola-rhodep-sndcard.patch
+	0035-arm64-dts-qcom-rhodep-enable-audio.patch
+	0036-ASoC-codecs-lpass-macro-add-codec-version-2-2.patch
+	0042-net-ipa-sm6375-fix-imem-address.patch
+	0043-net-ipa-map-imem-as-device-memory.patch
+	0027-interconnect-qcom-add-sm6375-provider.patch
+	0028-arm64-dts-qcom-sm6375-add-interconnect-nodes.patch
+	0044-net-ipa-sm6375-vote-the-three-noc-paths.patch
+	0045-arm64-dts-qcom-rhodep-wire-ipa-interconnects.patch
+	0046-interconnect-sm6375-do-not-program-qos.patch
+	0047-net-ipa-sm6375-keep-noc-paths-voted.patch
+	0048-net-ipa-sm6375-own-sram-layout.patch
+	0049-arm64-dts-qcom-sm6375-fix-removed-region-size.patch
+	0051-regulator-add-fan53870-camera-pmic.patch
+	0052-arm64-dts-qcom-rhodep-add-camera-pmic.patch
+	0053-media-camss-add-sm6375-support.patch
+	0054-arm64-dts-qcom-sm6375-add-camss-and-cci.patch
+	0055-arm64-dts-qcom-rhodep-add-rear-camera.patch
+	0056-media-s5kjn1-vendor-power-order.patch
+	0057-arm64-dts-qcom-sm6375-add-fastrpc.patch
+	0059-ASoC-qdsp6-set-drvdata-before-registering-clocks.patch
+	0060-remoteproc-qcom_q6v5-ratelimit-handover-message.patch
+	0061-cpuidle-psci-init-after-deferred-probe.patch
+	0062-drm-panel-nt37701-brightness-in-lp-mode.patch
+	0063-drm-msm-dsi-wait-mdp-idle-before-cmd-xfer.patch
+	0065-arm64-dts-qcom-rhodep-display-interconnect-paths.patch
+	0067-arm64-dts-qcom-rhodep-ramoops-ecc-and-firmware-regions.patch
+	0068-arm64-dts-qcom-sm6375-add-apss-watchdog.patch
+	0070-remoteproc-qcom_q6v5-mask-handover-irq.patch
+	0072-DIAGNOSTIC-net-ipa-report-error-interrupts.patch
+	0073-DIAGNOSTIC-remoteproc-print-leftover-crash-reason.patch
+	0074-DIAGNOSTIC-soc-qcom-qmi-report-unhandled-messages.patch
+	0075-DIAGNOSTIC-net-ipa-expose-modem-gsi-channel-state.patch
+	0076-DIAGNOSTIC-remoteproc-qcom-read-crash-reason-on-demand.patch
+	0079-net-ipa-do-not-add-the-memory-offset-to-a-size.patch
+	0080-rpmsg-glink-take-a-reference-for-the-rcid-entry.patch
+	0081-net-ipa-tear-the-setup-down-when-the-modem-crashes.patch
+	0082-arm64-dts-qcom-sm6375-add-the-tcsr-download-mode-address.patch
+	0083-rpmsg-glink-make-the-channel-open-timeout-adjustable.patch
+	0084-soc-qcom-pd_mapper-add-sm6375.patch
+	0085-soc-qcom-pd_mapper-serve-tms-pdr_enabled-on-sm6375.patch
+	0086-arm64-dts-qcom-sm6375-uart-interconnect-paths.patch
+	0088-interconnect-sm6375-keep-the-boot-floors.patch
+	0089-regulator-fan53870-declare-the-low-ldo-supply.patch
+	0090-arm64-dts-qcom-rhodep-camera-pmic-input-supply.patch
+	0091-arm64-dts-qcom-rhodep-drop-absent-microphones.patch
+	0092-arm64-dts-qcom-rhodep-add-the-flash-led-as-a-torch.patch
+	0093-arm64-dts-qcom-rhodep-expose-gpu-770-840.patch
+	0094-drm-panel-nt37701-selectable-refresh-rate.patch
+	0095-arm64-dts-qcom-sm6375-soundwire-wake-irq.patch
+	0096-power-supply-cw2217-no-full-while-discharging.patch
+	0097-drm-panel-nt37701-offer-all-four-refresh-rates.patch
+	0098-drm-msm-dsi-link-status-bad-on-lane-underflow.patch
+	0099-arm64-dts-qcom-rhodep-charger-interrupt.patch
+	0100-arm64-dts-qcom-rhodep-l9-at-1v8.patch
+	0101-arm64-dts-qcom-rhodep-nfc-s3fwrn5.patch
+	0102-nfc-s3fwrn5-rf-configure-without-fw-update.patch
+	0103-nfc-s3fwrn5-tunable-fw-cfg-clock.patch
+	0104-nfc-s3fwrn5-dual-opcode-rfreg-transfer.patch
+	0105-nfc-s3fwrn5-map-the-mifare-classic-protocol-value.patch
+	0106-arm64-dts-qcom-rhodep-l11-vccq2-at-1v8.patch
+	0107-arm64-dts-qcom-rhodep-l24-vcc-at-2v96.patch
+	0108-arm64-dts-qcom-rhodep-usb-dsi-rails-to-vendor.patch
+	0109-arm64-dts-qcom-rhodep-drop-l21-from-wifi.patch
+	0110-nfc-s3fwrn5-declare-nfc-dep-for-listen.patch
+	0111-nfc-nci-set-a-fixed-nfcid1-for-listen.patch
+	0112-nfc-s3fwrn5-enumerate-nfcees.patch
+	0113-nfc-route-mifare-listen-to-ese.patch
+"
+options="!check !strip !tracedeps pmb:cross-native"
+_carch="arm64"
+_config="config-${pkgname#linux-}.$arch"
+builddir="$srcdir/linux-$_kver"
+
+# Used internally by pmbootstrap. Don't touch.
+# TODO: Remove once minimum default pmbootstrap version supports
+# kernel packages without '_flavor'.
+_flavor="${pkgname#linux-}"
+
+prepare() {
+	default_prepare
+	cp "$srcdir"/"$_config" .config
+
+	# Fill in defaults for symbols the shipped config does not mention, so
+	# the build never stops to ask.
+	make ARCH="$_carch" LLVM=1 olddefconfig
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" LLVM=1 \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-${pkgname#linux-}"
+}
+
+package() {
+	# Install the plain arm64 Image, not the EFI zboot vmlinuz: Motorola's
+	# ABL cannot execute the self decompressing EFI image and resets
+	# immediately, which is why CONFIG_EFI_ZBOOT is disabled.
+	install -Dm644 "$builddir"/arch/"$_carch"/boot/Image "$pkgdir"/boot/vmlinuz
+
+	make modules_install \
+		ARCH="$_carch" \
+		LLVM=1 \
+		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_MOD_PATH="$pkgdir"/usr \
+		INSTALL_MOD_STRIP=1
+
+	# Only ship our own DTB: dtbs_install would copy ~145 MiB of device
+	# trees for every other platform, which does not fit in the 256 MiB
+	# boot partition.
+	install -Dm644 "$builddir"/arch/"$_carch"/boot/dts/qcom/sm6375-motorola-rhodep.dtb \
+		"$pkgdir"/boot/dtbs/qcom/sm6375-motorola-rhodep.dtb
+
+	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/"${pkgname#linux-}"/kernel.release
+}
+sha512sums="
+f88a468a9b68ac28de925b092b4ce6fc0be558928f8a0e7474a90426e05793007e441740d494a4d504efe4ed216aec9627ee3a4982ab0da89d8a3a15448b227f  linux-motorola-rhodep-7.2_rc5.tar.gz
+ebd3bfb93423d483a1685c739256546a8270b2cbc6da4db749f6b177c1d2981c31a92f5f84588625b93cbd3c80b51923bd963e40b9b29e34af3e37d9aef45612  config-motorola-rhodep.aarch64
+50d91ef0efbd9c6279244d3041d43f76a9fa663bbe37c320fc0377d561c84ade61e8385eeb68a1805b26ba9c2cb5903c5c288e8df00599342d377ce27524b3d0  0001-arm64-dts-qcom-add-Motorola-Moto-G82-5G.patch
+476ade0233afb67abe1bcbc95829d732354ffbaa21fe43317d0a8bcc281fae0515a767a71764398dce11cd938d29ca0bd41ab13499468c86fc360ed141dd99ca  0002-drm-msm-dsi-fix-pclk-for-dsc-without-widebus.patch
+88c109343e5068fe81554c5b8fdac93a5848d8cd784b4d7cfafc35c8db1310a0091b5d10170fff0291e3e988b75ceb5892f6e35ea8fd09c44f09f720b87e7cc2  0003-drm-panel-add-novatek-nt37701.patch
+c88d67b7358832ca3f020e9fb791980ba729168cf3f951ed5bf66d2ce993357c5eaef8de242e1da1ab03dd8dcb8dd87f3ed8f5271e0a7565e789e7ca7757d907  0004-drm-msm-dpu-cmd-mode-tearcheck-and-intf-config2.patch
+e58e8319618ea4dbf1b0b562cbe1ccd1d542d0531e4d8832146954673b373a39391f5f3fd4956825f5fbbcabd418285bf4a5039c89fcbb24f8a8370851dcc26a  0005-drm-msm-dpu-ctl-top-group-id-from-dpu-5.patch
+6048939b71280b0caf81730f55dc99b6eed7894062a23b15333fe3c94c4402dde0870ffbb3d519b3fdcb23c649b358a275ea639cd86f6d18d62b2619d0781762  0006-drm-msm-dsi-fix-dsc-range-max-qp-8bpp-10bpc.patch
+d5ef0cde9136be91c07c9d01b2a0ad90cf1d9c799debc425b0d1483dd411b9bd453d959ddfa580133e8a838fe9573bf3f14344e0532080027caba34f71cca41a  0007-arm64-dts-qcom-rhodep-enable-adreno-619-gpu.patch
+12eeeba554a98201854ba93d5563dd6c0b052fc43bd9c38a3a67f4a87deb3ff870ca704071165bcb3cb03bc8f46ae8ec80b414daf66e41d0304e00538a69eb39  0008-arm64-dts-qcom-rhodep-add-ramoops.patch
+5223bac25aec95cbfe6c5913eb000f92123aaa026e54287636b79a3c62f7e0b27d7a483e851be549664f07479b87c767fc19a037be0218069de3403dd9c05b92  0009-arm64-dts-qcom-rhodep-enable-wifi-and-bt.patch
+16c276b201538f9a2ee69621c6c7bad23f3d81ac7ef7e30a914107a351e18cc93cd7b6c12e8ccf75b7d6a975848ae55a8cdeaf0bd3790d051e2d8e297acf475c  0010-arm64-dts-qcom-rhodep-enable-usb-host-otg.patch
+b49aa0af6d95d4d7a8d6229e0458df3151fcd4cf5e7d9ddf131384106cf0ea84f32910adc6d7480109d8dbe742fcce79c3d0d37a05093d2e23322fc7525be837  0011-arm64-dts-qcom-rhodep-enable-charger-i2c-buses.patch
+f5fb34a7df28610447e08697362a8c0b4962bd4c1f33a66568ae83d173cd3538958d4c2d306712c6e2e88b6fbb39405c4254eb204407c4d0b80887a4a47420ec  0012-power-supply-add-cellwise-cw2217-fuel-gauge.patch
+cdd3779a9584dd7e0176608f4e672a1fd04401d3a0dccd5b65166092730bfee0b2856eb3ca801c740012b88025b79c670e449d32ad8ad0e5eed502592bf28f3e  0013-arm64-dts-qcom-rhodep-add-battery.patch
+de9f429ebc9cd2ccafa49dca718e689465ada7145d6de06050f67d6f9c634e0c773213e02ea4caf07ec2dd174de0a01589ead35905427e38890dec0e67c7a71f  0014-drm-msm-a6xx-sm6375-use-gmu-wrapper-funcs.patch
+433aeb4d63ff0d868f481851be777777b318d53c33ec872ff4ed0a46bf313ea899572cf098f386ae2d3257d5d904e2136ef22f52d7aec58fd1258d523ea706c1  0015-arm64-dts-qcom-sm6375-gpu-smmu-adreno.patch
+31553deaa2222396afa36678a85e9bb06a15a6a4cdc807750f909a7969b2b3c06f22c005e076c7501325d7ebc97e1414dc6ad4c458f5d77fd5f8b1f4231b4403  0016-power-supply-bq256xx-add-sgm41542.patch
+b8434c96c2fa4f8148e9c1935b952bafd01f67ed06295933cde9862b40218abfc5add1defc8aec4e22fd3ed25583597f656f6d8103a9926f9c95f986eee07398  0017-arm64-dts-qcom-rhodep-add-charger.patch
+fa9cb290fc99d3565c35b36a876d36093c380bdf5b1828ffcde5fa6e8669652a2a16f5eaa151ce3b9b4649666ac194a83b1bd8393b42a80613385ef1d5587a6b  0018-power-supply-bq256xx-reset-part-before-configuring.patch
+0214aa828179a0b595b0b7992ee0a1522ed330913ab8f6989f5703729fef547f3bc3e0e4dd12844c1a48503cbfd801b18cdd5fd9fed52e47434ac843b49157a2  0019-power-supply-bq256xx-honour-battery-charge-limits.patch
+1c6720415ce2015763d18946529af2cb88dccd3d676e5042c596258e1749c1d95c1a1abd329b597a7df0c1fa54b7a0518616607458464587c2c592684636ce3a  0020-arm64-dts-qcom-sm6375-thermal-cooling-maps.patch
+8d814d6b75f4d1ae30f0f2b31be8ecefbbc5e5d9ded319eea3f758e048ba00327d306931eed0a1b450237beeb066f8017ee840f658cbd3e0bf3d41b54557ca15  0021-arm64-dts-qcom-rhodep-throttle-gpu.patch
+a1739561addfce97f203fe6e5b6189d9e9367f5675cc7bf617b77e9c7de6dbaf26c1b7b431e47ed05dc44f5ee0cbf469141df048a60fd3e6096de0721aaca89b  0022-power-supply-bq256xx-charge-current-cooling-device.patch
+7707516da2d475f022c49e377f192bf07bfff915da17b1d53f9ff7fe07af5c54088506f52a463c6a177b0b4d1e563f7e6d17cbe4c590df579c824e5830b398c2  0023-power-supply-bq256xx-report-device-scope.patch
+19b10d7f16a21e8762d3c05100b75352d5fd107fcf7318ff94e3e5f9a3727d3b924aed2cda00a7e259223ed824cef00b1a867a94de6b8320f0245e2da88ef081  0024-arm64-dts-qcom-rhodep-battery-thermal-zone.patch
+a0d6f4922a879c6ffd8dc1340c2e115cb5850ea90114e544d086cb85219c5436b09d8993039de1db7edd4d369d2350f70f989a619e64555379135f1fcb9eed06  0025-net-ipa-add-sm6375-without-interconnects.patch
+1b80dce088c798c654adea8e7997fdd9559682dabc78bf40c05bbc95d9224c795ce6186e37eb50ac360dd177db08647d2d0eed32a934ebad5e41ae56da346335  0026-arm64-dts-qcom-rhodep-enable-ipa.patch
+8c659797d05378838bd2cb6282bf346ccf9ca3077e2ba006852de6eb70bdb56463b70cefb888cfd6ccb6ef1b41a6997da54d4c8c5df739013f9a0a29981c97bf  0032-arm64-dts-qcom-sm6375-add-apr-audio-services.patch
+de3fcedf703b1768f840775e2ee74213d2b1181ac2fbf84f722740b9a9f12b9e22337d61e85179afc1f2a925290e6e6f074f0012ec19f86c6b0bac79afae6604  0033-arm64-dts-qcom-sm6375-add-lpass-macros-and-soundwire.patch
+578250326fd6b613154028e44aad0253b24517b50cb4ff634721a6abba9e05b5e285546bce0bf5fd9c50389b2032bd265ddb4cdfded0596da56b3fe1c92a4eda  0034-ASoC-qcom-add-motorola-rhodep-sndcard.patch
+3d739d01465c029fa7185b918c4319b4196a1e8a4e68043b7b9c11708763a8ec17bdfe35d7df2bfa6a6c7ea32eae6384229b0c1cd0661a473b8135f18a58f634  0035-arm64-dts-qcom-rhodep-enable-audio.patch
+4aeb00ad2818a47fd52bbf6ae84e633f4e4d531f9cb9ed7b765da595fd71cc6305e3b5e4a5233272269818b034b63dc7d54293701e33ad439c20204e36ae50f2  0036-ASoC-codecs-lpass-macro-add-codec-version-2-2.patch
+5a0b94e08355640a93f743aa30991e915bf12d9a1ce22682eeb6acb256a8d4f679261d9acc2ffd591d37acc35c35a20eb0ebfdf60fdbb05d186cd0c4d54a26b9  0042-net-ipa-sm6375-fix-imem-address.patch
+f62af2230993107e34d2bd45be5e69ab184670d4857c6c5337035c25e69ecb3124ab4cf16be30905c8655d153b221badd7812520a268ec8cb235087cb4869c16  0043-net-ipa-map-imem-as-device-memory.patch
+51ef8fa929362ce90cd63d5ee10d5fa1809e8d2d443efe2b23a6b050970f250cd97e588c4c3f2e0182784cfeae7f78cbfa603a8c38263ed37b8b0c29a0e5b21c  0027-interconnect-qcom-add-sm6375-provider.patch
+ecd800a2f836ffa2d3e9037fdb511fd93b18593a0f7a44e1214a616706cd5a0b04774cdebdee5f41441866693c4d45544eb862cd466291c2c3b6642b1adb87ed  0028-arm64-dts-qcom-sm6375-add-interconnect-nodes.patch
+24b6eb6c9cdac85cbab6159d46d72ee424f1f6ac9d693f934b320d5109910094d3c61c9740c44f1094451f2e551e5735b9555836a355fbcaaafc1593db2e7f2b  0044-net-ipa-sm6375-vote-the-three-noc-paths.patch
+2f4969ef497f643076c3e21728df36ae45992df417fa67182ed776b603a234368a86795c55f401d61aff7f73cab80c182f79de263fe36d75e52df8e90d55baf3  0045-arm64-dts-qcom-rhodep-wire-ipa-interconnects.patch
+aa06b1c744c3c9857b7b1877f8b716f240dd1d3296faf0bb598b156a04dbcdef1016ba1db7f55f3c9e22ab3bcbba089ad897e641c18dfa108a0553908e72fd95  0046-interconnect-sm6375-do-not-program-qos.patch
+1d6537e32ee7be4ebf9f0a8b21910bc8867f3e10caa9e8791ad6e2d7dbb58568fdf23cba5d6ffab0dbfd395e51a0155e9844d892099472659efdb1f7a8d4a470  0047-net-ipa-sm6375-keep-noc-paths-voted.patch
+f964d0e558033e1ba0c22284c167911adaec0868b0cce0597a7359f70f3c1d21f46e7b0d3ff37039aa24b1679d45f4482d20853e9b85873fa984dfa074d63ee9  0048-net-ipa-sm6375-own-sram-layout.patch
+a6a221b1235d5d7f8ff26508d3cf4a59136b7a63e9b6ae08e09c8b57186d601e07671f311e2fea64f57d65da8b38d6581f1cff05caae1eb4085c515f07adb496  0049-arm64-dts-qcom-sm6375-fix-removed-region-size.patch
+1b66b8bc6268e6b1a2e0a69a7c48fbd6fbffa8b544960638374c57f7310219a21424a3c0e7c2ae5921a1f0ea5d365c85c960b021f502762613aa24800fad3676  0051-regulator-add-fan53870-camera-pmic.patch
+5af8675508d0fbcd7d9775089adc5492ba9e47c8e2db7395a37a1c3eb1bf974cd18365bb45443afd95b7394729c315f127d59aac1c5f3f772f6a9dcf2bf63f66  0052-arm64-dts-qcom-rhodep-add-camera-pmic.patch
+a7cf9af7c8890e7757587d7a711cfb70fa5c252689e2422631503dac19cd5dd48e7fda10cb09c68729e075dd973c833886566fa4f70af5d775d995e092ce67f9  0053-media-camss-add-sm6375-support.patch
+9c335d82cc03135cc4e1b795c6ba7bcc64aa1d67550f2fe291e60234f974a461fab60d44595c25a4c7294f09496819bbc5cda816c0ba98eaea4cd9e92f471d9f  0054-arm64-dts-qcom-sm6375-add-camss-and-cci.patch
+8b0764b33ad5dbda77512ac158309251d827894dc390a9a95aad80f4cd5cf2e4907049dd6a2e33ee1dd8e12f59ddaa8cdd1f87c39acb2ea5897c5894d77cbe0e  0055-arm64-dts-qcom-rhodep-add-rear-camera.patch
+34d4a971b8b79f899807e1437d43acd41372d622ec87d0df0e0a70522de6793ab0bc52fe756f0fa9e9855530c9faa95295fb9d9ba62555418f476f8e12322937  0056-media-s5kjn1-vendor-power-order.patch
+fece4ba6e1c8f8a5438b0d515e6152d7763942d4f183f93d09106f4c098dfc67f88c0ffdaaf6a8f7dd834b8725c13f81e4ad8299454b3ca3436031623ccfdf58  0057-arm64-dts-qcom-sm6375-add-fastrpc.patch
+dbf4b52eca0c7be4772b19c14ea71ba964fd033592e0bf45d2d016f2706b7cef44fb8730299749e88947100dd8c15d17dcf7e312b524679955f04c718b9c6721  0059-ASoC-qdsp6-set-drvdata-before-registering-clocks.patch
+0ab561fd2a2e5e107ea250e7074783a7964430cb9f56f6d67280d47d9e1d07c5a8d3baceb6d3614bf71950c9646ddcbb0f5171b2addfac037d74eb18f0aa6877  0060-remoteproc-qcom_q6v5-ratelimit-handover-message.patch
+f4bd2e95fd4d5b184529abb29a93c0c0d914148e4c8b11eeca570e62be4c1b7a947a6bbc63bd762fa19dc8a3aaa04dd2324cb14d0a17d516a6a5fb038f70bbb4  0061-cpuidle-psci-init-after-deferred-probe.patch
+52feb0eb0b7f783a46a685b7ca34cc23dd3df7b1f341ce74037e37d0714dffbca900313d58c8747ac35bfe2e678225c1c20b4978db05f77d8b2e8bfcd4cd495f  0062-drm-panel-nt37701-brightness-in-lp-mode.patch
+b30ef03c84025e573c9dbf31dbaf8efbff72694726b7273cab35d634258cb5ed483b39df435e2c84cc894b459006bccc575d87eae99c5c4709404b5d3a4dfa11  0063-drm-msm-dsi-wait-mdp-idle-before-cmd-xfer.patch
+777d877278a67d318f07a6c1511ee99fbf07c40fc9b459242d7bb9e0b119a65323b2ef12cfdfa6edefcfd3dc167e1b35413699248be888228a4dae7fdc05a741  0065-arm64-dts-qcom-rhodep-display-interconnect-paths.patch
+e2f05f00941fa556645ffb694655e60c0e3e41a3cd57593b6820531a0ca646b7c2beead39b3b6f545b6c5c52eaccf469ff07c20a7fbf5daaefaba1793591fe4a  0067-arm64-dts-qcom-rhodep-ramoops-ecc-and-firmware-regions.patch
+b7172fd6724f8af2093107e5744c7003d58b6ec1344ae823253b27b7b63436fcca2d83830c8d13b8b47d4b948ef1fc28247526d27d623851b523f834a4ee43be  0068-arm64-dts-qcom-sm6375-add-apss-watchdog.patch
+56a31ff3202e46dae28c4e87ceb573b8d7dc5f8048f9c9359deac7d6162e1cd1c070ae1aad35672c4dea919d4a5b9719fb47d53da13faa98f929d0a39eb66e91  0070-remoteproc-qcom_q6v5-mask-handover-irq.patch
+2b4d7ce27ed0cfd17761a7abd1c487bf7f0c729f934579c629725f29e60bf0af20ed7198f8fc9e29c544aff03d510bc9169ae429a3d8354377fe0e32a47cb648  0072-DIAGNOSTIC-net-ipa-report-error-interrupts.patch
+1c9875b9bb5cca2179793c69bdd83879f2c6f5bacb77729420dcd44c60d75786db7e6327f1c2911a12cfeba62c474ff2d4f35aa5cebea8c539176c24f2194f55  0073-DIAGNOSTIC-remoteproc-print-leftover-crash-reason.patch
+10da87a4faa022f49730169d42d4e3fd7fdee51ae652e7c82d708b502a8dfb81fc8dc5ad43ec9d24d4975cfa47efd6c05dc28470b68bc8bcdccac1b6573b89e9  0074-DIAGNOSTIC-soc-qcom-qmi-report-unhandled-messages.patch
+feb6df14a9350ea79777f8fa1d0a187eaaecfd120116e7022acadf6174d7673684551e9a74582ce83de1396798a9f6b398974c7add9468e4f5ee411756f27c4a  0075-DIAGNOSTIC-net-ipa-expose-modem-gsi-channel-state.patch
+dc195f4b72f6b591ae46453e58f3f923dd04b802a0dc8bd5d5999f63a6bdf853b7f67bf9345e18d033b31f26ad9b5cafa2db0edb205e145c56114051d886fe92  0076-DIAGNOSTIC-remoteproc-qcom-read-crash-reason-on-demand.patch
+092172c3fcbe5e50174b40c3550bbcc8f8b3cb87879d24219d570fa0f98a01ee95678fe0b6ebbd845b30eb21261f6e6135e9ff95f3410f6a2d16435cd3ae5940  0079-net-ipa-do-not-add-the-memory-offset-to-a-size.patch
+77f801dc2bb2c36e17538d88fe7cede1fa76953a7b475abc236bd871d1d42f20d3105919e16dd1c0cc7fcd0c975534926d7c319c49db2cf7ce02b9e3b1e0976e  0080-rpmsg-glink-take-a-reference-for-the-rcid-entry.patch
+85e06ebc474dc76afcf94b79b0f19f2ded5869552ac7de85b7f44a9a39d7864840e3b2e3c7300f3736c87276e152eaed756e05ed044edaf9b9975d0b1867fbce  0081-net-ipa-tear-the-setup-down-when-the-modem-crashes.patch
+8c23610d1b470dde9c1e2155c8932440bc05d11f448aaf1ecd85c99f50817e9023c6b6ba2c31c1455700c6c21793de9fc66ed4a92eb7b19e0dff14066a812861  0082-arm64-dts-qcom-sm6375-add-the-tcsr-download-mode-address.patch
+38570e826438e83f6ddae7c343ffd077ec8e15f36a0b34e9c8b3706132070d7c73e6964e6f6cfe0a40391c53a6884d6f2300f0c1a3403f3657379b2660f32907  0083-rpmsg-glink-make-the-channel-open-timeout-adjustable.patch
+adfd4cab337dd7db15456f80dfe412bef8dbc480e679fa855a47f5dd4bdce6c3c06740f3d3b88850cf850001af630df15f1e548152005f04642ddd5d7eab7962  0084-soc-qcom-pd_mapper-add-sm6375.patch
+27e5c521f840210def3de9182413b495e450fa96d8f24ca20bc35f4645e9a3a3714df548af57d69f2ca22469be3928dd496b5529820a7932d15e4d70120709a6  0085-soc-qcom-pd_mapper-serve-tms-pdr_enabled-on-sm6375.patch
+5a3902fec308adfc99327f65a22c540f46403f7de7aedccf7cba7376d5d2a1d25ba4fad79a3bfbc01df9abda734920c015a99f0b0d72c7ba6cb135316287849d  0086-arm64-dts-qcom-sm6375-uart-interconnect-paths.patch
+30a02d25acb40d57bdae9aa27b81d64a82193863e770140b2bf26c9bfc51dff0d6bb8b499f5570d47763b2971ed14396c0e1596640ea0f4586ec12358d8c58f0  0088-interconnect-sm6375-keep-the-boot-floors.patch
+4d1ae0d83dcddfa2f014346f62e8d675c399d7d173e1d4edd92906d1e860c964f2537ff7b476a91d04d88632786dbefc199f9adad9d284df119f384bbf88dc62  0089-regulator-fan53870-declare-the-low-ldo-supply.patch
+738f0e71b1aadc4a64d54c7ac7803482ddfdc94f59bfe0ce0211749e57d0506c70f184e3d6dd152e78b2ffac485fcea08d5f4c4643bfd5e80ccec01dbc04dfb8  0090-arm64-dts-qcom-rhodep-camera-pmic-input-supply.patch
+cbc0ba4c7bd9ab99dc552ac45048296a2ac41b740a0f8d2ae2fdca626d4f5115bc95c017087fd2b7659aeab35d3a95130ac3afb58ff0fe20900494ad98edc2ea  0091-arm64-dts-qcom-rhodep-drop-absent-microphones.patch
+a213be2d657373e447ece84a4828bae5ee936743a852cabeb35f53b7401fb7683eca367d7d2cae828acbfffbbdbbe4576436bde8575feabd4154b398de71aa1c  0092-arm64-dts-qcom-rhodep-add-the-flash-led-as-a-torch.patch
+d7b5fcbb2eb2ed7c5e97ed19f6d806d29f9e32e76e6cf65a5f752495923a35135dda7bb65bf971f255e2ec96be4c5b5da09b243b88daa018be3218bea1603192  0093-arm64-dts-qcom-rhodep-expose-gpu-770-840.patch
+bb61237e744ef998b5c3fce46e7537826eb7f1767b29d7342d0d9d4c6cf666da13cbcdc0a50a30931da4d0ddecf7e58c568074810f410d7af6e02733a6cb5974  0094-drm-panel-nt37701-selectable-refresh-rate.patch
+532c2d929e3ff883d39b63880b64a67394a94817d8262fca3d76787d113f3eb1ca099635b353dd11b0fdf41042967bbefa71c7f0241d3a99a039a14037154f56  0095-arm64-dts-qcom-sm6375-soundwire-wake-irq.patch
+9c96e062ea91e27b7b0f38bc5c85776c7f5bc5b8ad28a34ca606dc79856440336b6d6f099585eae6776b840a4a18ef7ccf414a028af5801c793081a62499c50e  0096-power-supply-cw2217-no-full-while-discharging.patch
+0623c17e6fded6bbb170e8273d737c000c7577c92eabb1429d557a981ff6bdd7f10f899f890835844a0a32efc61fa3e3f77de5ce9100e3a3fafbe4780bb3e5e6  0097-drm-panel-nt37701-offer-all-four-refresh-rates.patch
+060f0f9b762418a41566576a7a07b22e5fd23872307a0e42e62475c3857a5251f0edcc89a5509d6e566c8e761942d26bb0faaa76d6e7e992b05fd08adc5b9c52  0098-drm-msm-dsi-link-status-bad-on-lane-underflow.patch
+615fa97a8a6021c1f3e8025f8f6dd69b7b1ab222d73f0f6cf65d1b476929715ad0124282e17efb2dd2d14d1137a10f4644cb3c4432e8601b7d318061d6aa8c68  0099-arm64-dts-qcom-rhodep-charger-interrupt.patch
+43d346b06f37065bda6a14a6b5e877be2f4ad5c5f8ea85132836657facdce874cfc6d1548d4469d91d5f9e15530f88f4869d44f72122c3071ce56b52f597b1a4  0100-arm64-dts-qcom-rhodep-l9-at-1v8.patch
+6a400579756d2956b269215e3f10418bbad561e51d2b6bf62056c61b4f92cad282987c273bc63f53a636f621af40b19fccaa6f5e8b66b8800f86e6f8afafafb7  0101-arm64-dts-qcom-rhodep-nfc-s3fwrn5.patch
+cd603afe600c027ef1fdb73d8f7e72acd4f285ce93d34b3b7088883609cf2cb9fe39549e6e58c1f17ae5027f69e27a42dba612b2670c73e87f29026dcf7e9dca  0102-nfc-s3fwrn5-rf-configure-without-fw-update.patch
+8f503c4c6d8b653c83ea50ecb79db25d84ccfc85e9c4c9dca58b82b812d573b3003ed771d4e0cb20dae86d7463fcd3c218b18676851549c7a11f5da8e07f7b54  0103-nfc-s3fwrn5-tunable-fw-cfg-clock.patch
+24bf11d6c71ca7285cce19184db53cb9b34bdfcecaa2da2e14f4b0acc8265323a4b9f2c7c4c33a206aa5757d2a7e607c0e9a09685d1058feee6142614130e623  0104-nfc-s3fwrn5-dual-opcode-rfreg-transfer.patch
+f5c96060651d862f3ef2e70ad20022e0a0ecabdc986686e0562a091fa21810643f4c750ff94446ebe47e68e9a3793834d9afb9fdb624aa42da7401471cf535ad  0105-nfc-s3fwrn5-map-the-mifare-classic-protocol-value.patch
+64741013e43d49851450d28652d7dc57d079a64a0e6206abc24941199598dc5888141401388d330f9160072349a7151d4e08a9b0c247e5b3a3f3422ecd2aab09  0106-arm64-dts-qcom-rhodep-l11-vccq2-at-1v8.patch
+723070a27be3fefb7053ad510f0b35ffb2bdb30b03e5543835f07d1cd4c93795a69fddae91f3077bff9645dcf12ad156196b8ed8ef6ad7ddeadadb11209e9109  0107-arm64-dts-qcom-rhodep-l24-vcc-at-2v96.patch
+8f58112f6905e34dd5a996084486a5ba8fbf90749d5b9a4c0fd1a8564cc3b30e26b6e257f9967ee44de0ede6770e6698b217af5956cd54c0e894db6ace076abc  0108-arm64-dts-qcom-rhodep-usb-dsi-rails-to-vendor.patch
+b09dc4871cb41d466260e0bb5252a1b909b89f1ac5a42752967352fc83311754c4d3ab007562ac59871f2d09d8148400ae9760221ebb241a2a8b75f179bd6c6a  0109-arm64-dts-qcom-rhodep-drop-l21-from-wifi.patch
+a002cb6caefa3cca3e9b8d9ef8755424217aef04535fad8f4f631af63a8e8ba20a755cd900e367260e719d67ed8ce5e3cebd240e3a71889eeec7c03c91dd665f  0110-nfc-s3fwrn5-declare-nfc-dep-for-listen.patch
+2d4cf3a1e2af5a0b201491ac5e081168fb2a1f52f349650c9f7fac05ec8659bbf3d6e4dec893b64dc20f3a51705e4815cc0add0554bedeb1438bdd04bc12f202  0111-nfc-nci-set-a-fixed-nfcid1-for-listen.patch
+d571d62389110b447e76ed90b50def3e5136b783a7544ca314988e3507afa8dba083710a29821df21b3d72edb973158380cd9ad1267c369bfabd2c2554887e55  0112-nfc-s3fwrn5-enumerate-nfcees.patch
+d0dc2ed3ae3f338da2dabf231af98700fe7c56a4fcbc85af5fbc893a60407559375200d131819becaff3e5e2d4a399a52af9cc9fb280a42b10d905a8aa733036  0113-nfc-route-mifare-listen-to-ese.patch
+"

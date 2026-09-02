@@ -70,10 +70,23 @@ soc:
 kernel:
   type: mainline
   version: "6.6"
+  provider:
+    kind: postmarketos          # postmarketos | custom | none
+    upstreamed: false           # true only if merged into official pmaports
+    source: https://github.com/<user>/postmarketos-<codename>   # or pmaports
+    aport_dir: assets/kernel/provider
+    linux_pkg: linux-<vendor>-<codename>
+    device_pkg: device-<vendor>-<codename>
+  base_config: assets/kernel/provider/config-base.aarch64
+  patches_dir: assets/kernel/patches
+  flavors:
+    pmos:
+      config_fragment: assets/kernel/flavors/pmos.fragment   # empty = base
+      distros: [postmarketos]
   build:
     method: pmbootstrap
-    pmaports_pkg: linux-<vendor>-<codename>
     image: Image
+    deb_package: false          # true for Debian-based distros (Kali/Debian/Ubuntu)
 
 device_tree:
   dtb: <soc>-<vendor>-<codename>.dtb
@@ -120,26 +133,129 @@ Place device assets (kernel config, patches, packages, scripts) under
 `devices/<vendor>/<codename>/assets/` and reference them with paths relative to
 the device directory (as rhodep does with `assets/kernel/...`).
 
-## 3. Add the kernel
+## 3. Add the kernel (provider + flavor model)
 
-Fill the `kernel` block:
+The kernel for a device — **source + patches + device tree** — is the same no
+matter which distribution runs on top. Only the kernel **`.config`** differs
+per distro. MobileLinux encodes this as a **provider** (the shared
+device-support base) plus per-distro **flavors** (config deltas). Read
+[kernel-flavors-and-providers.md](kernel-flavors-and-providers.md) for the full
+model; this section is how you fill it in for a new device.
+
+### 3.1 Kernel basics
 
 - **`type`** — `mainline` for torvalds/linux, `stable` for an x.y.z tree,
   `downstream`/`vendor` for a forked BSP.
 - **`version`** — the version string (e.g. `7.2-rc5`, `6.6.30`).
-- **`config`** — path to the kernel `.config` in your assets, or a shared config
-  name. Optional `config_fragments` layer distro-specific Kconfig on top (rhodep
-  keeps a `nethunter-config.fragment`).
-- **`patches_dir`** — a directory of ordered `*.patch` files applied on top of
-  the tree. rhodep carries ~110 numbered patches in
-  `assets/kernel/patches/`; keep them ordered and numbered.
-- **`build.method`** — `pmbootstrap` reuses a pmaports APKBUILD (set
-  `pmaports_pkg: linux-<vendor>-<codename>`); `make`/`kbuild` build directly.
-- **`build.image` gotcha** — pick the `arch/*/boot` image the bootloader
-  accepts. Most devices take `Image` or `Image.gz`. **Some Android bootloaders
-  (notably Motorola ABL) reject the self-decompressing `Image.gz` and require a
-  flat `Image`.** rhodep sets `image: Image` for exactly this reason. If the
-  device silently resets right after the bootloader hands off, suspect this.
+- **`source`** — git/tarball URL of the kernel source.
+
+### 3.2 The provider (`kernel.provider`)
+
+A **provider** is where the shared kernel work — the pmaports-style *aport*
+(APKBUILD + patches + base config + `deviceinfo`) — comes from. Fill:
+
+- **`kind`** — `postmarketos` (a pmaports-style aport built with pmbootstrap),
+  `custom` (same layout but from a non-upstream repo), or `none` (built
+  directly with `make`, e.g. Arch-style PKGBUILD devices).
+- **`upstreamed`** — `true` **only** if the device is merged into official
+  pmaports; `false` if you are using your own fork/repo.
+- **`source`** — the git URL of the aport source. Either official pmaports
+  (`https://gitlab.com/postmarketOS/pmaports`) **or** the porter's own repo,
+  e.g. `github.com/<user>/postmarketos-<codename>`.
+- **`pmaports_ref`** — if it's upstream or an MR exists, the pmaports
+  path/branch (e.g. `device/testing/device-<vendor>-<codename>`, or a fork
+  branch like `<user>/pmaports@<vendor>-<codename>`).
+- **`aport_dir`** — path (relative to the device dir) to the **migrated shared
+  aport** you keep in this repo: APKBUILD + base config + patches + deviceinfo.
+- **`linux_pkg`** — the `linux-*` package name pmbootstrap builds and the one
+  swapped into the active aport dir (e.g. `linux-motorola-rhodep`).
+- **`device_pkg`** — the `device-*` package name (e.g. `device-motorola-rhodep`).
+
+**Important: a device does NOT have to be upstream in pmaports.** A porter who
+already has working kernel support in their own repo simply sets
+`upstreamed: false` and points `source` at that repo. rhodep is exactly this
+case — it lives in `d4rks1d33/postmarketos-motorola-rhodep` (open MR
+`postmarketOS/pmaports!9234`), **not** official pmaports yet:
+
+```yaml
+kernel:
+  provider:
+    kind: postmarketos
+    upstreamed: false          # not merged upstream — use the fork below
+    source: https://github.com/d4rks1d33/postmarketos-motorola-rhodep
+    pmaports_ref: d4rks1d33/pmaports@motorola-rhodep
+    aport_dir: assets/kernel/provider
+    linux_pkg: linux-motorola-rhodep
+    device_pkg: device-motorola-rhodep
+```
+
+When your MR merges upstream, flip `upstreamed: true` and set `pmaports_ref` to
+the upstream path. Official pmOS devices set `upstreamed: true` and point
+`source` at `gitlab.com/postmarketOS/pmaports`.
+
+### 3.3 Shared base config + patches
+
+The patches and base config are **shared by all flavors**:
+
+- **`base_config`** — path to the shared BASE kernel config (the pmOS-clean
+  config the provider ships). Flavors are fragments merged onto this.
+- **`patches_dir`** — directory of ordered `*.patch` files applied to the tree,
+  shared by **all** flavors. rhodep carries ~110 numbered patches in
+  `assets/kernel/patches/` (108 are byte-identical across pmOS and Kali); keep
+  them ordered and numbered.
+
+### 3.4 Flavors (`kernel.flavors`)
+
+A **flavor** is a per-distro config **delta**, expressed as a Kconfig
+**fragment** merged onto `base_config` — never a full 12k-line config. Each
+flavor maps to one or more `distros` and carries a `discriminator`: a symbol
+whose presence proves that flavor's config is the active one, verified before
+build.
+
+```yaml
+kernel:
+  base_config: assets/kernel/provider/config-base.aarch64
+  patches_dir: assets/kernel/patches
+  flavors:
+    pmos:
+      config_fragment: assets/kernel/flavors/pmos.fragment   # empty = base
+      distros: [postmarketos]
+      discriminator: { symbol: CONFIG_RT2800USB, present: false }
+    kali:
+      config_fragment: assets/kernel/flavors/kali.fragment   # NetHunter delta
+      distros: [kali]
+      discriminator: { symbol: CONFIG_RT2800USB, present: true }
+```
+
+To support another distro on the same device you usually add just **one
+fragment** and map it to the distro — no new patches, no new DTB, no fork.
+
+### 3.5 Building a flavor
+
+```bash
+mobilelinux kernel <device> --flavor kali     # or: --distro kali
+```
+
+This merges `base_config + <flavor>.fragment`, stages the shared aport
+(APKBUILD + patches + merged config) into the active aport dir pmbootstrap
+builds, verifies the discriminator, then checksums and builds. `--distro`
+selects the flavor whose `distros` list contains that distro; `--flavor` names
+it explicitly.
+
+### 3.6 Build options (`kernel.build`)
+
+- **`method`** — `pmbootstrap` reuses the provider aport's APKBUILD;
+  `make`/`kbuild` build directly (pair with `provider.kind: none`).
+- **`image` gotcha** — pick the `arch/*/boot` image the bootloader accepts.
+  Most devices take `Image` or `Image.gz`. **Some Android bootloaders (notably
+  Motorola ABL) reject the self-decompressing `Image.gz` and require a flat
+  `Image`.** rhodep sets `image: Image` for exactly this reason. If the device
+  silently resets right after the bootloader hands off, suspect this.
+- **`deb_package`** — set `true` for Debian-based distros (Kali/Debian/Ubuntu).
+  Alpine/pmOS installs the kernel as an **apk**; Debian distros can't, so the
+  apk is repackaged into a `linux-image-<KVER>.deb` that debos installs into the
+  rootfs. The kernel work is never redone per distro — only the config flavor
+  and the packaging change.
 
 ## 4. Add the device tree
 

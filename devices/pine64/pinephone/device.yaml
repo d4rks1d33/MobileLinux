@@ -1,42 +1,52 @@
 schema_version: 1
-
 id: pine64-pinephone
 vendor: pine64
 model: PinePhone
 codename: pine64-pinephone
-aliases: [pinephone, PinePhone]
+aliases:
+- pinephone
+- PinePhone
 year: 2019
 chassis: handset
 architecture: aarch64
 maturity: community
-
 soc:
   vendor: allwinner
   family: a64
   marketing_name: Allwinner A64
   platform: sun50i
-
 kernel:
   type: mainline
   version: 6.6.30
-  source: https://cdn.kernel.org/pub/linux/kernel/  # torvalds/stable tarball
+  source: https://cdn.kernel.org/pub/linux/kernel/
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/community/device-pine64-pinephone
+    linux_pkg: linux-postmarketos-allwinner
+    device_pkg: device-pine64-pinephone
+  flavors:
+    pmos:
+      config_fragment: ''
+      distros:
+      - postmarketos
   build:
     toolchain: gcc
     method: pmbootstrap
-    pmaports_pkg: linux-postmarketos-allwinner
     image: Image
-
+    deb_package: false
 device_tree:
-  # A64 PinePhone hardware revisions 1.1 and 1.2
   dtb: allwinner/sun50i-a64-pinephone-1.2.dtb
-  overlays: [allwinner/sun50i-a64-pinephone-1.1.dtb]
+  overlays:
+  - allwinner/sun50i-a64-pinephone-1.1.dtb
   source: in-kernel
-
 firmware:
   redistributable: true
   package: firmware-pine64-rtl8723bt
-  provides: [wifi, bluetooth]
-
+  provides:
+  - wifi
+  - bluetooth
 hardware:
   display:
     status: supported
@@ -112,7 +122,8 @@ hardware:
     driver: OV5640 (front) / GC2145 (rear) via sun6i-csi
     evidence: postmarketos wiki; firmware-pine64-ov5640
     notes: capture works with caveats; imperfect
-    caveats: ["imaging quality/feature set incomplete on mainline"]
+    caveats:
+    - imaging quality/feature set incomplete on mainline
     test: camera
   sensors:
     status: supported
@@ -124,23 +135,23 @@ hardware:
     driver: gpio-vibrator
     evidence: postmarketos wiki
     test: vibrator
-
 boot:
   method: uboot-extlinux
   initramfs:
     type: postmarketos
-    features: [usb-gadget-net, debug-shell]
-
+    features:
+    - usb-gadget-net
+    - debug-shell
 storage:
-  rootfs_layout: whole-disk        # full GPT disk image written to the whole medium
+  rootfs_layout: whole-disk
   rootfs_sector_size: 512
   partitions:
-    - name: internal
-      role: rootfs
-      device_path: /dev/mmcblk2    # eMMC; microSD is /dev/mmcblk0 and boots first
-      writable_via: [dd]
-      notes: "whole-disk image; U-Boot SPL dd'd at 8 KiB offset. SD overrides eMMC (rescue)."
-
+  - name: internal
+    role: rootfs
+    device_path: /dev/mmcblk2
+    writable_via:
+    - dd
+    notes: whole-disk image; U-Boot SPL dd'd at 8 KiB offset. SD overrides eMMC (rescue).
 install:
   strategy: sdcard
   ab_slots: false
@@ -152,24 +163,24 @@ install:
   rescue:
     required: false
     method: jumpdrive
-    transport: "usb-mass-storage (Jumpdrive exposes eMMC as a USB block device to the host)"
-    notes: >
-      No vendor recovery needed. The A64 BROM looks for U-Boot SPL on microSD
-      before eMMC, so a bootable SD card naturally overrides an eMMC install and
-      is the primary rescue path. To reach the eMMC from a host, boot the
-      Jumpdrive helper which exposes eMMC as USB mass storage.
-  steps:
-    - action: message
-      description: "sdcard: a whole-disk image (rootfs + embedded U-Boot SPL) is written to the SD/eMMC block device"
-    - action: dd-partition
-      description: "Write the whole-disk image to the target block device (SD or eMMC) via dd"
-      partition: internal
-      image: rootfs
-      via: dd
-      destructive: true
-    - action: message
-      description: "Power on the device; U-Boot loads the kernel via extlinux/boot.scr (SD boots before eMMC)"
+    transport: usb-mass-storage (Jumpdrive exposes eMMC as a USB block device to the host)
+    notes: 'No vendor recovery needed. The A64 BROM looks for U-Boot SPL on microSD before eMMC, so a
+      bootable SD card naturally overrides an eMMC install and is the primary rescue path. To reach the
+      eMMC from a host, boot the Jumpdrive helper which exposes eMMC as USB mass storage.
 
+      '
+  steps:
+  - action: message
+    description: 'sdcard: a whole-disk image (rootfs + embedded U-Boot SPL) is written to the SD/eMMC
+      block device'
+  - action: dd-partition
+    description: Write the whole-disk image to the target block device (SD or eMMC) via dd
+    partition: internal
+    image: rootfs
+    via: dd
+    destructive: true
+  - action: message
+    description: Power on the device; U-Boot loads the kernel via extlinux/boot.scr (SD boots before eMMC)
 ota:
   strategy: single-rootfs
   rollback: false
@@ -182,30 +193,29 @@ ota:
     initramfs: true
     device_packages: true
     firmware: false
-    bootloader: false            # never auto-update the embedded U-Boot SPL
-
+    bootloader: false
 tests:
-  - boot
-  - display
-  - touch
-  - gpu
-  - storage
-  - usb
-  - wifi
-  - bluetooth
-  - audio
-  - battery
-  - charging
-  - modem
-  - gnss
-  - sensors
-  - vibrator
-
+- boot
+- display
+- touch
+- gpu
+- storage
+- usb
+- wifi
+- bluetooth
+- audio
+- battery
+- charging
+- modem
+- gnss
+- sensors
+- vibrator
 sources:
   imported_from: pmaports
   postmarketos_wiki: https://wiki.postmarketos.org/wiki/PINE64_PinePhone
   pmaports: device/community/device-pine64-pinephone
-  notes: >
-    Hardware statuses are evidence-based from the postmarketOS wiki and
-    research-pmos-devices.md (Device 1). One of the reference mainline phones
-    (Allwinner A64, sun50i). Modem is a separate Quectel EG25-G firmware domain.
+  notes: 'Hardware statuses are evidence-based from the postmarketOS wiki and research-pmos-devices.md
+    (Device 1). One of the reference mainline phones (Allwinner A64, sun50i). Modem is a separate Quectel
+    EG25-G firmware domain.
+
+    '

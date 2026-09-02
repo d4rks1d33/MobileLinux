@@ -20,18 +20,37 @@ kernel:
   type: mainline
   version: 7.2-rc5
   source: https://cdn.kernel.org/pub/linux/kernel/  # torvalds tarball
-  config: assets/kernel/config-motorola-rhodep.aarch64
-  # NetHunter symbols + BTF-mismatch are already merged into the base config;
-  # kept here to document the distro-specific fragment for other distros.
-  config_fragments: [assets/kernel/nethunter-config.fragment]
+  # Device-support provider: pmOS supplies the shared aport (APKBUILD + 108
+  # patches + DTB + base config + deviceinfo). rhodep is NOT yet in official
+  # pmaports, so the provider source is the porter's own fork/repo.
+  provider:
+    kind: postmarketos
+    upstreamed: false
+    source: https://github.com/d4rks1d33/postmarketos-motorola-rhodep
+    pmaports_ref: d4rks1d33/pmaports@motorola-rhodep   # open MR: postmarketOS/pmaports!9234
+    aport_dir: assets/kernel/provider
+    linux_pkg: linux-motorola-rhodep
+    device_pkg: device-motorola-rhodep
+  # Shared base config (pmOS-clean) + per-distro fragments. patches are shared.
+  base_config: assets/kernel/provider/config-base.aarch64
   patches_dir: assets/kernel/patches
+  flavors:
+    pmos:
+      config_fragment: assets/kernel/flavors/pmos.fragment   # empty = base
+      distros: [postmarketos]
+      discriminator: { symbol: CONFIG_RT2800USB, present: false }
+    kali:
+      config_fragment: assets/kernel/flavors/kali.fragment
+      distros: [kali]
+      discriminator: { symbol: CONFIG_RT2800USB, present: true }
+      notes: NetHunter delta (USB WiFi inject, SDR, BadUSB HID, CAN, NFS, netfilter) + BTF-mismatch
   build:
     toolchain: llvm
     method: pmbootstrap
-    pmaports_pkg: linux-motorola-rhodep
     # The Motorola ABL bootloader resets on a self-decompressing EFI-zboot
     # image, so a FLAT Image (not Image.gz) must be used.
     image: Image
+    deb_package: true          # Kali (Debian) consumes the kernel as a linux-image .deb
 
 device_tree:
   dtb: sm6375-motorola-rhodep.dtb

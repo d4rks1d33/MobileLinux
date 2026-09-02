@@ -1,0 +1,15 @@
+[Unit]
+Description=Modem firmware partition (read-only, served to the modem by tqftpserv)
+Before=tqftpserv.service pd-mapper.service
+DefaultDependencies=no
+After=local-fs.target
+Conflicts=umount.target
+
+[Mount]
+What=/dev/disk/by-partlabel/modem_a
+Where=/readonly/firmware
+Type=ext4
+Options=ro,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

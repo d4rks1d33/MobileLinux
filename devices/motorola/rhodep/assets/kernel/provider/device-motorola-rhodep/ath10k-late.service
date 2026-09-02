@@ -1,0 +1,15 @@
+[Unit]
+Description=Load ath10k_snoc after the WLAN protection domain is available
+After=pd-mapper.service
+Requires=pd-mapper.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Wait for QMI service 69 (wlfw) to show up before loading the driver
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do qrtr-lookup 2>/dev/null | grep -qE "^\\s+69\\s" && exit 0; sleep 1; done; exit 0'
+ExecStart=/sbin/modprobe ath10k_snoc
+ExecStop=/sbin/modprobe -r ath10k_snoc
+
+[Install]
+WantedBy=multi-user.target

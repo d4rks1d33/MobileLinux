@@ -1,0 +1,14 @@
+[Unit]
+Description=Cold-side battery protection for rhodep (hot side is in the kernel)
+Documentation=https://postmarketos.org
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rhodep-battery-jeita
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

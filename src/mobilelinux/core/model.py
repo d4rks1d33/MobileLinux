@@ -125,6 +125,24 @@ class Device:
         return self.data.get("kernel", {})
 
     @property
+    def kernel_provider(self) -> dict[str, Any]:
+        return self.kernel.get("provider", {})
+
+    @property
+    def kernel_flavors(self) -> dict[str, Any]:
+        return self.kernel.get("flavors", {})
+
+    def flavor_for_distro(self, distro: str) -> str | None:
+        """Return the kernel flavor name whose 'distros' includes ``distro``."""
+        for name, flavor in self.kernel_flavors.items():
+            if distro in flavor.get("distros", []):
+                return name
+        # Fall back to a flavor literally named after the distro.
+        if distro in self.kernel_flavors:
+            return distro
+        return None
+
+    @property
     def device_tree(self) -> dict[str, Any]:
         return self.data.get("device_tree", {})
 

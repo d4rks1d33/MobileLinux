@@ -1,42 +1,50 @@
 schema_version: 1
-
 id: samsung-m0
 vendor: samsung
 model: Galaxy S III (GT-I9300)
 codename: samsung-m0
-aliases: [m0, GT-I9300, i9300]
+aliases:
+- m0
+- GT-I9300
+- i9300
 year: 2012
 chassis: handset
 architecture: armv7
 maturity: community
-
 soc:
   vendor: samsung
   family: exynos4412
   marketing_name: Exynos 4412 (4x Cortex-A9)
   platform: exynos4
-
 kernel:
   type: mainline
-  version: "6.6"
-  # Community mainline for Exynos4; packaged as linux-postmarketos-exynos4.
+  version: '6.6'
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/community/device-samsung-m0
+    linux_pkg: linux-postmarketos-exynos4
+    device_pkg: device-samsung-m0
+  flavors:
+    pmos:
+      config_fragment: ''
+      distros:
+      - postmarketos
   build:
+    toolchain: gcc
     method: pmbootstrap
-    pmaports_pkg: linux-postmarketos-exynos4
-    # Exynos S-Boot expects the DTB concatenated to the (zImage) kernel.
     image: zImage
-
+    deb_package: false
 device_tree:
   dtb: exynos4412-i9300.dtb
-  append_dtb: true          # deviceinfo_append_dtb="true"
+  append_dtb: true
   source: in-kernel
-
 firmware:
   redistributable: true
-  provides: [wifi, bluetooth]
-  # WiFi/BT firmware shipped via pmOS firmware packages
-  # (firmware-samsung-midas-wifi / firmware-samsung-midas-bluetooth).
-
+  provides:
+  - wifi
+  - bluetooth
 hardware:
   display:
     status: supported
@@ -91,98 +99,98 @@ hardware:
     test: charging
   modem:
     status: partial
-    driver: Intel XMM6260 (xmm6260 / smdk) — WIP
+    driver: "Intel XMM6260 (xmm6260 / smdk) \u2014 WIP"
     evidence: research-pmos-devices.md Device 4 (Modem Partial/WIP)
-    notes: "2G/3G modem support is limited/WIP on mainline"
-    caveats: ["modem functionality is incomplete; not reliable"]
+    notes: 2G/3G modem support is limited/WIP on mainline
+    caveats:
+    - modem functionality is incomplete; not reliable
     test: modem
   gnss:
     status: partial
-    evidence: research-pmos-devices.md Device 4 (GNSS ✘/partial)
-    caveats: ["GPS support limited/unverified"]
+    evidence: "research-pmos-devices.md Device 4 (GNSS \u2718/partial)"
+    caveats:
+    - GPS support limited/unverified
   nfc:
     status: partial
-    evidence: research-pmos-devices.md Device 4 (NFC ✘/partial)
-    caveats: ["NFC support limited/unverified"]
+    evidence: "research-pmos-devices.md Device 4 (NFC \u2718/partial)"
+    caveats:
+    - NFC support limited/unverified
   fingerprint:
     status: not-present
     evidence: research-pmos-devices.md Device 4 (Fingerprint none)
   camera:
     status: partial
-    evidence: research-pmos-devices.md Device 4 (Camera ✘/partial)
-    caveats: ["camera support limited/unverified"]
+    evidence: "research-pmos-devices.md Device 4 (Camera \u2718/partial)"
+    caveats:
+    - camera support limited/unverified
   sensors:
     status: untested
     evidence: no explicit evidence in research; conservative default
   vibrator:
     status: untested
     evidence: no explicit evidence in research; conservative default
-
 boot:
   method: android-bootimg
   android_bootimg:
-    header_version: 0        # legacy Android boot.img
-    pagesize: 2048           # deviceinfo_flash_pagesize="2048"
-    base: "0x10000000"       # deviceinfo_flash_offset_base="0x10000000"
+    header_version: 0
+    pagesize: 2048
+    base: '0x10000000'
     offsets:
-      kernel: "0x00008000"   # deviceinfo_flash_offset_kernel="0x00008000"
+      kernel: '0x00008000'
   initramfs:
     type: postmarketos
-
 storage:
-  rootfs_layout: plain              # plain ext4 rootfs on the data partition
-  rootfs_sector_size: 512           # eMMC 512-byte sectors
+  rootfs_layout: plain
+  rootfs_sector_size: 512
   partitions:
-    - name: BOOT
-      role: boot
-      writable_via: [heimdall]
-      notes: "boot.img flashed here via 'heimdall flash --BOOT boot.img'"
-    - name: USERDATA
-      role: rootfs
-      writable_via: [heimdall]
-      notes: "data partition; receives the plain ext4 rootfs via heimdall"
-
+  - name: BOOT
+    role: boot
+    writable_via:
+    - heimdall
+    notes: boot.img flashed here via 'heimdall flash --BOOT boot.img'
+  - name: USERDATA
+    role: rootfs
+    writable_via:
+    - heimdall
+    notes: data partition; receives the plain ext4 rootfs via heimdall
 install:
   strategy: heimdall
   ab_slots: false
   fastbootd: false
-  unlock_required: false            # Samsung download mode needs no bootloader unlock
+  unlock_required: false
   boot_partition: BOOT
   rootfs_target:
     partition: USERDATA
     method: heimdall
   rescue:
     required: false
-    method: recovery              # "recovery" == Samsung Odin/download mode here
-    transport: "odin/heimdall download mode (Vol-Down+Home+Power)"
-    notes: >
-      No fastboot, no A/B, no fastbootd, no TWRP. The rescue path is simply
-      Samsung download mode (S-Boot in BROM), driven on Linux by the
-      open-source Heimdall tool over the Odin protocol — essentially
-      unbrickable for normal flashes. The heimdall-isorec variant (for older
-      Samsungs whose bootloader ignores a separate initramfs) bakes the
-      initramfs into the kernel and stores the real initfs on RECOVERY.
+    method: recovery
+    transport: odin/heimdall download mode (Vol-Down+Home+Power)
+    notes: "No fastboot, no A/B, no fastbootd, no TWRP. The rescue path is simply Samsung download mode\
+      \ (S-Boot in BROM), driven on Linux by the open-source Heimdall tool over the Odin protocol \u2014\
+      \ essentially unbrickable for normal flashes. The heimdall-isorec variant (for older Samsungs whose\
+      \ bootloader ignores a separate initramfs) bakes the initramfs into the kernel and stores the real\
+      \ initfs on RECOVERY.\n"
   steps:
-    - action: message
-      description: "Enter Samsung download mode: hold Vol-Down + Home + Power"
-    - action: flash-partition
-      description: "Flash the Android boot.img to the BOOT partition via Heimdall"
-      partition: BOOT
-      image: boot
-      via: heimdall
-      destructive: true
-    - action: dd-partition
-      description: "Write the plain ext4 rootfs to the data partition via Heimdall"
-      partition: USERDATA
-      image: rootfs
-      via: heimdall
-      destructive: true
-    - action: reboot
-      description: "Reboot into pmOS"
-
+  - action: message
+    description: 'Enter Samsung download mode: hold Vol-Down + Home + Power'
+  - action: flash-partition
+    description: Flash the Android boot.img to the BOOT partition via Heimdall
+    partition: BOOT
+    image: boot
+    via: heimdall
+    destructive: true
+  - action: dd-partition
+    description: Write the plain ext4 rootfs to the data partition via Heimdall
+    partition: USERDATA
+    image: rootfs
+    via: heimdall
+    destructive: true
+  - action: reboot
+    description: Reboot into pmOS
 ota:
   strategy: single-rootfs
-  rollback: false                   # no A/B slots
+  rollback: false
   updatable:
     rootfs: true
     kernel: true
@@ -190,29 +198,24 @@ ota:
     device_packages: true
     firmware: false
     bootloader: false
-
 tests:
-  - boot
-  - display
-  - touch
-  - gpu
-  - storage
-  - usb
-  - wifi
-  - bluetooth
-  - audio
-  - battery
-  - charging
-  - modem
-
+- boot
+- display
+- touch
+- gpu
+- storage
+- usb
+- wifi
+- bluetooth
+- audio
+- battery
+- charging
+- modem
 sources:
   imported_from: pmaports
   postmarketos_wiki: https://wiki.postmarketos.org/wiki/Samsung_Galaxy_S_III_(samsung-m0)
   pmaports: device/community/device-samsung-m0
-  notes: >
-    Hardware statuses synthesized from docs/research-pmos-devices.md
-    "Device 4 — Samsung Galaxy S III (samsung-m0)". Note: Samsung download
-    mode has a KNOX warranty bit that trips on flashing non-Samsung images;
-    no bootloader unlock is otherwise required. Partial/untested marks
-    (modem/gnss/nfc/camera/sensors/vibrator) should be re-verified against
-    the live wiki.
+  notes: "Hardware statuses synthesized from docs/research-pmos-devices.md \"Device 4 \u2014 Samsung Galaxy\
+    \ S III (samsung-m0)\". Note: Samsung download mode has a KNOX warranty bit that trips on flashing\
+    \ non-Samsung images; no bootloader unlock is otherwise required. Partial/untested marks (modem/gnss/nfc/camera/sensors/vibrator)\
+    \ should be re-verified against the live wiki.\n"

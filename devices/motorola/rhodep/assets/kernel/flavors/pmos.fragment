@@ -1,0 +1,4 @@
+# postmarketOS (Alpine) kernel flavor for motorola-rhodep.
+# The pmOS flavor IS the base config, so this fragment is empty (no delta).
+# Kept for symmetry so every distro maps to a flavor.
+# Discriminator: CONFIG_RT2800USB absent => pmOS flavor active.

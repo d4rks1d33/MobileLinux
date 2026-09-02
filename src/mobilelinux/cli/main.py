@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--desktop", default=None, help="desktop environment")
     sp.add_argument("--profile", default=None, help="distro profile, e.g. 'security'")
 
+    sp = add("kernel", "build just the kernel for a device+flavor (swap active aport)")
+    sp.add_argument("device")
+    sp.add_argument("--distro", default=None, help="distro whose flavor to build")
+    sp.add_argument("--flavor", default=None, help="explicit kernel flavor (e.g. pmos, kali)")
+
     sp = add("flash", "install/flash a device using its declared strategy")
     sp.add_argument("device")
     sp.add_argument("--recovery", action="store_true", help="use the recovery/rescue flow")

@@ -50,6 +50,7 @@
       "type": "object",
       "required": ["type", "version"],
       "additionalProperties": false,
+      "description": "Kernel = shared hardware-support base (patches/DTB/base config) plus per-distro CONFIG deltas ('flavors'). The same device supports multiple distros by swapping only the config flavor; patches and DTB are identical. This mirrors the reference port where pmOS and Kali share 108 byte-identical patches and differ only in the .config.",
       "properties": {
         "type": { "type": "string", "enum": ["mainline", "stable", "downstream", "vendor"],
           "description": "mainline = torvalds/linux; stable = x.y.z stable tree; downstream/vendor = forked BSP kernel." },
@@ -57,20 +58,65 @@
         "source": { "type": "string", "description": "Git URL or tarball URL of the kernel source." },
         "branch": { "type": "string" },
         "tag": { "type": "string" },
-        "config": { "type": "string", "description": "Path (relative to device dir) to the kernel .config, or name of a shared config." },
-        "config_fragments": { "type": "array", "items": { "type": "string" },
-          "description": "Optional Kconfig fragments merged on top of config (e.g. distro-specific like nethunter)." },
-        "patches_dir": { "type": "string", "description": "Path (relative to device dir) to a directory of ordered *.patch files." },
+        "provider": {
+          "type": "object",
+          "description": "The device-support provider: where the shared kernel work (aport = APKBUILD + patches + DTB + base config + deviceinfo) comes from. Usually postmarketOS. If the device is NOT yet in official pmaports, point 'source' at the porter's own fork/repo.",
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "enum": ["postmarketos", "custom", "none"], "default": "postmarketos",
+              "description": "postmarketos = a pmaports-style aport built with pmbootstrap; custom = same layout but from a non-upstream repo; none = built directly (make)." },
+            "upstreamed": { "type": "boolean", "default": false,
+              "description": "True only if the device is merged into official pmaports. False = use the fork/repo in 'source'." },
+            "source": { "type": "string",
+              "description": "Git URL of the aport source (official pmaports, OR the porter's fork/repo, e.g. https://github.com/<user>/postmarketos-<codename>)." },
+            "pmaports_ref": { "type": "string",
+              "description": "If upstreamed or an MR exists: the pmaports path/branch, e.g. 'device/testing/device-motorola-rhodep' or a fork branch." },
+            "aport_dir": { "type": "string",
+              "description": "Path (relative to device dir) to the migrated shared aport assets (APKBUILD, base config, patches, deviceinfo)." },
+            "linux_pkg": { "type": "string",
+              "description": "The linux-* package name in pmaports, e.g. 'linux-motorola-rhodep'. This is the package pmbootstrap builds and the one swapped in the active aport dir." },
+            "device_pkg": { "type": "string", "description": "The device-* package name, e.g. 'device-motorola-rhodep'." }
+          }
+        },
+        "base_config": { "type": "string",
+          "description": "Path (relative to device dir) to the shared BASE kernel config (the provider/pmOS-clean config). Flavors are fragments merged onto this." },
+        "patches_dir": { "type": "string", "description": "Path (relative to device dir) to the ordered *.patch files shared by ALL flavors." },
+        "flavors": {
+          "type": "object",
+          "description": "Per-distro kernel flavors. Each is a small CONFIG DELTA (fragment) merged onto base_config, NOT a full config. This keeps the delta auditable and prevents drift between two 12k-line configs.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["config_fragment"],
+            "properties": {
+              "config_fragment": { "type": "string",
+                "description": "Path (relative to device dir) to the Kconfig fragment merged onto base_config for this flavor (e.g. a NetHunter fragment for Kali). May be empty-ish for the base/pmos flavor." },
+              "distros": { "type": "array", "items": { "type": "string" },
+                "description": "Which distros use this flavor, e.g. ['kali','debian'] or ['postmarketos']." },
+              "discriminator": {
+                "type": "object",
+                "description": "A symbol whose presence proves this flavor's config is the active one (e.g. RT2800USB=m for Kali, absent for pmOS). Used to verify the correct aport is loaded before building.",
+                "additionalProperties": false,
+                "properties": {
+                  "symbol": { "type": "string", "description": "Kconfig symbol, e.g. 'CONFIG_RT2800USB'." },
+                  "present": { "type": "boolean", "description": "Whether the symbol must be present (set) for this flavor." }
+                }
+              },
+              "notes": { "type": "string" }
+            }
+          }
+        },
         "build": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "toolchain": { "type": "string", "enum": ["gcc", "llvm"], "default": "gcc" },
             "method": { "type": "string", "enum": ["pmbootstrap", "make", "kbuild"], "default": "make",
-              "description": "How the kernel image is produced. 'pmbootstrap' reuses a pmaports APKBUILD." },
-            "pmaports_pkg": { "type": "string", "description": "If method=pmbootstrap, the linux-* package name." },
+              "description": "How the kernel image is produced. 'pmbootstrap' reuses a pmaports APKBUILD (the provider aport)." },
             "image": { "type": "string", "enum": ["Image", "Image.gz", "zImage", "uImage", "Image.gz-dtb"], "default": "Image",
-              "description": "Which arch/*/boot image to use. Some bootloaders (Motorola ABL) require flat 'Image', not 'Image.gz'." }
+              "description": "Which arch/*/boot image to use. Some bootloaders (Motorola ABL) require flat 'Image', not 'Image.gz'." },
+            "deb_package": { "type": "boolean", "default": false,
+              "description": "If true, the built kernel apk is repackaged into a Debian linux-image .deb for debian-based distros (Kali/Debian/Ubuntu) consumed by debos." }
           }
         }
       }

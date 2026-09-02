@@ -154,6 +154,12 @@ def cmd_build(ctx: Context, args: argparse.Namespace) -> int:
     return build_command(ctx, d, distro=args.distro, desktop=args.desktop, profile=args.profile)
 
 
+def cmd_kernel(ctx: Context, args: argparse.Namespace) -> int:
+    from ..core.kernel import kernel_command
+    d = ctx.registry.get(args.device, validate_schema=False)
+    return kernel_command(ctx, d, distro=args.distro, flavor=args.flavor)
+
+
 def cmd_flash(ctx: Context, args: argparse.Namespace) -> int:
     from ..installer.flash import flash_command
     d = ctx.registry.get(args.device, validate_schema=False)
@@ -212,6 +218,7 @@ _HANDLERS = {
     "check": cmd_check,
     "detect": cmd_detect,
     "build": cmd_build,
+    "kernel": cmd_kernel,
     "flash": cmd_flash,
     "test": cmd_test,
     "release": cmd_release,

@@ -88,6 +88,12 @@ class KaliBackend(DistroBackend):
         device = req.device
         runner = req.runner
         ui.info("  staging device config into the recipe:")
+        # Kali is Debian-based: it consumes the kernel built by the kernel stage
+        # (the shared pmOS aport, kali flavor) as a linux-image .deb. This is the
+        # handoff point — the kernel work is NOT redone here.
+        if device.kernel.get("build", {}).get("deb_package"):
+            ui.note("    - kernel: linux-image .deb from the 'kali' flavor "
+                    "(mobilelinux kernel {} --flavor kali)".format(device.id))
         # Generate the bootimg device config (equiv. of debos/wip.toml) from the
         # device definition so it never drifts.
         cfg = self._render_device_toml(device)

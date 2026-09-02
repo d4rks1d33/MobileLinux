@@ -1,33 +1,43 @@
 schema_version: 1
-
 id: oneplus-enchilada
 vendor: oneplus
 model: OnePlus 6
 codename: oneplus-enchilada
-aliases: [enchilada]
+aliases:
+- enchilada
 year: 2018
 chassis: handset
 architecture: aarch64
 maturity: community
-
 soc:
   vendor: qualcomm
   family: sdm845
   marketing_name: Snapdragon 845
   platform: qcom-sdm845
-
 kernel:
   type: mainline
-  version: "6.6"            # near-mainline SDM845 tree
+  version: '6.6'
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/community/device-oneplus-enchilada
+    linux_pkg: linux-postmarketos-qcom-sdm845
+    device_pkg: device-oneplus-enchilada
+  flavors:
+    pmos:
+      config_fragment: ''
+      distros:
+      - postmarketos
   build:
+    toolchain: gcc
     method: pmbootstrap
-    pmaports_pkg: linux-postmarketos-qcom-sdm845
-
+    image: Image
+    deb_package: false
 device_tree:
   dtb: sdm845-oneplus-enchilada.dtb
-  append_dtb: true          # DTB concatenated to the kernel Image (Android append_dtb)
+  append_dtb: true
   source: in-kernel
-
 hardware:
   display:
     status: supported
@@ -69,7 +79,7 @@ hardware:
     status: supported
     driver: soc-qcom-sdm845-ucm + q6voiced (incl. call audio)
     evidence: research-pmos-devices.md Device 2; pmOS wiki OnePlus_6
-    notes: "call audio works (q6voiced)"
+    notes: call audio works (q6voiced)
     test: audio
   battery:
     status: supported
@@ -100,7 +110,7 @@ hardware:
     status: broken
     driver: in-display fingerprint
     evidence: research-pmos-devices.md Device 2 (in-display, hard)
-    notes: "in-display sensor; not functional on mainline"
+    notes: in-display sensor; not functional on mainline
   camera:
     status: partial
     driver: CAMSS (WIP)
@@ -116,70 +126,73 @@ hardware:
     driver: qcom vibrator
     evidence: pmOS wiki OnePlus_6 'Working'
     test: vibrator
-
 boot:
   method: android-bootimg
   android_bootimg:
-    header_version: 0         # v0/v1 style, QCDT off
+    header_version: 0
     pagesize: 4096
     offsets:
-      kernel: "0x00008000"
-      ramdisk: "0x01000000"
-      tags: "0x00000100"
-    cmdline: "console=ttyMSM0,115200"
+      kernel: '0x00008000'
+      ramdisk: '0x01000000'
+      tags: '0x00000100'
+    cmdline: console=ttyMSM0,115200
   initramfs:
     type: postmarketos
-    features: [loop-gpt-4096]
-
+    features:
+    - loop-gpt-4096
 storage:
-  rootfs_layout: gpt-in-partition   # rootfs image is a GPT disk written inside userdata
-  rootfs_sector_size: 4096          # UFS native 4K
+  rootfs_layout: gpt-in-partition
+  rootfs_sector_size: 4096
   partitions:
-    - name: boot
-      role: boot
-      device_path: /dev/disk/by-partlabel/boot
-      writable_via: [fastboot]
-    - name: userdata
-      role: rootfs
-      device_path: /dev/disk/by-partlabel/userdata
-      writable_via: [fastboot]      # bootloader-mode fastboot writes userdata directly
-      notes: "pmOS rootfs image carries its own boot/root subpartition table, sector 4096"
-
+  - name: boot
+    role: boot
+    device_path: /dev/disk/by-partlabel/boot
+    writable_via:
+    - fastboot
+  - name: userdata
+    role: rootfs
+    device_path: /dev/disk/by-partlabel/userdata
+    writable_via:
+    - fastboot
+    notes: pmOS rootfs image carries its own boot/root subpartition table, sector 4096
 install:
   strategy: fastboot
   ab_slots: true
-  slots: [a, b]
-  fastbootd: false                  # bootloader-mode fastboot only; no fastbootd needed
-  unlock_required: true             # fastboot oem unlock (wipes userdata)
+  slots:
+  - a
+  - b
+  fastbootd: false
+  unlock_required: true
   boot_partition: boot
   rootfs_target:
     partition: userdata
     method: fastboot
   steps:
-    - action: flash-partition
-      description: "Flash the Android boot image to the boot partition"
-      partition: boot
-      image: boot
-      via: fastboot
-      destructive: true
-    - action: dd-partition
-      description: "Write the pmOS rootfs image to userdata (fastboot flash)"
-      partition: userdata
-      image: rootfs
-      via: fastboot
-      destructive: true
-    - action: set-active-slot
-      slot: a
-      via: fastboot
-    - action: reboot
-      via: fastboot
-
+  - action: flash-partition
+    description: Flash the Android boot image to the boot partition
+    partition: boot
+    image: boot
+    via: fastboot
+    destructive: true
+  - action: dd-partition
+    description: Write the pmOS rootfs image to userdata (fastboot flash)
+    partition: userdata
+    image: rootfs
+    via: fastboot
+    destructive: true
+  - action: set-active-slot
+    slot: a
+    via: fastboot
+  - action: reboot
+    via: fastboot
 ota:
   strategy: ab
   rollback: true
-  slots: [a, b]
+  slots:
+  - a
+  - b
   bootloader_integration:
-    type: android-bootctl        # slot selection via Android misc (qbootctl)
+    type: android-bootctl
     backend: rauc-custom
   updatable:
     rootfs: true
@@ -187,25 +200,23 @@ ota:
     initramfs: true
     firmware: false
     bootloader: false
-
 tests:
-  - boot
-  - display
-  - touch
-  - gpu
-  - storage
-  - usb
-  - wifi
-  - bluetooth
-  - audio
-  - battery
-  - charging
-  - modem
-  - gnss
-  - nfc
-  - sensors
-  - vibrator
-
+- boot
+- display
+- touch
+- gpu
+- storage
+- usb
+- wifi
+- bluetooth
+- audio
+- battery
+- charging
+- modem
+- gnss
+- nfc
+- sensors
+- vibrator
 sources:
   imported_from: pmaports
   postmarketos_wiki: https://wiki.postmarketos.org/wiki/OnePlus_6_(oneplus-enchilada)

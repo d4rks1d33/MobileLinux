@@ -1,191 +1,201 @@
 schema_version: 1
-
 id: purism-librem5
 vendor: purism
 model: Librem 5
 codename: purism-librem5
-aliases: [librem5, librem-5]
+aliases:
+- librem5
+- librem-5
 chassis: handset
 architecture: aarch64
 maturity: community
-
 soc:
   vendor: nxp
   family: imx8mq
   marketing_name: NXP i.MX 8M Quad
   platform: imx8mq
-
 kernel:
   type: mainline
-  version: "6.6"
-  # Purism's tree is heavily upstreamed; pmOS builds linux-purism-librem5.
+  version: '6.6'
   source: https://source.puri.sm/Librem5/linux
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/community/device-purism-librem5
+    linux_pkg: linux-purism-librem5
+    device_pkg: device-purism-librem5
+  flavors:
+    pmos:
+      config_fragment: ''
+      distros:
+      - postmarketos
   build:
+    toolchain: gcc
     method: pmbootstrap
-    pmaports_pkg: linux-purism-librem5
     image: Image
-
+    deb_package: false
 device_tree:
-  # Multiple board revisions (r2/r3/r4) shipped via the kernel build.
   dtb: freescale/imx8mq-librem5-r4.dtb
   append_dtb: false
   overlays: []
   source: in-kernel
-
 firmware:
   redistributable: true
-  provides: [wifi, bluetooth, gpu]
-
+  provides:
+  - wifi
+  - bluetooth
+  - gpu
 hardware:
   display:
     status: supported
     driver: mxsfb-drm (i.MX DCSS/mxsfb)
-    evidence: "research-pmos-devices.md Device 5; deviceinfo mesa_driver=mxsfb-drm"
-    notes: "720x1440 panel"
+    evidence: research-pmos-devices.md Device 5; deviceinfo mesa_driver=mxsfb-drm
+    notes: 720x1440 panel
     test: display
   touchscreen:
     status: supported
     driver: touch controller (Librem 5 panel)
-    evidence: "research-pmos-devices.md Device 5 (Touch supported)"
+    evidence: research-pmos-devices.md Device 5 (Touch supported)
     test: touch
   gpu:
     status: supported
     driver: Vivante GC7000Lite (etnaviv)
-    evidence: "research-pmos-devices.md Device 5 (GPU accelerated, etnaviv)"
+    evidence: research-pmos-devices.md Device 5 (GPU accelerated, etnaviv)
     test: gpu
   storage:
     status: supported
     driver: eMMC + microSD (i.MX 8M SDHC)
-    evidence: "research-pmos-devices.md Device 5 (Storage: eMMC + microSD)"
+    evidence: 'research-pmos-devices.md Device 5 (Storage: eMMC + microSD)'
     test: storage
   usb:
     status: supported
     driver: dwc3 (i.MX 8M) + SDP serial download in BROM
-    evidence: "research-pmos-devices.md Device 5; uuu install/rescue over USB"
+    evidence: research-pmos-devices.md Device 5; uuu install/rescue over USB
     test: usb
   wifi:
     status: supported
     driver: Redpine/Silicon Labs RS9116 (sdio)
-    evidence: "research-pmos-devices.md Device 5 (WiFi supported, firmware-siliconlabs-rs9116)"
+    evidence: research-pmos-devices.md Device 5 (WiFi supported, firmware-siliconlabs-rs9116)
     test: wifi
   bluetooth:
     status: supported
     driver: Redpine/Silicon Labs RS9116 (sdio)
-    evidence: "research-pmos-devices.md Device 5 (Bluetooth supported)"
+    evidence: research-pmos-devices.md Device 5 (Bluetooth supported)
     test: bluetooth
   audio:
     status: supported
     driver: i.MX 8M SAI codec (ASoC)
-    evidence: "research-pmos-devices.md Device 5 (Audio incl. call audio)"
-    notes: "in-call audio works"
+    evidence: research-pmos-devices.md Device 5 (Audio incl. call audio)
+    notes: in-call audio works
     test: audio
   battery:
     status: supported
     driver: fuel gauge (Librem 5 PMIC)
-    evidence: "research-pmos-devices.md Device 5 (first-class mainline Linux phone)"
+    evidence: research-pmos-devices.md Device 5 (first-class mainline Linux phone)
     test: battery
   charging:
     status: supported
     driver: Librem 5 charger
-    evidence: "research-pmos-devices.md Device 5 (first-class mainline Linux phone)"
+    evidence: research-pmos-devices.md Device 5 (first-class mainline Linux phone)
     test: charging
   modem:
     status: supported
     driver: BroadMobi BM818 (external M.2, USB) via ModemManager
-    evidence: "research-pmos-devices.md Device 5 (Modem BM818, own firmware domain, hardware kill switch)"
-    notes: "external modem module on USB; managed by ModemManager"
-    caveats: ["isolated by hardware kill switch"]
+    evidence: research-pmos-devices.md Device 5 (Modem BM818, own firmware domain, hardware kill switch)
+    notes: external modem module on USB; managed by ModemManager
+    caveats:
+    - isolated by hardware kill switch
     test: modem
   gnss:
     status: supported
     driver: GNSS via BM818 modem module
-    evidence: "research-pmos-devices.md Device 5 (GNSS via modem module)"
+    evidence: research-pmos-devices.md Device 5 (GNSS via modem module)
     test: gnss
   nfc:
     status: partial
     driver: NFC controller (hardware present)
-    evidence: "research-pmos-devices.md Device 5 (NFC hardware present); status not verified by test"
-    notes: "hardware present; software support not verified"
+    evidence: research-pmos-devices.md Device 5 (NFC hardware present); status not verified by test
+    notes: hardware present; software support not verified
   fingerprint:
     status: not-present
-    evidence: "research-pmos-devices.md Device 5 (no fingerprint sensor)"
+    evidence: research-pmos-devices.md Device 5 (no fingerprint sensor)
   camera:
     status: partial
     driver: i.MX 8M CSI/CSS (WIP)
-    evidence: "research-pmos-devices.md Device 5 (Camera Partial/WIP)"
-    notes: "camera support is work-in-progress"
+    evidence: research-pmos-devices.md Device 5 (Camera Partial/WIP)
+    notes: camera support is work-in-progress
     test: camera
   sensors:
     status: supported
     driver: iio sensors (accelerometer/proximity)
-    evidence: "research-pmos-devices.md Device 5 (first-class mainline Linux phone)"
+    evidence: research-pmos-devices.md Device 5 (first-class mainline Linux phone)
     test: sensors
   vibrator:
     status: supported
     driver: gpio/pwm vibrator
-    evidence: "research-pmos-devices.md Device 5 (first-class mainline Linux phone)"
+    evidence: research-pmos-devices.md Device 5 (first-class mainline Linux phone)
     test: vibrator
-
 boot:
   method: uboot-extlinux
   initramfs:
     type: postmarketos
-
 storage:
-  rootfs_layout: whole-disk       # whole eMMC (or SD) holds the pmOS image
+  rootfs_layout: whole-disk
   rootfs_sector_size: 512
   partitions:
-    - name: emmc
-      role: rootfs
-      device_path: /dev/mmcblk0
-      writable_via: [uuu]
-      notes: >
-        uuu loads U-Boot to RAM over the i.MX 8M BROM serial download
-        protocol (SDP), then writes the pmOS image to eMMC. U-Boot
-        (phone-boot.img) is embedded at sd_embed_firmware offset 33KiB
-        on the SD-card fallback path.
+  - name: emmc
+    role: rootfs
+    device_path: /dev/mmcblk0
+    writable_via:
+    - uuu
+    notes: 'uuu loads U-Boot to RAM over the i.MX 8M BROM serial download protocol (SDP), then writes
+      the pmOS image to eMMC. U-Boot (phone-boot.img) is embedded at sd_embed_firmware offset 33KiB on
+      the SD-card fallback path.
 
+      '
 install:
   strategy: uuu
   ab_slots: false
   fastbootd: false
-  unlock_required: false           # open platform; no bootloader unlock needed
+  unlock_required: false
   rootfs_target:
     partition: eMMC
     method: uuu
   rescue:
     required: false
-    # SDP serial-download (uuu) is the unbrick path.
     method: uuu-ramboot
-    transport: "usb-sdp (NXP uuu / mfgtools; i.MX 8M BROM serial download)"
-    notes: >
-      The i.MX 8M BROM serial download protocol (SDP) is the rescue/unbrick
-      path: NXP's uuu tool loads U-Boot into RAM over USB, from which the eMMC
-      can be re-written. An SD-card boot fallback also works: write the whole
-      image to microSD and boot from it (U-Boot embedded at offset 33KiB).
-  steps:
-    - action: message
-      description: >
-        Put the Librem 5 into serial-download (BROM SDP) mode using the boot
-        switch, then connect USB to the host running uuu.
-    - action: dd-partition
-      description: >
-        uuu runs flash_script.lst: loads U-Boot to RAM over SDP, then writes
-        the pmOS rootfs image to eMMC (this is also the unbrick path).
-      partition: eMMC
-      image: rootfs
-      via: uuu
-      destructive: true
-    - action: reboot
-      description: "Reboot into U-Boot -> extlinux -> kernel."
-    - action: message
-      description: >
-        SD-card fallback: alternatively write the whole image to microSD (U-Boot
-        embedded at sd_embed_firmware offset 33KiB) and boot from it.
+    transport: usb-sdp (NXP uuu / mfgtools; i.MX 8M BROM serial download)
+    notes: 'The i.MX 8M BROM serial download protocol (SDP) is the rescue/unbrick path: NXP''s uuu tool
+      loads U-Boot into RAM over USB, from which the eMMC can be re-written. An SD-card boot fallback
+      also works: write the whole image to microSD and boot from it (U-Boot embedded at offset 33KiB).
 
+      '
+  steps:
+  - action: message
+    description: 'Put the Librem 5 into serial-download (BROM SDP) mode using the boot switch, then connect
+      USB to the host running uuu.
+
+      '
+  - action: dd-partition
+    description: 'uuu runs flash_script.lst: loads U-Boot to RAM over SDP, then writes the pmOS rootfs
+      image to eMMC (this is also the unbrick path).
+
+      '
+    partition: eMMC
+    image: rootfs
+    via: uuu
+    destructive: true
+  - action: reboot
+    description: Reboot into U-Boot -> extlinux -> kernel.
+  - action: message
+    description: 'SD-card fallback: alternatively write the whole image to microSD (U-Boot embedded at
+      sd_embed_firmware offset 33KiB) and boot from it.
+
+      '
 ota:
   strategy: single-rootfs
-  rollback: false                  # no A/B partitions on eMMC by default
+  rollback: false
   bootloader_integration:
     type: none
     backend: none
@@ -196,29 +206,27 @@ ota:
     device_packages: true
     firmware: false
     bootloader: false
-
 tests:
-  - boot
-  - display
-  - touch
-  - gpu
-  - storage
-  - usb
-  - wifi
-  - bluetooth
-  - audio
-  - battery
-  - charging
-  - modem
-  - gnss
-  - sensors
-  - vibrator
-
+- boot
+- display
+- touch
+- gpu
+- storage
+- usb
+- wifi
+- bluetooth
+- audio
+- battery
+- charging
+- modem
+- gnss
+- sensors
+- vibrator
 sources:
   imported_from: pmaports
   postmarketos_wiki: https://wiki.postmarketos.org/wiki/Purism_Librem_5_(purism-librem5)
   pmaports: device/community/device-purism-librem5
-  notes: >
-    Librem 5 primary support is PureOS; postmarketOS also supports it.
-    Hardware statuses synthesized from research-pmos-devices.md Device 5;
-    NFC/camera left partial pending live-wiki verification.
+  notes: 'Librem 5 primary support is PureOS; postmarketOS also supports it. Hardware statuses synthesized
+    from research-pmos-devices.md Device 5; NFC/camera left partial pending live-wiki verification.
+
+    '

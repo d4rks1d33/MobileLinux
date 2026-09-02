@@ -45,6 +45,12 @@ Key ideas:
 
 - **Hardware support is independent of the rootfs.** The same device works with
   Kali, Debian, Arch, … without duplicating the port.
+- **The kernel is a shared base with per-distro config flavors.** postmarketOS
+  provides the device-support base (source + patches + DTB + base config); each
+  distro is just a config **fragment** on top (Kali = base + NetHunter delta).
+  The same 108 patches and DTB serve every distro. A device need not be in
+  official pmaports — the provider can point at the porter's own fork/repo.
+  See [docs/kernel-flavors-and-providers.md](docs/kernel-flavors-and-providers.md).
 - **Installation is a first-class, per-device concern.** Not every phone
   supports `fastboot flash userdata`; not every phone has fastbootd; partition
   names and A/B schemes differ. Each device declares its **install strategy**.
@@ -61,8 +67,9 @@ pip install -e ".[dev]"
 mobilelinux list-devices
 mobilelinux device-info rhodep
 mobilelinux check rhodep
-mobilelinux build rhodep --distro kali      # dry-run when build tools are absent
-mobilelinux flash rhodep --dry-run          # never destructive without confirmation
+mobilelinux kernel rhodep --flavor kali      # build just the kernel (swap active aport)
+mobilelinux build rhodep --distro kali       # dry-run when build tools are absent
+mobilelinux flash rhodep --dry-run           # never destructive without confirmation
 ```
 
 The framework **detects external tools** (fastboot, adb, debos, pmbootstrap,

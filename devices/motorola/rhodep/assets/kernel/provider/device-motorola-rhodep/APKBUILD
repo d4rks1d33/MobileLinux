@@ -1,0 +1,100 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer="d4rks1d3 <teogorqui1@hotmail.es>"
+pkgname=device-motorola-rhodep
+pkgver=1
+pkgrel=0
+pkgdesc="Motorola Moto G82 5G"
+url="https://postmarketos.org"
+arch="aarch64"
+license="MIT"
+depends="
+	android-tools-mkbootimg
+	linux-motorola-rhodep
+	make-dynpart-mappings
+	pd-mapper
+	postmarketos-base
+	qrtr
+	rmtfs
+	soc-qcom
+	tqftpserv
+"
+makedepends="devicepkg-dev"
+source="
+	ath10k-late.conf
+	ath10k-late.service
+	deviceinfo
+	kernel-cmdline.d-earlycon.conf
+	modules-initfs
+	modules-load.conf
+	readonly-firmware.mount
+	rhodep-battery-jeita.service
+	rhodep-battery-jeita.sh
+	rhodep-modem-tmpfiles.conf
+	rmtfs-rhodep.conf
+"
+options="!archcheck !check"
+
+build() {
+	devicepkg_build $startdir $pkgname
+
+	# Empty dtbo image: the stock Android overlays must not be applied on
+	# top of the mainline DTB. Motorola's fastboot refuses "erase dtbo",
+	# so a zero-filled image of the exact partition size is flashed instead.
+	dd if=/dev/zero of="$srcdir"/dtbo.img bs=25165824 count=1
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+
+	install -Dm644 "$srcdir"/dtbo.img \
+		-t "$pkgdir"/boot/
+
+	install -Dm644 "$srcdir"/modules-load.conf \
+		"$pkgdir"/usr/lib/modules-load.d/00-devicepkg-$pkgname.conf
+
+	install -Dm644 "$srcdir"/kernel-cmdline.d-earlycon.conf \
+		"$pkgdir"/usr/lib/kernel-cmdline.d/00-earlycon.conf
+
+
+	# Our own units. rmtfs, pd-mapper and tqftpserv are provided by Alpine
+	# (rmtfs-systemd and friends); installing them here overwrote those and
+	# made apk add fail. rmtfs only needs different arguments, so that goes in
+	# como drop-in.
+	for _u in ath10k-late.service readonly-firmware.mount \
+		  rhodep-battery-jeita.service; do
+		install -Dm644 "$srcdir"/$_u "$pkgdir"/usr/lib/systemd/system/$_u
+	done
+	install -Dm644 "$srcdir"/rmtfs-rhodep.conf \
+		"$pkgdir"/usr/lib/systemd/system/rmtfs.service.d/10-rhodep.conf
+
+	# Enable them, including Alpine's three, which ship disabled.
+	install -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	for _u in pd-mapper.service rmtfs.service tqftpserv.service \
+		  ath10k-late.service readonly-firmware.mount \
+		  rhodep-battery-jeita.service; do
+		ln -sf ../$_u \
+			"$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/$_u
+	done
+
+	install -Dm755 "$srcdir"/rhodep-battery-jeita.sh \
+		"$pkgdir"/usr/bin/rhodep-battery-jeita
+
+	install -Dm644 "$srcdir"/ath10k-late.conf \
+		"$pkgdir"/usr/lib/modprobe.d/ath10k-late.conf
+	install -Dm644 "$srcdir"/rhodep-modem-tmpfiles.conf \
+		"$pkgdir"/usr/lib/tmpfiles.d/rhodep-modem.conf
+}
+
+sha512sums="
+31a7ea3affe8fa2a0cdb1213bcaddaac05da784b0bd0c7c540d4ac9fd7be4580d0b476e1b3f66f9c7876c7d35e5ca17842263970efe8e9513c646cf8aef1d5ec  ath10k-late.conf
+db9b2db9c627ada1399de7d2b5656965faf8111af00e6ccb15719e60661f7f22e9d747f534c9c013381d53f79f3283595070bcba1f52a35f4caa9302b905ec5f  ath10k-late.service
+82140297972c53fcba0854b8c2ad917879130e89feb7084d4ecb7fc92393c8461e7437cf838cda962d3dd411873da99dacd6fc0519ec6d712e1ef580bd6219dd  deviceinfo
+c65034940c9355eb3c28ac5690609b0375f3afcb889a48c463de374d22129e22c989cb7e32e660ac5793d51cb15ed9d55a8c6727a7ebea3817c8e25c9cb44b18  kernel-cmdline.d-earlycon.conf
+760c3dae71f0c6c5f487bb57e7a0c23156831a1c09d07f626de6168dab4c3154d7bbd6e21758c514830ba43b089a12a7738de088a9d7fcdebc316163ccf891c8  modules-initfs
+44e3f21c0d3fa6022483fbdc489d5184d630df5697ede8df6b6c0af019086ae26da4c277651112cb21314f600d02c4cf4e24287f364b169d828c3b3310c61e97  modules-load.conf
+bad43e510085efc57ba211174ffeeaed87a0f57551d9af9146600c314d3349a15d7367c2989431307bf4be9aa1d3fb049aaa33185be36407d9c49bbc31809606  readonly-firmware.mount
+7a9e7036bda034ffb23c4f939b903b95928c013ebb6972f07df36c756235d98eec3191ce2d52939a596b46b2ca69e9698f3039edbfd2dd79f669ee6f3e4a8242  rhodep-battery-jeita.service
+30c3d08811f4953a9e3fe80e06b740c835f02cce4f8d6657455c8b1ab618907bbb00c092d10104d2c759b799b65224bd26d8b16087a08270e0c112e4f877db72  rhodep-battery-jeita.sh
+32db9cacb1c921506115220603c33a37ec84af85c3f3203dbe4ef51bd1767f5d4f814fa84bac79e50bc6ba58fd6d31337f3557aab817e029e8c1e9eb35b1ac78  rhodep-modem-tmpfiles.conf
+b7d5776df819a660b3c8a0641770b94653e9aa45c6c35a4f9cf37af97b749788d889014de6f4391b0f8d650512253964c42d796bcdc0fdf9bbdbaf80b6b8052b  rmtfs-rhodep.conf
+"

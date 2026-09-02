@@ -60,6 +60,18 @@ def main() -> int:
             if t and t not in tests:
                 print(f"FAIL device {name}: hardware.{f}.test '{t}' has no test module")
                 problems += 1
+        # Kernel flavors: fragment files must exist; discriminators sane.
+        kdir = path.parent
+        kern = data.get("kernel", {})
+        base = kern.get("base_config")
+        if base and not (kdir / base).exists():
+            print(f"FAIL device {name}: base_config '{base}' missing")
+            problems += 1
+        for fname, flavor in kern.get("flavors", {}).items():
+            frag = flavor.get("config_fragment")
+            if frag and not (kdir / frag).exists():
+                print(f"FAIL device {name}: flavor {fname} fragment '{frag}' missing")
+                problems += 1
         print(f"ok   device {name} ({strat})")
 
     if problems:

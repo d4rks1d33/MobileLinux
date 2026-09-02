@@ -60,11 +60,53 @@ imported automatically.
 | `dtb`, `append_dtb` | `device_tree.dtb` (with `.dtb`), `device_tree.append_dtb` | |
 | `rootfs_image_sector_size` | `storage.rootfs_sector_size` / `rootfs_layout` | `4096` → `gpt-in-partition`, else `plain`. |
 
-It also seeds a `kernel` block (`type: mainline`, `version: unknown`,
-`build.method: pmbootstrap`, `pmaports_pkg: linux-<codename>`), a default
+It also seeds a `kernel` block using the **provider + flavor** model
+(`type: mainline`, `version: unknown`, `build.method: pmbootstrap`) — see
+[The imported kernel block](#the-imported-kernel-block) below — a default
 `ota: { strategy: single-rootfs, rollback: false }`, a starter `tests` list, and
 `sources.imported_from: pmaports`. If the boot method is not `android-bootimg`
 and `header_version` was absent, the `android_bootimg` sub-block is dropped.
+
+### The imported kernel block
+
+The importer emits a `kernel.provider` block and a single `pmos` flavor, matching
+the [provider + flavor model](kernel-flavors-and-providers.md). The defaults are
+deliberately conservative — they describe a device that is **not yet upstream**:
+
+```yaml
+kernel:
+  type: mainline
+  version: unknown
+  provider:
+    kind: postmarketos
+    upstreamed: false
+    source: https://gitlab.com/postmarketOS/pmaports
+    linux_pkg: linux-<codename>
+    device_pkg: device-<codename>
+  flavors:
+    pmos:
+      config_fragment: ""
+      distros: [postmarketos]
+  build:
+    method: pmbootstrap
+```
+
+You then complete the provider and flavors from evidence (see
+[Follow-up workflow](#follow-up-workflow)):
+
+- **If the device is upstream in official pmaports:** set `upstreamed: true`
+  and point `pmaports_ref` at the upstream path
+  (`device/<tier>/device-<vendor>-<codename>`). Keep `source` as pmaports.
+- **If it's your own not-yet-merged port:** set `kind: custom` and point
+  `source` at your own repo (e.g. `github.com/<user>/postmarketos-<codename>`),
+  leaving `upstreamed: false`. This is the rhodep situation — working support in
+  a fork before (or instead of) upstreaming.
+- **Add per-distro flavors.** The importer seeds only the `pmos` flavor. To run
+  a Debian-based distro (Kali/Debian/Ubuntu) on the same kernel, add a fragment
+  flavor for it (e.g. `kali`) with its `config_fragment`, `distros`, and a
+  `discriminator`, and set `build.deb_package: true` so the apk is repackaged as
+  a `linux-image` `.deb`. No new patches or DTB are needed — only the config
+  delta.
 
 ### The `_FLASH_TO_STRATEGY` mapping
 
@@ -96,6 +138,13 @@ deny `fastboot flash userdata`).
   yours to write.
 - **SoC details.** `soc.vendor` and `soc.family` come in as `unknown`.
 - **Kernel version.** `version` comes in as `unknown`.
+- **Provider upstream status + extra flavors.** The importer seeds only
+  conservative provider **defaults** (`kind: postmarketos`, `upstreamed: false`,
+  `source` = pmaports) and a **single `pmos` flavor**. It cannot know whether
+  the device is actually upstream, nor which other distros you want. You set
+  `upstreamed: true` + `pmaports_ref` (if upstream) or `kind: custom` +
+  `source: <your repo>` (if not), and add any additional distro flavors (e.g. a
+  `kali` fragment) yourself — see [the imported kernel block](#the-imported-kernel-block).
 
 The draft's own `sources.notes` says so: *"AUTO-IMPORTED DRAFT. Hardware statuses
 are 'untested' — fill them in from the wiki + real tests. Verify install.steps
@@ -128,7 +177,13 @@ The import gets you a validatable skeleton; finishing the port is manual and
 evidence-driven:
 
 1. **Fill SoC and kernel** — replace the `unknown` `soc.vendor`/`soc.family` and
-   kernel `version`.
+   kernel `version`. Then complete the **provider**: if the device is upstream,
+   set `upstreamed: true` and `pmaports_ref`; if it's your own fork, set
+   `kind: custom` and `source: <your repo>`. Add `base_config`, `patches_dir`,
+   and any extra distro **flavors** (e.g. a `kali` fragment with
+   `build.deb_package: true`) beyond the seeded `pmos` one. See
+   [the imported kernel block](#the-imported-kernel-block) and
+   [porting.md §3](porting.md#3-add-the-kernel-provider--flavor-model).
 2. **Fill the hardware matrix from the wiki + real tests.** Promote each
    `untested` feature only with `evidence` and a `test:` module. Mark absent
    hardware `not-present` (so it's excluded from the support %) and unfixable
