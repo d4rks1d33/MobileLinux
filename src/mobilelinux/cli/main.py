@@ -88,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("security-status", "show version + security patch level + affected CVEs")
 
+    sp = add("keygen", "generate a signing keypair for a channel")
+    sp.add_argument("--channel", default="dev")
+    sp.add_argument("--key-id", default=None)
+
     sp = add("import", "import a device definition from postmarketOS pmaports")
     sp.add_argument("source", help="pmaports path or device codename")
 

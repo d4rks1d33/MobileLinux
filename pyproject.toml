@@ -22,7 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 validate = ["jsonschema>=4.0"]
-dev = ["jsonschema>=4.0", "pytest>=7.0"]
+signing = ["cryptography>=3.4"]
+dev = ["jsonschema>=4.0", "pytest>=7.0", "cryptography>=3.4"]
 
 [project.scripts]
 mobilelinux = "mobilelinux.cli.main:main"

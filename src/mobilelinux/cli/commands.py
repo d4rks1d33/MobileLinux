@@ -188,6 +188,23 @@ def cmd_import(ctx: Context, args: argparse.Namespace) -> int:
     return import_command(ctx, args.source)
 
 
+def cmd_keygen(ctx: Context, args: argparse.Namespace) -> int:
+    from ..ota import signing
+    keys = ctx.repo.root / "keys"
+    channel = args.channel
+    priv = keys / f"{channel}.ed25519.key"
+    pub = keys / f"{channel}.ed25519.pub"
+    try:
+        signing.generate_keypair(priv, pub, key_id=args.key_id or channel)
+    except signing.SigningError as exc:
+        ui.error(str(exc))
+        return 1
+    if channel in ("stable", "beta"):
+        ui.warn("this is a RELEASE channel key. Keep the private key OFFLINE (HSM/air-gapped). "
+                "Never commit it. Only the .pub belongs on devices.")
+    return 0
+
+
 _HANDLERS = {
     "list-devices": cmd_list_devices,
     "device-info": cmd_device_info,
@@ -201,4 +218,5 @@ _HANDLERS = {
     "update": cmd_update,
     "security-status": cmd_security_status,
     "import": cmd_import,
+    "keygen": cmd_keygen,
 }

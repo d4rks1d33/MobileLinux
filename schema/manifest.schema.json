@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mobilelinux.dev/schema/manifest.schema.json",
+  "title": "MobileLinux OTA Release Manifest",
+  "description": "Signed metadata describing a release for one device+channel. The client verifies device id, architecture, minimum version, hashes and the signature BEFORE installing. Designed to be hosted on GitHub Releases / static HTTP / object storage; the server never needs access to the phone.",
+  "type": "object",
+  "required": ["manifest_version", "release", "device", "artifacts", "security"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest_version": { "type": "integer", "const": 1 },
+    "release": {
+      "type": "object",
+      "required": ["version", "channel", "date"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "type": "string", "description": "Semantic-ish version, e.g. '1.2.0'." },
+        "channel": { "type": "string", "enum": ["stable", "beta", "nightly"] },
+        "date": { "type": "string", "description": "ISO-8601 build date." },
+        "distro": { "type": "string" },
+        "desktop": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["id", "architecture"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Device id this release targets. MUST match the client's device or install is refused." },
+        "codename": { "type": "string" },
+        "architecture": { "type": "string" },
+        "minimum_version": { "type": "string", "description": "Client must be at least this version to accept the update (blocks unsafe skips)." },
+        "ota_strategy": { "type": "string", "enum": ["ab", "single-rootfs"] }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Per-component artifacts. Each is independently hashed so a client can update only what changed (rootfs vs kernel vs device packages).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["url", "sha256", "size"],
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string", "description": "Absolute or relative URL to the artifact (e.g. a GitHub release asset)." },
+          "sha256": { "type": "string" },
+          "size": { "type": "integer" },
+          "type": { "type": "string", "enum": ["rootfs", "kernel", "initramfs", "boot", "device-packages", "firmware", "rauc-bundle"] },
+          "compressed": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "required": ["security_patch_level"],
+      "additionalProperties": false,
+      "properties": {
+        "security_patch_level": { "type": "string", "description": "Date the userspace/kernel security state corresponds to, e.g. '2026-09-01'." },
+        "kernel_version": { "type": "string" },
+        "sbom_url": { "type": "string", "description": "URL to the SBOM (SPDX/CycloneDX) for this release." },
+        "fixed_cves": { "type": "array", "items": { "type": "string" }, "description": "CVEs fixed relative to the previous release." }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "description": "Detached signature over the canonical manifest body (all fields except this one). Verified with the release public key shipped on the device.",
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "type": "string", "enum": ["ed25519", "rsa-pss-sha256", "ecdsa-p256-sha256"] },
+        "key_id": { "type": "string", "description": "Identifier of the signing key (for rotation)." },
+        "value": { "type": "string", "description": "Base64 signature of the manifest body." }
+      }
+    }
+  }
+}
