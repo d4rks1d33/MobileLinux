@@ -9,16 +9,20 @@ never touches hardware support.
 |--------|------|---------|---------------|--------|
 | [`postmarketos/`](postmarketos/) | Alpine | pmbootstrap | `pmos` | **supported** |
 | [`kali/`](kali/) | Debian | debos | `kali` | **supported** |
-| [`debian/`](debian/) | Debian | debos | `debian` | planned |
-| [`ubuntu/`](ubuntu/) | Debian | debos | `ubuntu` | planned |
+| [`debian/`](debian/) | Debian | debos | `debian` | experimental |
+| [`ubuntu/`](ubuntu/) | Debian | debos | `ubuntu` | experimental |
 | [`arch/`](arch/) | Arch | pacstrap/PKGBUILD | (own) | planned |
 
-More distros are expected over time (e.g. **Pop!_OS** and other Debian/Ubuntu
-derivatives via the debos path; **EndeavourOS / Manjaro-ARM** and other
-Arch derivatives via the pacstrap path). Debian-based distros are the natural
-next targets because they reuse Kali's existing debos + `linux-image .deb`
-pipeline; Arch-based distros need their own kernel packaging
-(`provider.kind: none`).
+**Debian-family distros share one pipeline.** Kali, Debian and Ubuntu all
+subclass a single `DebianBackend` (`src/mobilelinux/distros/debian_base.py`) and
+differ only in the recipe URL + suite + package lists. Adding a new Debian-based
+distro (e.g. **Pop!_OS** and other Ubuntu/Debian derivatives) is a ~10-line
+subclass plus an `os-distros/<id>/` directory. Arch-based distros
+(**EndeavourOS / Manjaro-ARM**, …) need their own kernel packaging
+(`provider.kind: none`) and a pacstrap builder, so they are a bigger step.
+
+`debian`/`ubuntu` are **experimental**: the backend exists and plans correctly,
+but the end-to-end build has not been verified yet. `kali` is the proven one.
 
 Each distro directory contains:
 

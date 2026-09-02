@@ -175,20 +175,123 @@ def _pmaports_linux_dir(linux_pkg: str) -> Path:
     return Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/device/testing" / linux_pkg
 
 
-def build_linux_image_deb(device: Device, apk: Path | None, *,
+def extract_apk(apk: Path, dest: Path, runner: tools.Runner) -> Path:
+    """Extract a kernel apk to ``dest`` (returns dest). Real when --execute."""
+    if runner.dry_run or not (runner.execute or runner.allow_dangerous):
+        ui.info(f"  [plan] extract {apk.name} -> {dest}")
+        return dest
+    dest.mkdir(parents=True, exist_ok=True)
+    # apk is a gzip tarball; ignore the .SIGN/.PKGINFO members.
+    import subprocess
+    subprocess.run(["tar", "-xzf", str(apk), "-C", str(dest),
+                    "--warning=no-unknown-keyword"], check=False)
+    ui.note(f"  extracted apk -> {dest}")
+    return dest
+
+
+def build_modules_tarball(device: Device, apkdir: Path, *,
                           out_dir: Path, runner: tools.Runner) -> Path | None:
-    """Repackage the kernel apk into a Debian linux-image .deb for debos distros."""
+    """Produce modules-<ver>.tar.gz (the on-device modules payload) from the apk.
+
+    Mirrors the reference port: ship /usr/lib/modules/<kver> as a tarball, and
+    verify there are no empty modules and no .ko.zst (which hang boot).
+    """
+    kver = _uname_r(device)
+    out = out_dir / f"modules-{device.id}-{kver}.tar.gz"
+    modroot = apkdir / "usr/lib/modules" / kver
+    ui.header("Kernel modules")
+    if runner.dry_run or not (runner.execute or runner.allow_dangerous):
+        ui.info(f"  [plan] tar {modroot} -> {out.name} (verify 0 empty, 0 .ko.zst)")
+        return None
+    if not modroot.exists():
+        ui.warn(f"  modules dir not found in apk: {modroot}")
+        return None
+    import subprocess
+    # Safety checks from the reference port.
+    kos = list(modroot.rglob("*.ko"))
+    zst = list(modroot.rglob("*.ko.zst"))
+    empty = [p for p in kos if p.stat().st_size == 0]
+    if zst:
+        ui.warn(f"  {len(zst)} .ko.zst present (these hang boot!) — check MODULE_COMPRESS")
+    if empty:
+        ui.warn(f"  {len(empty)} empty .ko modules")
+    subprocess.run(["tar", "-czf", str(out), "-C", str(apkdir / "usr/lib/modules"), kver],
+                   check=True)
+    ui.success(f"  modules: {out.name} ({len(kos)} .ko, {len(zst)} .ko.zst, {len(empty)} empty)")
+    return out if out.exists() else None
+
+
+def build_linux_image_deb(device: Device, apk: Path | None, *,
+                          out_dir: Path, runner: tools.Runner,
+                          apkdir: Path | None = None) -> Path | None:
+    """Repackage the kernel apk into a Debian linux-image .deb for debos distros.
+
+    Real implementation: extract the apk, lay out the Debian linux-image tree
+    (boot/vmlinuz-<kver> flat Image, usr/lib/linux-image-<kver>/<soc>/<dtb>,
+    lib/modules/<kver>), write control + postinst, and dpkg-deb --build.
+    """
     kver = _uname_r(device)
     dtb = device.device_tree.get("dtb", "")
     soc = device.soc_family
-    deb = out_dir / f"linux-image-{kver}_{device.kernel.get('version','')}-{device.id}_arm64.deb"
+    ver = device.kernel.get("version", "")
+    deb = out_dir / f"linux-image-{kver}_{ver}-{device.id}_arm64.deb"
     ui.header("linux-image .deb (for debos / Debian-based distros)")
-    ui.note(f"  extract apk -> vmlinuz (flat Image) + dtb {dtb} + /lib/modules/{kver}")
-    src = str(apk) if apk else "<kernel apk>"
-    runner.run(["sh", "-c",
-                f"# extract {src}, assemble linux-image tree (boot/vmlinuz-{kver}, "
-                f"usr/lib/linux-image-{kver}/{_dtb_subdir(soc)}/{dtb}, lib/modules/{kver}), "
-                f"then: dpkg-deb --build -Zxz PKG {deb.name}"], dangerous=True)
+
+    if apk is None or not apk.exists():
+        ui.warn("  kernel apk not found; cannot build .deb")
+        return None
+    if runner.dry_run or not (runner.execute or runner.allow_dangerous):
+        ui.info(f"  [plan] extract {apk.name} -> assemble linux-image tree -> "
+                f"dpkg-deb --build -Zxz -> {deb.name}")
+        return None
+
+    import subprocess
+    src = apkdir or extract_apk(apk, out_dir / "apk-extract", runner)
+    pkg = out_dir / "linux-image-pkg"
+    if pkg.exists():
+        subprocess.run(["rm", "-rf", str(pkg)], check=False)
+    (pkg / "DEBIAN").mkdir(parents=True, exist_ok=True)
+    (pkg / "boot").mkdir(parents=True, exist_ok=True)
+    dtb_sub = _dtb_subdir(soc)
+    (pkg / "usr/lib" / f"linux-image-{kver}" / dtb_sub).mkdir(parents=True, exist_ok=True)
+    (pkg / "usr/lib/modules").mkdir(parents=True, exist_ok=True)
+
+    # vmlinuz (flat Image), dtb, modules
+    subprocess.run(["cp", str(src / "boot/vmlinuz"), str(pkg / "boot" / f"vmlinuz-{kver}")], check=True)
+    dtb_src = src / "boot/dtbs" / dtb_sub / dtb
+    if dtb_src.exists():
+        subprocess.run(["cp", str(dtb_src),
+                        str(pkg / "usr/lib" / f"linux-image-{kver}" / dtb_sub / dtb)], check=True)
+    subprocess.run(["cp", "-a", str(src / "usr/lib/modules" / kver),
+                    str(pkg / "usr/lib/modules" / kver)], check=True)
+    # remove build/source symlinks (they point outside)
+    for link in ("build", "source"):
+        subprocess.run(["rm", "-f", str(pkg / "usr/lib/modules" / kver / link)], check=False)
+
+    # control + postinst
+    size_kb = int(subprocess.run(["du", "-sk", str(pkg)], capture_output=True, text=True)
+                  .stdout.split()[0] or "0")
+    (pkg / "DEBIAN/control").write_text(
+        f"Package: linux-image-{kver}\n"
+        f"Version: {ver}-{device.id}\n"
+        f"Architecture: arm64\n"
+        f"Maintainer: MobileLinux <dev@mobilelinux.local>\n"
+        f"Section: kernel\n"
+        f"Priority: optional\n"
+        f"Installed-Size: {size_kb}\n"
+        f"Depends: kmod\n"
+        f"Description: MobileLinux mainline kernel {ver} for {device.model} ({device.codename})\n"
+        f" Flat Image + appended DTB, {kver}, kali flavor.\n"
+    )
+    (pkg / "DEBIAN/postinst").write_text(
+        "#!/bin/sh\nset -e\n"
+        f"depmod -a {kver}\n"
+        f"if command -v update-initramfs >/dev/null 2>&1; then update-initramfs -u -k {kver} || true; fi\n"
+    )
+    (pkg / "DEBIAN/postinst").chmod(0o755)
+
+    subprocess.run(["fakeroot", "dpkg-deb", "--build", "-Zxz", str(pkg), str(deb)], check=True)
+    ui.success(f"  linux-image .deb: {deb.name}")
     return deb if deb.exists() else None
 
 
@@ -218,8 +321,15 @@ def kernel_command(ctx, device: Device, *, distro: str | None, flavor: str | Non
     out_dir.mkdir(parents=True, exist_ok=True)
 
     apk = build_kernel(device, distro, flavor_name, out_dir=out_dir, runner=runner)
+
+    # Extract the apk once and reuse it for modules + .deb.
+    apkdir = None
+    if apk and apk.exists() and (runner.execute or runner.allow_dangerous) and not runner.dry_run:
+        apkdir = extract_apk(apk, out_dir / "apk-extract", runner)
+        build_modules_tarball(device, apkdir, out_dir=out_dir, runner=runner)
+
     if device.kernel.get("build", {}).get("deb_package"):
-        build_linux_image_deb(device, apk, out_dir=out_dir, runner=runner)
+        build_linux_image_deb(device, apk, out_dir=out_dir, runner=runner, apkdir=apkdir)
 
     if runner.missing.any:
         runner.missing.report()

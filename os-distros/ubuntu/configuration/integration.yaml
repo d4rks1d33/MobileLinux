@@ -1,0 +1,51 @@
+# Kali chroot-integration configuration.
+#
+# debos produces the base rootfs, but image.yaml cannot partition inside a
+# container (loop max_part=0), so the device-integration phase runs in a chroot.
+# This file declares that phase's distro-level steps (device-level bits like the
+# rhodep-*.deb and firmware come from the device definition, applied afterwards).
+#
+# The Kali backend reads this to know which services to enable/mask and in what
+# order the userspace installers run.
+
+# systemd units to enable in the image (SoC modem/firmware stack on Qualcomm).
+# Device backends may extend this from the device definition.
+enable_services:
+  - qrtr-ns
+  - rmtfs
+  - pd-mapper
+  - tqftpserv
+
+# systemd units to mask. droid-juicer hangs the boot without Android (it waits
+# forever extracting firmware from Android partitions -> plymouth-quit-wait
+# never completes -> graphical.target never reached). systemd-repart is
+# unnecessary and fails on the gpt-in-partition layout. Devices may add more via
+# first_boot.mask_services.
+mask_services:
+  - droid-juicer.service
+  - systemd-repart.service
+
+# Login: use a display manager (GDM) instead of the phosh.service autologin.
+# Mandatory when the image ends up with gdm3 (kali-linux-default pulls it in),
+# otherwise both claim the display at boot.
+login:
+  manager: gdm3
+  mask_autologin: phosh.service
+
+# Order in which the device's userspace installer layers run in the chroot.
+# apt-holds MUST run LAST: it pins packages and protects every file the earlier
+# installers laid down, so the first `apt upgrade` cannot undo the port.
+userspace_install_order:
+  - login
+  - audio
+  - modem
+  - bluetooth
+  - sensors
+  - plasma-apps
+  - apt        # apply-holds.sh -- always last
+
+# apt holds: prevent an upgrade from replacing device/firmware/modem packages
+# that would break hardware (e.g. firmware-atheros vs firmware-<device>).
+# The concrete hold list lives with the device (apt/apt-holds.txt) since it is
+# device-specific; this just declares that holds are applied.
+apply_apt_holds: true

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Wrapper: run debos without fakemachine (needed when there is no /dev/kvm,
+# e.g. inside a container). Put this dir first in PATH so debos is invoked this
+# way. Requires the real 'debos' binary on PATH (go install
+# github.com/go-debos/debos/cmd/debos@latest) or at $HOME/go/bin/debos.
+real_debos="$(command -v -p debos 2>/dev/null || echo "$HOME/go/bin/debos")"
+exec "$real_debos" --disable-fakemachine "$@"

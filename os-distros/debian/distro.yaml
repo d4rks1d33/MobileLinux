@@ -9,7 +9,7 @@ architectures: [aarch64, armhf]
 default_desktop: phosh
 kernel_flavor: debian     # add a 'debian' flavor fragment to devices you target
 
-status: planned           # descriptor only; no backend registered yet
+status: experimental    # backend implemented (shares the Kali debian pipeline); untested end-to-end
 
 security:
   model: stable

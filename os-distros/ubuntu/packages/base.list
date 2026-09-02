@@ -1,0 +1,3 @@
+# Debian base packages for the chroot integration phase.
+initramfs-tools
+qcom-support-common

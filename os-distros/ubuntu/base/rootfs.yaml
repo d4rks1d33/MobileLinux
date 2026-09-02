@@ -1,0 +1,13 @@
+# Ubuntu base rootfs (debos, Mobian recipes).
+# Ubuntu is Ubuntu-based, so it reuses the shared debian-family pipeline
+# (UbuntuBackend): clone the recipe, inject the generated device.toml + the
+# kernel-stage linux-image .deb, run debos, then the chroot integration phase.
+recipe:
+  source: https://salsa.debian.org/Mobian-team/mobian-recipes.git
+  ref: master
+  rootfs_yaml: rootfs.yaml
+  image_yaml: image.yaml
+parameters:
+  suite: noble
+  variant: nonfree
+# Output: rootfs-<arch>-<desktop>-ubuntu.tar.xz

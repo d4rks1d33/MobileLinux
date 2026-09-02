@@ -16,30 +16,37 @@ from .context import Context
 from . import commands
 
 
-def _add_global_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", help="path to the mobilelinux repository (default: autodetect)")
-    parser.add_argument("--dry-run", action="store_true",
+def _add_global_flags(parser: argparse.ArgumentParser, *, suppress: bool = False) -> None:
+    # When suppress=True (the per-subcommand copy), unset flags are omitted from
+    # the namespace instead of defaulting to False, so a global flag given
+    # BEFORE the subcommand (parsed at the top level) is not clobbered back to
+    # its default by the subparser.
+    d = argparse.SUPPRESS if suppress else None
+    parser.add_argument("--repo", default=d,
+                        help="path to the mobilelinux repository (default: autodetect)")
+    parser.add_argument("--dry-run", action="store_true", default=d,
                         help="print actions without executing anything")
-    parser.add_argument("--execute", action="store_true",
+    parser.add_argument("--execute", action="store_true", default=d,
                         help="actually run build/flash steps (default: plan only)")
-    parser.add_argument("--allow-dangerous", action="store_true",
+    parser.add_argument("--allow-dangerous", action="store_true", default=d,
                         help="permit ops that touch real block/loop devices (implies --execute)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="reduce output")
-    parser.add_argument("-y", "--yes", action="store_true",
+    parser.add_argument("-q", "--quiet", action="store_true", default=d, help="reduce output")
+    parser.add_argument("-y", "--yes", action="store_true", default=d,
                         help="assume yes to confirmations (dangerous)")
 
 
 def build_parser() -> argparse.ArgumentParser:
     # A parent parser lets the global flags appear either before OR after the
-    # subcommand (e.g. `mobilelinux flash rhodep --dry-run`).
+    # subcommand (e.g. `mobilelinux flash rhodep --dry-run`). The subcommand copy
+    # uses SUPPRESS defaults so it doesn't overwrite flags given before it.
     common = argparse.ArgumentParser(add_help=False)
-    _add_global_flags(common)
+    _add_global_flags(common, suppress=True)
 
     p = argparse.ArgumentParser(
         prog="mobilelinux",
         description="Automated device porting platform for mobile Linux.",
-        parents=[common],
     )
+    _add_global_flags(p, suppress=False)
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 

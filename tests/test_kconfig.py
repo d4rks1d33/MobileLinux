@@ -33,11 +33,11 @@ def test_pmos_alias():
 
 
 def test_kali_package_lists_are_real():
-    from mobilelinux.distros.kali import _read_package_list
-    base = _read_package_list(REPO_ROOT / "os-distros/kali/packages/base.list")
+    from mobilelinux.distros.debian_base import read_package_list
+    base = read_package_list(REPO_ROOT / "os-distros/kali/packages/base.list")
     assert "kali-menu" in base
     assert "initramfs-tools" in base
-    phone = _read_package_list(REPO_ROOT / "os-distros/kali/packages/phone-role.list")
+    phone = read_package_list(REPO_ROOT / "os-distros/kali/packages/phone-role.list")
     assert "mobian-phosh-phone" in phone
 
 
@@ -51,14 +51,25 @@ def test_kali_integration_config_loads():
     assert cfg["userspace_install_order"][-1] == "apt"
 
 
-def test_planned_distros_present():
+def test_future_distros_present():
     import yaml
-    for d in ("debian", "ubuntu", "arch"):
+    # arch is still planned; debian/ubuntu now have a backend (experimental).
+    assert yaml.safe_load((REPO_ROOT / "os-distros/arch/distro.yaml").read_text())["status"] == "planned"
+    for d in ("debian", "ubuntu"):
         data = yaml.safe_load((REPO_ROOT / f"os-distros/{d}/distro.yaml").read_text())
-        assert data["status"] == "planned"
-    # debian/ubuntu are debian-family (reuse the .deb path); arch is not
-    assert yaml.safe_load((REPO_ROOT / "os-distros/debian/distro.yaml").read_text())["family"] == "debian"
+        assert data["status"] in ("experimental", "planned")
+        assert data["family"] == "debian"     # reuse the .deb / debos path
     assert yaml.safe_load((REPO_ROOT / "os-distros/arch/distro.yaml").read_text())["family"] == "arch"
+
+
+def test_debian_family_backends_share_pipeline():
+    from mobilelinux.distros import get_backend
+    from mobilelinux.distros.debian_base import DebianBackend
+    for name, suite in [("kali", "kali-rolling"), ("debian", "trixie"), ("ubuntu", "noble")]:
+        b = get_backend(name, REPO_ROOT)
+        assert isinstance(b, DebianBackend)
+        assert b.suite == suite
+        assert b.family == "debian"
 
 
 def test_catalog_loads_with_categories_and_presets():

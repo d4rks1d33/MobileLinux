@@ -1,0 +1,3 @@
+#!/bin/sh
+# Force a container-in-container compatible mode (no own cgroup, no machined).
+exec /usr/bin/systemd-nspawn --register=no --keep-unit "$@"

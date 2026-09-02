@@ -9,7 +9,7 @@ architectures: [aarch64, armhf]
 default_desktop: lomiri   # Ubuntu Touch ships Lomiri; phosh/plasma also possible
 kernel_flavor: ubuntu
 
-status: planned           # descriptor only; no backend registered yet
+status: experimental    # backend implemented (shares the Kali debian pipeline); untested end-to-end
 
 security:
   model: stable
