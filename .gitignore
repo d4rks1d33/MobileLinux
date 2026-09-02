@@ -1,32 +1,86 @@
-# Build output / artifacts
+# ---------------------------------------------------------------------------
+# Build output / artifacts (per-user; never committed)
+# ---------------------------------------------------------------------------
 /out/
+/ota-work/
 *.img
 *.img.xz
-*.tar.xz
+*.img.gz
 *.raucb
+*.apk
 *.deb
 !schema/**/*.deb
+# rootfs tarballs
+*.tar
+*.tar.xz
+*.tar.gz
+*.tar.zst
+# generated kernel configs / merged flavor configs (out/ already covers most)
+config-*-kali.aarch64
+config-*-pmos.aarch64
+# generated SBOMs / manifests live under out/releases, already ignored
 
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-*.egg-info/
-build/
-dist/
-.pytest_cache/
-
+# ---------------------------------------------------------------------------
 # Signing keys (NEVER commit private release keys)
-/keys/
+# ---------------------------------------------------------------------------
+# Ignore key material inside keys/ but keep the directory + its README tracked.
+/keys/*
+!/keys/README.md
 *.key
 *.pem
-!keys/README.md
+*.gpg
+*.asc
 
-# Local firmware blobs (non-redistributable)
+# ---------------------------------------------------------------------------
+# Local firmware blobs (non-redistributable; extracted from the device)
+# ---------------------------------------------------------------------------
 **/assets/firmware/**/*.bin
 **/assets/firmware/**/*.mbn
 **/assets/firmware/**/*.mdt
+**/assets/firmware/**/*.b[0-9][0-9]
+**/assets/firmware/**/*.fw
+**/assets/firmware/**/*.tlv
+**/assets/firmware/**/*.mbn.*
+**/vendor-blobs/
 
-# Editor
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------------------------
+# pmbootstrap / debos scratch (if run inside the repo)
+# ---------------------------------------------------------------------------
+/kali-nethunter-pro/
+/rootfs/
+/rootfs-work/
+*.qcow2
+
+# ---------------------------------------------------------------------------
+# Editor / OS junk
+# ---------------------------------------------------------------------------
 .DS_Store
+.AppleDouble
 *.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.log
