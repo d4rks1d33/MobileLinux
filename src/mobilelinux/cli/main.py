@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--distro", default=None, help="distribution backend (default from config)")
     sp.add_argument("--desktop", default=None, help="desktop environment")
     sp.add_argument("--profile", default=None, help="distro profile, e.g. 'security'")
+    sp.add_argument("--input", default=None, metavar="BOOT_IMG",
+                    help="a known-good base boot image to derive the rescue image from")
 
     sp = add("kernel", "build just the kernel for a device+flavor (swap active aport)")
     sp.add_argument("device")

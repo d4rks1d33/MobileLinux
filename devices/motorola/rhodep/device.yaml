@@ -184,28 +184,41 @@ device_packages:
     kind: deb
     purpose: "mounts modem_a, symlinks .mbn firmware, starts remoteprocs, ath10k-late; without it: no radio/WiFi/BT"
     source: assets/packages/rhodep-modem-support
+    deb: assets/debs/rhodep-modem-support_4_arm64.deb
+    depends: [qcom-support-common]
   - name: rhodep-usb-otg
     layer: vendor
     critical: true
     kind: deb
     purpose: "USB-C port defaults to charge, OTG host over I2C (SGM41542); without it: USB dongles won't enumerate"
     source: assets/packages/rhodep-usb-otg
+    deb: assets/debs/rhodep-usb-otg_3_arm64.deb
+    depends: [i2c-tools]
   - name: rhodep-battery-jeita
     layer: device
     critical: true
     kind: deb
     purpose: "stops charging below 0C (prevents lithium plating); without it: cold charging damages the cell"
     source: assets/packages/rhodep-battery-jeita
-  - name: rhodep-gpu-vulkan
+    deb: assets/debs/rhodep-battery-jeita_1_arm64.deb
+  - name: rhodep-phosh-wifi-guard
     layer: device
     kind: deb
-    purpose: "points Vulkan loader at Turnip freedreno ICD (Adreno 619)"
-    source: assets/packages/rhodep-gpu-vulkan
+    purpose: "keeps Phosh alive during WiFi-audit network churn (airmon-ng check kill)"
+    source: assets/packages/rhodep-phosh-wifi-guard
+    deb: assets/debs/rhodep-phosh-wifi-guard_2_arm64.deb
   - name: rhodep-gpu-opencl
     layer: device
     kind: deb
     purpose: "enables OpenCL via rusticl/freedreno (Adreno 619)"
     source: assets/packages/rhodep-gpu-opencl
+    depends: [mesa-opencl-icd, clinfo]
+  - name: rhodep-gpu-vulkan
+    layer: device
+    kind: deb
+    purpose: "points Vulkan loader at Turnip freedreno ICD (Adreno 619)"
+    source: assets/packages/rhodep-gpu-vulkan
+    depends: [mesa-vulkan-drivers, libvulkan1, vulkan-tools]
   - name: rhodep-audio
     layer: soc
     kind: config

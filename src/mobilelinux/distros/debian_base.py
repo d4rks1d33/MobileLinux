@@ -197,15 +197,31 @@ class DebianBackend(DistroBackend):
             runner.run(["chroot", str(root), "apt-get", "install", "-y", *build_deps],
                        tool="chroot", dangerous=True)
 
-        # Device .debs: copy into /srv and dpkg -i.
-        runner.run(["sh", "-c", f"mkdir -p {root}/srv"], dangerous=True)
-        runner.run(["sh", "-c", f"cp {req.out_dir}/*.deb {root}/srv/ 2>/dev/null || true"],
+        # Device .debs: install the kernel-stage linux-image .deb + the device's
+        # prebuilt .debs, resolving their apt dependencies.
+        runner.run(["sh", "-c", f"mkdir -p {root}/srv/debs"], dangerous=True)
+        # kernel linux-image .deb from the build out dir
+        runner.run(["sh", "-c",
+                    f"cp {req.out_dir}/linux-image-*.deb {root}/srv/debs/ 2>/dev/null || true"],
                    dangerous=True)
-        # device-specific .debs from the device assets (firmware, rhodep-*)
+        # device-shipped prebuilt .debs (rhodep-*) from assets/debs/
         self._copy_device_debs(device, root, runner)
+
+        # Install the apt dependencies each device package declares (i2c-tools,
+        # mesa-opencl-icd, clinfo, ...) so dpkg resolution succeeds.
+        apt_deps = self._collect_apt_deps(device)
+        if apt_deps:
+            runner.run(["chroot", str(root), "apt-get", "install", "-y", *sorted(apt_deps)],
+                       tool="chroot", dangerous=True)
+            ui.note(f"    - device apt deps: {', '.join(sorted(apt_deps))}")
+
+        # Install the .debs with apt (resolves remaining deps automatically),
+        # falling back to dpkg -i + apt -f for older apt.
         runner.run(["chroot", str(root), "sh", "-c",
-                    "dpkg -i /srv/*.deb || apt-get -fy install"],
+                    "apt-get install -y /srv/debs/*.deb "
+                    "|| { dpkg -i /srv/debs/*.deb; apt-get -fy install; }"],
                    tool="chroot", dangerous=True)
+        ui.note("    - installed device .debs (deps resolved)")
 
         # Distro integration config (services + install order).
         integ = self._load_integration()
@@ -228,13 +244,28 @@ class DebianBackend(DistroBackend):
         self._run_userspace_installers(req, root, integ)
 
     def _copy_device_debs(self, device, root: Path, runner: tools.Runner) -> None:
-        """Copy device-shipped .debs (firmware, rhodep-*) into the chroot /srv."""
+        """Copy the device's prebuilt .debs (rhodep-*) into the chroot /srv/debs."""
         for pkg in device.device_packages:
             if pkg.get("kind") != "deb":
                 continue
-            src = device.dir / pkg.get("source", "")
-            # source may be a package build dir; a prebuilt .deb may sit next to it
-            ui.note(f"    - device package: {pkg['name']} (from {pkg.get('source')})")
+            deb_rel = pkg.get("deb")
+            if not deb_rel:
+                ui.note(f"    - {pkg['name']}: no prebuilt .deb declared (source only)")
+                continue
+            deb_path = device.dir / deb_rel
+            if deb_path.exists() or runner.dry_run or not runner.execute:
+                runner.run(["sh", "-c", f"cp {deb_path} {root}/srv/debs/"], dangerous=True)
+                ui.note(f"    - device .deb: {deb_path.name}")
+            else:
+                ui.warn(f"    - {pkg['name']}: prebuilt .deb missing at {deb_path}")
+
+    def _collect_apt_deps(self, device) -> set:
+        """Union of the apt 'depends' declared by every device .deb package."""
+        deps: set = set()
+        for pkg in device.device_packages:
+            for d in pkg.get("depends", []) or []:
+                deps.add(d)
+        return deps
 
     def _run_userspace_installers(self, req: BuildRequest, root: Path, integ: dict) -> None:
         device = req.device

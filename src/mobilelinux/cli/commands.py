@@ -151,7 +151,8 @@ def cmd_detect(ctx: Context, args: argparse.Namespace) -> int:
 def cmd_build(ctx: Context, args: argparse.Namespace) -> int:
     from ..core.build import build_command
     d = ctx.registry.get(args.device, validate_schema=False)
-    return build_command(ctx, d, distro=args.distro, desktop=args.desktop, profile=args.profile)
+    return build_command(ctx, d, distro=args.distro, desktop=args.desktop,
+                         profile=args.profile, input_boot=getattr(args, "input", None))
 
 
 def cmd_kernel(ctx: Context, args: argparse.Namespace) -> int:

@@ -212,6 +212,9 @@
             "description": "Reuse scope: generic=any phone, soc=same SoC family, vendor=same manufacturer, device=this device only. Maps to audit classes A/B/C/D." },
           "purpose": { "type": "string", "description": "One line: what breaks if this is absent." },
           "source": { "type": "string", "description": "Path (relative to device or shared layer dir) to the package source / installer." },
+          "deb": { "type": "string", "description": "Path (relative to device dir) to a prebuilt .deb for this package, if shipped (e.g. assets/debs/rhodep-usb-otg_3_arm64.deb)." },
+          "depends": { "type": "array", "items": { "type": "string" },
+            "description": "apt package dependencies this package needs (installed alongside the .deb so dependency resolution succeeds, e.g. i2c-tools, mesa-opencl-icd, clinfo)." },
           "kind": { "type": "string", "enum": ["deb", "installer-script", "systemd-dropin", "modprobe", "udev", "config"], "default": "deb" },
           "critical": { "type": "boolean", "default": false, "description": "If true, must be present for a usable phone (radio/boot/display)." }
         }

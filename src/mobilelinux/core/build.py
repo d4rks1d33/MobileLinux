@@ -42,6 +42,7 @@ def _load_defaults(repo_root: Path) -> dict:
 
 def build_command(
     ctx, device: Device, *, distro: str | None, desktop: str | None, profile: str | None,
+    input_boot: str | None = None,
 ) -> int:
     runner = ctx.runner()
     defaults = _load_defaults(ctx.repo.root)
@@ -109,7 +110,7 @@ def build_command(
     rescue = device.install.get("rescue", {})
     if rescue.get("required"):
         rescue_img = out_dir / f"{device.id}-rescue.img"
-        _build_rescue(device, runner, out=rescue_img)
+        _build_rescue(device, runner, out=rescue_img, base_boot=input_boot)
 
     # -- Artifacts manifest -------------------------------------------------
     aset = ArtifactSet(device=device.id, distro=distro, desktop=desktop)
@@ -121,15 +122,25 @@ def build_command(
         aset.add("rescue", rescue_img, role="rescue")
     manifest = aset.save(out_dir)
 
+    # Always emit device-specific install + firmware instructions.
+    _emit_install_instructions(ctx, device, distro)
+    _emit_firmware_instructions(ctx, device)
+
+    # Keep out/<device>/ clean: only flashable artifacts + docs at the top; move
+    # build scratch into out/<device>/work/.
+    if not ctx.dry_run:
+        _finalize_out_dir(out_dir, distro)
+
     ui.header("Result")
     if aset.artifacts:
+        ui.note(f"  flashable artifacts in {out_dir}:")
         for key, art in aset.artifacts.items():
             print(f"  {ui.green('\u2713')} {key:<8} {art.filename}  "
                   f"({art.size} bytes, sha256 {art.sha256[:12]}…)")
         ui.success(f"artifact manifest: {manifest}")
+        ui.note("  see INSTALL.md (how to flash) and FIRMWARE.md (extract vendor blobs)")
     else:
         ui.warn("no artifacts were produced (tools missing / dry-run)")
-        _emit_install_instructions(ctx, device, distro)
 
     for note in rootfs.notes:
         ui.note(f"  note: {note}")
@@ -139,6 +150,67 @@ def build_command(
         ui.note("Install the tools above to produce real artifacts, then re-run.")
         return 2 if not ctx.dry_run else 0
     return 0
+
+
+#: files/dirs that are flashable artifacts or user docs (kept at out/<device>/)
+_FLASHABLE_SUFFIXES = (".img", "-boot.img", "-userdata.img", "-rescue.img")
+_KEEP_NAMES = {"INSTALL.md", "FIRMWARE.md", "CHECKSUMS.sha256", "artifacts.json"}
+_KEEP_GLOBS = ("*-boot.img", "*-userdata.img", "*-rescue.img", "*.img",
+               "modules-*.tar.gz")
+
+
+def _finalize_out_dir(out_dir: Path, distro: str) -> None:
+    """Move build scratch into out/<device>/work/, leaving only flashable
+    artifacts + docs at the top level, and write CHECKSUMS.sha256."""
+    import hashlib
+
+    work = out_dir / "work"
+    work.mkdir(exist_ok=True)
+
+    def is_flashable(p: Path) -> bool:
+        if p.name in _KEEP_NAMES:
+            return True
+        return any(p.match(g) for g in _KEEP_GLOBS)
+
+    for entry in list(out_dir.iterdir()):
+        if entry == work:
+            continue
+        if entry.is_file() and is_flashable(entry):
+            continue
+        # everything else is scratch (apk-extract/, linux-image-pkg/, *.deb,
+        # config-*.aarch64, device.toml, recipe clone, rootfs/, tarballs, ...)
+        dest = work / entry.name
+        if dest.exists():
+            import shutil
+            shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+        entry.rename(dest)
+
+    # (Re)write CHECKSUMS.sha256 over the flashable artifacts.
+    lines = []
+    for p in sorted(out_dir.iterdir()):
+        if p.is_file() and (any(p.match(g) for g in _KEEP_GLOBS)):
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            lines.append(f"{h.hexdigest()}  {p.name}")
+    if lines:
+        (out_dir / "CHECKSUMS.sha256").write_text("\n".join(lines) + "\n")
+    ui.note(f"  finalized: flashable artifacts kept in {out_dir}, scratch moved to {work}/")
+
+
+def _emit_firmware_instructions(ctx, device: Device) -> None:
+    """Generate device-specific firmware-extraction instructions when the
+    firmware is non-redistributable (blobs must be pulled from the device)."""
+    fw = device.firmware
+    if fw.get("redistributable", True):
+        return
+    from ..installer.instructions import generate_firmware_instructions
+    text = generate_firmware_instructions(device)
+    path = ctx.repo.out_dir / device.id / "FIRMWARE.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    ui.note(f"  wrote firmware instructions: {path}")
 
 
 def _build_kernel(device: Device, runner: tools.Runner) -> None:
@@ -161,16 +233,30 @@ def _karch(arch: str) -> str:
     return {"aarch64": "arm64", "armv7": "arm", "armhf": "arm"}.get(arch, arch)
 
 
-def _build_rescue(device: Device, runner: tools.Runner, *, out: Path) -> None:
+def _build_rescue(device: Device, runner: tools.Runner, *, out: Path,
+                  base_boot: str | None = None) -> None:
+    """Build the rescue image by deriving it from a known-good boot image.
+
+    Uses the device's rescue build script (e.g. build-rescue-boot.sh, which
+    splits kernel+DTB+initramfs, appends pmos.debug-shell, and repacks an
+    Android boot v2). Needs a base boot image: pass one via --input, or set
+    install.rescue.build_from in the device (a literal path). If neither is a
+    real file, the step is planned.
+    """
     ui.header("Rescue image")
     rescue = device.install.get("rescue", {})
     ui.note(f"  method={rescue.get('method')} transport={rescue.get('transport')}")
-    base = rescue.get("build_from", "")
-    # Rescue = base pmOS boot image + debug-shell in cmdline. The real logic
-    # lives in the device assets; here we plan the derivation.
-    runner.run(["sh", "-c",
-                f"# derive rescue image from {base}: split kernel+DTB+initramfs, "
-                f"append pmos.debug-shell, repack Android boot v2 -> {out}"])
+
+    base = base_boot or rescue.get("build_from", "")
+    script = device.dir / "assets" / "scripts" / "build-rescue-boot.sh"
+    if base and base != "@INPUT_BOOT_IMG@" and Path(base).is_file() and script.is_file():
+        runner.run(["sh", str(script), base, str(out)], tool="sh", dangerous=True)
+    else:
+        ui.note("  no base boot image available (pass --input <pmos-boot.img> or set "
+                "install.rescue.build_from); planning the derivation:")
+        runner.run(["sh", "-c",
+                    f"# {script} <base-pmos-boot.img> {out}: split kernel+DTB+initramfs, "
+                    f"append pmos.debug-shell, repack Android boot v2"])
 
 
 def _emit_install_instructions(ctx, device: Device, distro: str) -> None:

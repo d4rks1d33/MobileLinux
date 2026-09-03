@@ -83,3 +83,75 @@ def generate_instructions(device: Device, distro: str) -> str:
                  "`--dry-run` to preview without writing anything.")
     lines.append("")
     return "\n".join(lines)
+
+
+def generate_firmware_instructions(device) -> str:
+    """Generate instructions to obtain non-redistributable vendor firmware.
+
+    These blobs cannot be shipped in git; they are extracted from the device's
+    own stock/vendor partitions. The instructions are derived from the device
+    definition's firmware.extract_from_device + runtime_mounts.
+    """
+    fw = device.firmware
+    lines: list[str] = []
+    lines.append(f"# Vendor firmware for {device.model} ({device.codename})")
+    lines.append("")
+    lines.append("Some firmware for this device is **proprietary and NOT "
+                 "redistributable**, so it is not shipped in this repository. You "
+                 "must extract it from your own device (from its stock vendor "
+                 "partitions) and place it in the firmware package before "
+                 "building, OR install it on the running phone.")
+    lines.append("")
+    pkg = fw.get("package")
+    if pkg:
+        lines.append(f"Target firmware package: `{pkg}` "
+                     f"(files land under `/usr/lib/firmware/...`).")
+        lines.append("")
+
+    blobs = fw.get("extract_from_device", [])
+    if blobs:
+        lines.append("## Blobs to extract")
+        lines.append("")
+        lines.append("| Firmware file | For | Source |")
+        lines.append("|---------------|-----|--------|")
+        for b in blobs:
+            lines.append(f"| `{b.get('name','')}` | {b.get('provides','')} | "
+                         f"{b.get('source','stock vendor')} |")
+        lines.append("")
+
+    mounts = fw.get("runtime_mounts", [])
+    if mounts:
+        lines.append("## Runtime firmware mounts")
+        lines.append("")
+        lines.append("Large modem/DSP blobs are served at runtime directly from a "
+                     "device partition (not copied into the rootfs):")
+        lines.append("")
+        for m in mounts:
+            lines.append(f"- `{m.get('source')}` -> `{m.get('target')}` "
+                         f"(`{m.get('fstype','ext4')}`, `{m.get('options','ro')}`)")
+        lines.append("")
+
+    lines.append("## How to extract them")
+    lines.append("")
+    lines.append("From the stock ROM or a running Android/pmOS on the device, the "
+                 "blobs live under the vendor/system partitions (often inside the "
+                 "Android dynamic `super` partition) and the modem partition. Two "
+                 "common routes:")
+    lines.append("")
+    lines.append("1. **From the running phone** (rescue shell or a booted Linux): "
+                 "mount the vendor/modem partitions read-only and copy the files "
+                 "listed above into the firmware package's `lib/firmware/` tree, "
+                 "preserving the paths in the table.")
+    lines.append("2. **From the stock firmware image**: unpack the vendor/super "
+                 "image (e.g. with `lpunpack` + `simg2img`) and copy the same "
+                 "files out.")
+    lines.append("")
+    lines.append("Then rebuild the firmware package and re-run the build, or "
+                 "`dpkg -i` the firmware package on the device. Until the blobs are "
+                 "present, the corresponding hardware (WiFi/BT/GPU-zap/audio) will "
+                 "not initialize even though all the software is in place.")
+    lines.append("")
+    lines.append("> These instructions are generated from the device definition's "
+                 "`firmware.extract_from_device`; keep that list accurate.")
+    lines.append("")
+    return "\n".join(lines)
