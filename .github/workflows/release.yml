@@ -5,6 +5,11 @@ name: Publish device releases
 #
 # This ONLY runs on main/master — pushes to the dev branch never publish a
 # release. Work on dev, and releases happen when your changes reach main.
+#
+# Idempotent: if a release with the device's current tag already exists, the job
+# skips it (no redundant re-publish). To ship a new release, bump version/tag in
+# release/<device>/release.yaml — the new tag won't exist yet, so it publishes.
+# A manual 'workflow_dispatch' run forces (re)publishing.
 on:
   push:
     branches: [main, master]
@@ -80,7 +85,26 @@ jobs:
           out("repo_only", " ".join(m.get("repo_only_artifacts", [])))
           PY
 
+      - name: Skip if this release tag already exists (idempotent)
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          # workflow_dispatch can force a re-publish; otherwise skip existing tags.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: (re)publishing $tag"
+          elif gh release view "$tag" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "release $tag already exists and version is unchanged -> skipping (no redundant re-publish)"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "release $tag does not exist -> will publish"
+          fi
+
       - name: Package docs zip
+        if: steps.exists.outputs.skip != 'true'
         run: |
           d="${{ steps.meta.outputs.dir }}"
           zip -j "${{ matrix.device }}-docs.zip" \
@@ -88,6 +112,7 @@ jobs:
 
       - name: Build release notes
         id: notes
+        if: steps.exists.outputs.skip != 'true'
         run: |
           d="${{ steps.meta.outputs.dir }}"
           {
@@ -124,6 +149,7 @@ jobs:
           } > RELEASE_NOTES.md
 
       - name: Create / update GitHub Release
+        if: steps.exists.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
