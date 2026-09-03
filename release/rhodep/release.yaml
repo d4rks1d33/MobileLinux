@@ -1,0 +1,38 @@
+# Release metadata for the rhodep (Motorola Moto G82 5G) images.
+# The GitHub Actions workflow reads this to build the release tag, title, and
+# to know which image files to attach.
+
+device: rhodep
+device_name: Motorola Moto G82 5G
+distro: kali
+desktop: phosh
+version: 1.0.0
+channel: stable
+
+# Release tag/title pattern -> kali-rhodep-v1.0.0
+tag: kali-rhodep-v1.0.0
+title: "Kali Linux for Motorola Moto G82 5G (rhodep) — v1.0.0"
+
+# Kernel / OS provenance shown in the release notes.
+kernel: 7.2-rc5 (mainline)
+kali_release: 2026.3 (rolling)
+
+# Image files attached to the GitHub Release (relative to this directory).
+# NOTE: kali-userdata.img is NOT attached here — it is too large for a normal
+# release asset and lives in the repo via Git LFS. The release notes point users
+# to download it from release/<device>/kali-userdata.img in the repo.
+artifacts:
+  - rescue.img
+  - kali-boot.img
+
+# Large images that are NOT uploaded as release assets but shipped in the repo
+# (Git LFS). Listed here so the release notes can link them.
+repo_only_artifacts:
+  - kali-userdata.img
+
+# Default credentials of the shipped image.
+default_user: kali
+default_password: "1234"
+
+# Whether this release should be (re)published on the next push to main.
+publish: true

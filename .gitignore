@@ -6,6 +6,10 @@
 *.img
 *.img.xz
 *.img.gz
+# Flashable release images ARE tracked (the release workflow attaches them).
+!release/**/*.img
+!release/**/*.img.xz
+!release/**/*.img.gz
 *.raucb
 *.apk
 *.deb

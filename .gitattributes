@@ -1,0 +1,5 @@
+# The large Kali system image is tracked with Git LFS (it exceeds GitHub's
+# 100 MB per-file git limit). boot/rescue images (~62 MB) go through normal git.
+release/**/kali-userdata.img filter=lfs diff=lfs merge=lfs -text
+release/**/*-userdata.img filter=lfs diff=lfs merge=lfs -text
+release/**/*-userdata.img.xz filter=lfs diff=lfs merge=lfs -text

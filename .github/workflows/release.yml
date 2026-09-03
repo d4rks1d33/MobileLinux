@@ -1,0 +1,127 @@
+name: Publish device releases
+
+# On every push to main, iterate over release/<device>/ and publish a GitHub
+# Release for each device whose release.yaml has publish: true.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "release/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create releases + upload assets
+
+jobs:
+  discover:
+    name: Discover device releases
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find release dirs with publish:true
+        id: set
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, glob, os
+          try:
+              import yaml
+          except ImportError:
+              os.system("pip install --quiet pyyaml")
+              import yaml
+          devices = []
+          for meta in sorted(glob.glob("release/*/release.yaml")):
+              data = yaml.safe_load(open(meta)) or {}
+              if data.get("publish", False):
+                  devices.append(os.path.basename(os.path.dirname(meta)))
+          print("matrix=" + json.dumps({"device": devices}))
+          PY
+
+  release:
+    name: Release ${{ matrix.device }}
+    needs: discover
+    if: ${{ needs.discover.outputs.matrix != '' && fromJson(needs.discover.outputs.matrix).device[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read release metadata
+        id: meta
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import yaml, os
+          d = "release/${{ matrix.device }}"
+          m = yaml.safe_load(open(f"{d}/release.yaml"))
+          def out(k, v): print(f"{k}={v}")
+          out("tag", m["tag"])
+          out("title", m.get("title", m["tag"]))
+          out("version", m["version"])
+          out("dir", d)
+          # attached release assets (excludes the large repo-only userdata image)
+          arts = [f"{d}/{a}" for a in m.get("artifacts", []) if os.path.isfile(f"{d}/{a}")]
+          out("artifacts", " ".join(arts))
+          # repo-only large images (shipped via Git LFS, linked in the notes)
+          out("repo_only", " ".join(m.get("repo_only_artifacts", [])))
+          PY
+
+      - name: Package docs zip
+        run: |
+          d="${{ steps.meta.outputs.dir }}"
+          zip -j "${{ matrix.device }}-docs.zip" \
+            "$d/README.md" "$d/CHANGELOG.md" "$d/CHECKSUMS.sha256" || true
+
+      - name: Build release notes
+        id: notes
+        run: |
+          d="${{ steps.meta.outputs.dir }}"
+          {
+            echo "## ${{ steps.meta.outputs.title }}"
+            echo
+            cat "$d/CHANGELOG.md"
+            echo
+            echo "### Files"
+            echo
+            echo "Attached to this release: \`rescue.img\`, \`kali-boot.img\`."
+            echo
+            if [ -n "${{ steps.meta.outputs.repo_only }}" ]; then
+              echo "> ⚠️ **\`kali-userdata.img\` is NOT attached here** (it is too large"
+              echo "> for a release asset). Download it from the repository via Git LFS:"
+              echo ">"
+              echo "> \`release/${{ matrix.device }}/kali-userdata.img\`"
+              echo ">"
+              echo "> Direct link:"
+              echo "> \`https://github.com/\${{ github.repository }}/raw/main/release/${{ matrix.device }}/kali-userdata.img\`"
+              echo ">"
+              echo "> or clone with LFS: \`git lfs install && git clone <repo>\` (then"
+              echo "> the file is in \`release/${{ matrix.device }}/\`)."
+              echo
+            fi
+            echo "Checksums (all images, including the repo-only userdata):"
+            echo
+            echo '```'
+            cat "$d/CHECKSUMS.sha256"
+            echo '```'
+            echo
+            echo "See the device README for step-by-step flashing instructions."
+            echo
+            echo "> ⚠️ Flash at your own risk. The authors accept no liability for"
+            echo "> bricked devices or lost data. See the README's disclaimer."
+          } > RELEASE_NOTES.md
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.meta.outputs.artifacts }}
+            ${{ matrix.device }}-docs.zip
