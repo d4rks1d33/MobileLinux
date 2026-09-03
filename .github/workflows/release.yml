@@ -21,7 +21,7 @@ jobs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - name: Find release dirs with publish:true
+      - name: "Find release dirs with publish:true"
         id: set
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"

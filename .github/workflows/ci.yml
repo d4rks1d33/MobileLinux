@@ -18,7 +18,7 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Validate schemas + devices + manifests
         run: python ci/validate.py
-      - name: Sanity: list-devices must include rhodep + 5 devices
+      - name: "Sanity: list-devices must include rhodep + 5 devices"
         run: |
           out=$(mobilelinux list-devices)
           echo "$out"
