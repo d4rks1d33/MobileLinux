@@ -1,0 +1,80 @@
+name: "New device support"
+description: "Propose or report support for a phone/tablet (tested on real hardware preferred)."
+title: "[device] <manufacturer> <model> (<codename>)"
+labels: ["device", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping expand MobileLinux to more devices! You don't need to
+        be an expert — if you have the hardware and can test, that's the most
+        valuable thing. PRs are open to everyone.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Manufacturer, marketing model, and codename.
+      placeholder: "OnePlus 6 (oneplus-enchilada)"
+    validations:
+      required: true
+  - type: input
+    id: soc
+    attributes:
+      label: SoC / architecture
+      placeholder: "Qualcomm SDM845 / aarch64"
+    validations:
+      required: true
+  - type: dropdown
+    id: pmos
+    attributes:
+      label: postmarketOS status
+      options:
+        - "Already upstream in official pmaports"
+        - "Not upstream yet (I have my own port/fork)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: pmos_link
+    attributes:
+      label: postmarketOS wiki / pmaports link (or your fork/repo)
+      placeholder: "https://wiki.postmarketos.org/wiki/... or https://github.com/<you>/postmarketos-<codename>"
+  - type: dropdown
+    id: tested
+    attributes:
+      label: Did you test on real hardware?
+      options:
+        - "Yes — it boots and works on my device"
+        - "Partially"
+        - "No, requesting support / looking for help"
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What works / doesn't (evidence-based)
+      description: |
+        List features you actually verified (display, touch, wifi, bt, audio,
+        modem, battery, ...). Attach a photo/screenshot/log if you can. Please
+        don't claim something works without evidence.
+    validations:
+      required: false
+  - type: dropdown
+    id: strategy
+    attributes:
+      label: How is it flashed?
+      options:
+        - "fastboot"
+        - "fastbootd (super/dynamic partitions)"
+        - "rescue-dd (bootloader won't flash rootfs)"
+        - "heimdall (Samsung download mode)"
+        - "sdcard (u-boot)"
+        - "uuu (NXP serial download)"
+        - "other / not sure"
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: "I'm willing to open a PR with a device definition"
+        - label: "I can test builds on this device"

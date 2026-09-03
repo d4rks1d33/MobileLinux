@@ -32,6 +32,14 @@ The reference implementation is the **Motorola Moto G82 5G (`rhodep`,
 Qualcomm SM6375)** running Kali + Phosh on a mainline 7.2-rc5 kernel, migrated
 from the original `nethunter-rhodep-repo`.
 
+> 🙌 **Help wanted — bring your phone.** MobileLinux gets better the more devices
+> it supports, and adding one is mostly a declarative `device.yaml`. If you have
+> a phone (especially one already supported by postmarketOS, or one you've
+> ported yourself), you can add it — **PRs are open to everyone**. Even just
+> testing on real hardware is hugely valuable. Start with
+> [CONTRIBUTING.md](CONTRIBUTING.md) and the [porting guide](docs/porting-guide.md),
+> or open a [new-device issue](../../issues/new?template=new-device.yml).
+
 ## Why this exists
 
 Porting a phone today means: fork a whole distro, edit dozens of scripts,
@@ -168,6 +176,28 @@ By audience:
 - Developer: [architecture](docs/architecture.md), [kernel flavors & providers](docs/kernel-flavors-and-providers.md), [OS distros](docs/os-distros.md), [testing](docs/testing.md)
 - OTA/security: [ota](docs/ota.md), [security updates](docs/security-updates.md), [release process](docs/release-process.md), [signing](docs/signing.md), [CVE management](docs/cve-management.md), [SBOM](docs/sbom.md), [recovery](docs/recovery.md)
 - Research background: [pmOS device model + 5 devices](docs/research-pmos-devices.md), [OTA architecture decision](docs/research-ota-architecture.md)
+
+## Contributing & community
+
+**PRs are open to everyone**, and expanding device support is exactly the kind
+of contribution we're looking for. You don't have to be a kernel developer —
+the hardest part of a port is already abstracted into a device definition.
+
+- Have a device? Add it (or just test): [CONTRIBUTING.md](CONTRIBUTING.md),
+  [porting guide](docs/porting-guide.md).
+- Your device isn't upstream in postmarketOS yet? No problem — point the
+  provider at your own fork/repo (`upstreamed: false`), like `rhodep` does.
+- Not sure where to start? Open a
+  [new-device issue](../../issues/new?template=new-device.yml) and say what
+  hardware you have.
+
+Every PR to `main` should pass the checklist in the
+[PR template](.github/PULL_REQUEST_TEMPLATE.md) (schema valid, CI + tests green,
+evidence-based hardware statuses, correct install strategy, no secrets).
+
+Ready-to-flash images for supported devices live in
+[`release/`](release/) and are published as GitHub Releases (e.g.
+`kali-rhodep-v1.0.0`).
 
 ## Status
 
