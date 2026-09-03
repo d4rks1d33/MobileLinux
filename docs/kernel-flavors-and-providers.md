@@ -162,6 +162,108 @@ Changes are written back to the flavor's fragment, so they flow into the next
 `mobilelinux kernel <device> --flavor kali` build. To add categories/symbols for
 a new distro, drop a `kernel-catalog.yaml` in that distro's `os-distros/<distro>/`.
 
+## Imported devices start with only a `pmos` flavor
+
+When you import a device from postmarketOS (`mobilelinux import ...`), the draft
+gets **only a `pmos` flavor**, because pmaports only describes the postmarketOS
+config — it knows nothing about Kali/NetHunter. So a freshly imported device
+looks like:
+
+```yaml
+flavors:
+  pmos:
+    config_fragment: ''
+    distros: [postmarketos]
+```
+
+### What happens if you build Kali on such a device
+
+`mobilelinux build <device> --distro kali` resolves the kernel flavor like this
+(`resolve_flavor`):
+
+1. a flavor whose `distros:` includes `kali` → **none on an imported device**;
+2. a flavor literally named `kali` → **none**;
+3. **fall back to the single flavor that exists** → `pmos`.
+
+So the kernel is built with the **pmOS config**, and the build succeeds. This is
+**fine to get the device booting**: the Kali *userland* (Debian rootfs, tools,
+Phosh) runs perfectly on a pmOS-config kernel — the mainline kernel already has
+display, GPU, Wi-Fi, Bluetooth, etc.
+
+**What's missing** are the NetHunter features that depend on the *kernel config*:
+USB Wi-Fi injection (RT2800USB, RTL8187, …), SDR (HackRF/Airspy), BadUSB HID
+gadget, CAN bus, NFS server, extended netfilter. Those live in the `kali`
+config fragment. Without a `kali` flavor you get Kali's tools but not the kernel
+support for injection/SDR/BadUSB.
+
+The build reflects this in its output (`[flavor=pmos]` even for `--distro kali`).
+
+## Adding a `kali` flavor after the device boots
+
+Recommended workflow: **first confirm the device boots** with the `pmos` flavor,
+then add the NetHunter kernel support. Step by step:
+
+1. **Confirm it boots.** Build + flash + boot Kali with the default (pmos)
+   flavor. Verify the basics work (display, touch, USB networking / SSH). Only
+   then bother with NetHunter kernel symbols.
+
+2. **Get the Kali config fragment.** The NetHunter delta is largely the same on
+   any arm64 device (the symbols are USB WiFi/SDR/HID/CAN/NFS/netfilter, not
+   device-specific). You have two options:
+
+   - **Reuse the existing one** from rhodep as a starting point:
+     ```bash
+     mkdir -p devices/<vendor>/<codename>/assets/kernel/flavors
+     cp devices/motorola/rhodep/assets/kernel/flavors/kali.fragment \
+        devices/<vendor>/<codename>/assets/kernel/flavors/kali.fragment
+     ```
+   - **Or derive it** from a full Kali/NetHunter config for that device (if you
+     have one) by diffing it against the device's pmOS base config, keeping only
+     the added/changed symbols. That's exactly how rhodep's fragment was made.
+
+3. **Declare the flavor** in the device's `device.yaml`, mapping it to the
+   `kali` distro (and keep `pmos`):
+   ```yaml
+   kernel:
+     base_config: assets/kernel/provider/config-base.aarch64   # or the pmaports config
+     flavors:
+       pmos:
+         config_fragment: ''
+         distros: [postmarketos]
+       kali:
+         config_fragment: assets/kernel/flavors/kali.fragment
+         distros: [kali]
+         discriminator: { symbol: CONFIG_RT2800USB, present: true }
+   ```
+   The `discriminator` lets the build confirm the right flavor compiled
+   (`grep -c RT2800USB <config>` — present ⇒ kali).
+
+4. **Tune the fragment interactively** (optional but handy): enable/disable
+   NetHunter modules by category without editing the raw config:
+   ```bash
+   mobilelinux kernel-config <codename> --flavor kali --show
+   mobilelinux kernel-config <codename> --flavor kali            # interactive menu
+   mobilelinux kernel-config <codename> --flavor kali --preset wifi-only
+   ```
+   (See [the module editor](#editing-modules-interactively).)
+
+5. **Build the Kali flavor and check the discriminator:**
+   ```bash
+   mobilelinux kernel <codename> --flavor kali --execute --allow-dangerous
+   # look for: "flavor discriminator OK: CONFIG_RT2800USB present"
+   mobilelinux build <codename> --distro kali --execute --allow-dangerous
+   ```
+   Now `--distro kali` resolves to the `kali` flavor (not `pmos`), and the
+   kernel carries the NetHunter symbols.
+
+6. **Test the new capabilities on hardware** (USB WiFi adapter injection, HID,
+   etc.) and update the device's hardware statuses accordingly (evidence-based).
+
+> Tip: if several devices should share the exact same NetHunter delta, put a
+> shared `kali.fragment` under `os-distros/kali/` and point each device's
+> `kali` flavor at it, instead of copying it per device. That keeps the delta in
+> one place (no duplication across devices).
+
 ## For porters
 
 To support a new distro on an existing device, you usually only add **one
