@@ -121,11 +121,108 @@ Then Phosh comes up. Log in as **`kali` / `1234`** and change the password.
 
 ## Vendor firmware (Wi-Fi / Bluetooth / GPU / audio)
 
-Some firmware is **proprietary and not redistributable**, so it is **not**
-included. Until you extract it from your own device, the affected peripherals
-(internal Wi-Fi, Bluetooth, GPU zap shader, audio amplifiers) won't initialize.
-The build's `FIRMWARE.md` lists exactly which blobs to extract and where to put
-them.
+Some firmware for this phone is **proprietary and not redistributable**, so it
+is **not** included in these images. The good news: **most of it is extracted
+automatically from your own phone**, because the stock partitions
+(`modem_a`, `super`/`vendor`, `fsg_a`, `persist`) are still there — the Kali
+system only lives in `userdata`. Only a couple of things need a manual step.
+
+Do all of this **on the phone** (over SSH `kali@172.16.42.1`, password `1234`,
+then `sudo su`), after the first boot has finished.
+
+### What happens automatically (nothing to do)
+
+On first boot the shipped device packages copy these from your phone's own
+partitions — you don't extract anything:
+
+- **Modem / ADSP / CDSP firmware** — served read-only from `modem_a`
+  (`rhodep-modem-support` mounts it at `/readonly/firmware` and symlinks the
+  `.mbn` files the kernel expects).
+- **Modem remote-filesystem, carrier config, RF calibration** — copied from
+  `modem_a`, `fsg_a` and `persist` by `rhodep-rfs-populate`.
+- **Sensor registry** (auto-rotation) — copied from `vendor` + `persist` by
+  `rhodep-ssc-populate`.
+
+### 1. Wi-Fi / Bluetooth / GPU firmware (manual — the `firmware-motorola-rhodep` package)
+
+These blobs (WCN3990 Wi-Fi/BT, Adreno GPU) live in the stock **`vendor`**
+partition (a logical partition inside `super`). Extract them once, drop them
+into the firmware package tree under the exact paths, build the `.deb`, and
+install it:
+
+Required files (install under `/usr/lib/firmware/`):
+
+| File | For |
+|------|-----|
+| `ath10k/WCN3990/hw1.0/board-2.bin`, `firmware-5.bin` | internal Wi-Fi |
+| `qca/crbtfw21.tlv`, `qca/crnv21.bin` | internal Bluetooth |
+| `qcom/a619_gmu.bin`, `qcom/a630_sqe.fw`, `qcom/sm6375/motorola/rhodep/a615_zap.mdt` (+`.b00 .b01 .b02`) | GPU (Adreno 619) |
+| `qcom/sm6375/motorola/rhodep/{adspr,adsps,adspua,cdspr,modemr,modemuw}.jsn`, `wlanmdsp.mbn` | protection domains (Wi-Fi PD lives inside the modem) |
+
+How to get them and install:
+
+```bash
+# On the phone, as root. Map the stock 'vendor' partition (inside super) and
+# mount it read-only. (These sector numbers are for rhodep's stock layout.)
+dmsetup create vendor_ro --table "0 1235440 linear /dev/disk/by-partlabel/super 6789120"
+mkdir -p /mnt/vendor_ro && mount -o ro /dev/mapper/vendor_ro /mnt/vendor_ro
+
+# The blobs are under /mnt/vendor_ro/firmware and /mnt/vendor_ro/bt_firmware.
+# Copy them into a firmware package tree using the paths in the table above, e.g.:
+mkdir -p PKG/usr/lib/firmware/ath10k/WCN3990/hw1.0
+cp /mnt/vendor_ro/firmware/ath10k/WCN3990/hw1.0/{board-2.bin,firmware-5.bin} \
+   PKG/usr/lib/firmware/ath10k/WCN3990/hw1.0/
+#   ...repeat for the qca/, qcom/... files in the table...
+
+umount /mnt/vendor_ro && dmsetup remove vendor_ro
+
+# Simplest install: copy straight into place
+cp -r PKG/usr/lib/firmware/* /usr/lib/firmware/
+depmod -a; update-initramfs -u 2>/dev/null || true
+
+# IMPORTANT: stop apt from replacing these device-specific blobs with the
+# generic firmware-atheros package (which would break Wi-Fi/BT):
+apt-mark hold firmware-atheros
+
+reboot
+```
+
+> The framework can also package this as a proper `firmware-motorola-rhodep.deb`
+> — the build writes a `FIRMWARE.md` next to the images listing the exact paths.
+> The manual copy above is the quickest route on-device.
+
+### 2. Audio (manual — the AW88261 amplifier tuning blob)
+
+The speaker/earpiece amplifiers won't initialize without their tuning file
+(`aw88261_acf.bin`), which lives in the stock `vendor` partition. On the phone,
+as root:
+
+```bash
+# Map + mount the stock vendor partition (same as above)
+dmsetup create vendor_ro --table "0 1235440 linear /dev/disk/by-partlabel/super 6789120"
+mkdir -p /mnt/vendor_ro && mount -o ro /dev/mapper/vendor_ro /mnt/vendor_ro
+
+# Copy the amplifier tuning blob into place (chip id 0x2113 on rhodep)
+install -D -m 0644 /mnt/vendor_ro/firmware/aw882xx_pid_2113_acf.bin \
+        /lib/firmware/aw88261_acf.bin
+
+umount /mnt/vendor_ro && dmsetup remove vendor_ro
+reboot
+```
+
+After reboot the amplifiers probe and you get sound (PipeWire routing is already
+set up by the shipped image).
+
+### Notes
+
+- If you **reinstall the rootfs**, redo the audio step (it lives in `userdata`).
+- The stock `vendor` sector offsets (`6789120` / `1235440`) are for rhodep's
+  known stock layout; if yours differs, recompute them from the `super`
+  partition's `liblp` metadata.
+- **NFC** needs blobs that are no longer on the phone after flashing (they come
+  from a LineageOS ROM) and is not fully functional anyway — safe to ignore.
+- **Never `apt full-upgrade` without the holds** (`sudo apt-mark hold
+  firmware-atheros`), or Wi-Fi/BT firmware gets overwritten.
 
 ## Troubleshooting
 
