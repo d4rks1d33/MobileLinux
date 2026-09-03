@@ -52,6 +52,14 @@ def build_command(
     out_dir = ctx.repo.out_dir / device.id
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Heavy build scratch (debos rootfs, chroot, images) must live on a
+    # CASE-SENSITIVE filesystem — debootstrap unpacks files like pam.7.gz and
+    # PAM.7.gz that collide on case-insensitive mounts (e.g. a bind mount to
+    # macOS). Route scratch to a case-sensitive work dir; keep final artifacts in
+    # out/. Override with MOBILELINUX_WORK.
+    work_dir = _pick_work_dir(ctx, device)
+    ui.note(f"  build scratch: {work_dir}")
+
     ui.header(f"Build: {device.pretty_name()}")
     print(f"  distro={distro}  desktop={desktop}"
           + (f"  profile={profile}" if profile else ""))
@@ -77,30 +85,44 @@ def build_command(
     else:
         _build_kernel(device, runner)
 
+    # Copy the kernel .deb + modules into the work dir the backend uses.
+    if work_dir != out_dir:
+        runner.run(["sh", "-c",
+                    f"cp {out_dir}/linux-image-*.deb {out_dir}/modules-*.tar.gz "
+                    f"{work_dir}/ 2>/dev/null || true"], dangerous=True)
+
     # -- Stage: rootfs ------------------------------------------------------
     from ..distros.base import BuildRequest
     req = BuildRequest(
         device=device, desktop=desktop, profile=profile,
-        out_dir=out_dir, repo_root=ctx.repo.root, runner=runner,
+        out_dir=work_dir, repo_root=ctx.repo.root, runner=runner,
     )
     rootfs = backend.build_rootfs(req)
 
     # -- Stage: rootfs image ------------------------------------------------
     ui.header("Images")
-    rootfs_img = out_dir / f"{device.id}-rootfs.img"
-    images.build_rootfs_image(
-        device, runner,
-        rootfs_tar=rootfs.tarball or (out_dir / "rootfs.tar"),
-        out=rootfs_img,
+    # Artifacts are named after the distro so a user can tell them apart.
+    prefix = distro
+    rootfs_dir = rootfs.rootfs_dir or (out_dir / "rootfs")
+    rootfs_img = out_dir / f"{prefix}-userdata.img"
+    _, root_uuid = images.build_rootfs_image(
+        device, runner, rootfs_dir=rootfs_dir, out=rootfs_img, work=work_dir,
     )
 
     # -- Stage: boot image --------------------------------------------------
-    boot_img = out_dir / f"{device.id}-boot.img"
+    boot_img = out_dir / f"{prefix}-boot.img"
     if device.boot.get("method") == "android-bootimg":
+        # Pull the real kernel/DTB/initrd out of the integrated rootfs.
+        kver = _kernel_uname_r(device)
+        dtb_name = device.device_tree.get("dtb", "")
+        soc = device.soc_family
+        dtb_sub = "qcom" if soc.startswith(("sm", "sdm", "msm", "qcom")) else ""
+        kernel = rootfs_dir / "boot" / f"vmlinuz-{kver}"
+        dtb = rootfs_dir / "usr/lib" / f"linux-image-{kver}" / dtb_sub / dtb_name
+        initrd = rootfs_dir / "boot" / f"initrd.img-{kver}"
         images.build_android_bootimg(
-            device, runner,
-            kernel=out_dir / "vmlinuz", ramdisk=out_dir / "initramfs",
-            out=boot_img,
+            device, runner, kernel=kernel, dtb=dtb, ramdisk=initrd,
+            out=boot_img, root_uuid=root_uuid,
         )
     else:
         ui.note(f"  boot method '{device.boot.get('method')}' handled by rootfs image")
@@ -109,7 +131,7 @@ def build_command(
     rescue_img = None
     rescue = device.install.get("rescue", {})
     if rescue.get("required"):
-        rescue_img = out_dir / f"{device.id}-rescue.img"
+        rescue_img = out_dir / "rescue.img"
         _build_rescue(device, runner, out=rescue_img, base_boot=input_boot)
 
     # -- Artifacts manifest -------------------------------------------------
@@ -120,6 +142,10 @@ def build_command(
         aset.add("rootfs", rootfs_img, role="rootfs")
     if rescue_img and rescue_img.exists():
         aset.add("rescue", rescue_img, role="rescue")
+    # modules tarball (from the kernel stage) is a flashable/on-device payload.
+    for mods in out_dir.glob("modules-*.tar.gz"):
+        aset.add("modules", mods, role="modules")
+        break
     manifest = aset.save(out_dir)
 
     # Always emit device-specific install + firmware instructions.
@@ -231,6 +257,51 @@ def _build_kernel(device: Device, runner: tools.Runner) -> None:
 
 def _karch(arch: str) -> str:
     return {"aarch64": "arm64", "armv7": "arm", "armhf": "arm"}.get(arch, arch)
+
+
+def _is_case_sensitive(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        a = path / ".ml_caseAA"
+        b = path / ".ml_caseaa"
+        a.write_text("x")
+        result = not b.exists()
+        a.unlink(missing_ok=True)
+        b.unlink(missing_ok=True)
+        return result
+    except Exception:
+        return True
+
+
+def _pick_work_dir(ctx, device: Device) -> Path:
+    """Choose a build scratch dir on a case-sensitive filesystem."""
+    import os
+    env = os.environ.get("MOBILELINUX_WORK")
+    if env:
+        wd = Path(env) / device.id
+        wd.mkdir(parents=True, exist_ok=True)
+        return wd
+    out_dir = ctx.repo.out_dir / device.id
+    if _is_case_sensitive(out_dir):
+        return out_dir
+    # out/ is case-insensitive (e.g. bind mount to macOS); use a case-sensitive
+    # scratch under the system temp (overlay).
+    for base in ("/var/tmp", "/tmp"):
+        cand = Path(base) / "mobilelinux-work" / device.id
+        if _is_case_sensitive(cand):
+            ui.warn(f"  out/ is case-insensitive; using {cand} for build scratch "
+                    "(rootfs unpack needs a case-sensitive FS)")
+            return cand
+    return out_dir
+
+
+def _kernel_uname_r(device: Device) -> str:
+    """uname -r for the built kernel (e.g. 7.2-rc5 -> 7.2.0-rc5)."""
+    v = device.kernel.get("version", "")
+    if "-rc" in v and v.count(".") == 1:
+        base, rc = v.split("-", 1)
+        return f"{base}.0-{rc}"
+    return v
 
 
 def _build_rescue(device: Device, runner: tools.Runner, *, out: Path,

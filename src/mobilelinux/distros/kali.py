@@ -16,5 +16,6 @@ class KaliBackend(DebianBackend):
     name = "kali"
     family = "debian"
     recipe_url = "https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-pro"
-    suite = "kali-rolling"
+    suite = "kali-rolling"       # the Kali archive suite (debian_suite)
+    mobian_suite = "trixie"      # the Mobian repo suite the recipe pulls device pkgs from
     _default_desktop = "phosh"

@@ -1,7 +1,28 @@
 #!/bin/sh
 # Wrapper: run debos without fakemachine (needed when there is no /dev/kvm,
 # e.g. inside a container). Put this dir first in PATH so debos is invoked this
-# way. Requires the real 'debos' binary on PATH (go install
-# github.com/go-debos/debos/cmd/debos@latest) or at $HOME/go/bin/debos.
-real_debos="$(command -v -p debos 2>/dev/null || echo "$HOME/go/bin/debos")"
+# way. Finds the real debos on PATH, then common install locations.
+#
+# NOTE: this dir is first in PATH, so we must look for the real binary AFTER
+# this wrapper. We search PATH entries skipping our own directory.
+self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+real_debos=""
+IFS=:
+for d in $PATH; do
+    [ "$d" = "$self_dir" ] && continue
+    if [ -x "$d/debos" ]; then real_debos="$d/debos"; break; fi
+done
+unset IFS
+# Fallbacks for common install locations (go install / apt / manual).
+if [ -z "$real_debos" ]; then
+    for c in /usr/local/bin/debos /usr/bin/debos "$HOME/go/bin/debos" \
+             /home/*/go/bin/debos; do
+        [ -x "$c" ] && { real_debos="$c"; break; }
+    done
+fi
+if [ -z "$real_debos" ]; then
+    echo "binwrap/debos: real 'debos' binary not found on PATH or common paths" >&2
+    echo "  install: go install github.com/go-debos/debos/cmd/debos@latest" >&2
+    exit 127
+fi
 exec "$real_debos" --disable-fakemachine "$@"

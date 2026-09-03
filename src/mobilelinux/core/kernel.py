@@ -85,12 +85,22 @@ def build_kernel(device: Device, distro: str, flavor_name: str, *,
     # 3. Verify the discriminator so the operator knows which flavor is active.
     _verify_discriminator(flavor, merged, runner)
 
+    apk = Path.home() / ".local/var/pmbootstrap/packages/edge/aarch64" / \
+        f"{linux_pkg}-{device.kernel.get('version','').replace('-','_')}-r0.apk"
+
     # 4. checksum (mandatory after any config/patch change) + build.
+    # Skip the rebuild if the apk is already newer than the staged config
+    # (MOBILELINUX_KERNEL_REUSE=1) — useful when iterating on later stages.
+    import os
+    if os.environ.get("MOBILELINUX_KERNEL_REUSE") == "1" and apk.exists():
+        # Trust the caller that the existing apk is current (fast iteration on
+        # later build stages). We still staged the flavor config + verified the
+        # discriminator above, so we know the flavor matches.
+        ui.note(f"  reusing existing apk (MOBILELINUX_KERNEL_REUSE=1): {apk.name}")
+        return apk
     runner.run(["pmbootstrap", "checksum", linux_pkg], tool="pmbootstrap", dangerous=True)
     runner.run(["pmbootstrap", "build", "--force", linux_pkg], tool="pmbootstrap", dangerous=True)
 
-    apk = Path.home() / ".local/var/pmbootstrap/packages/edge/aarch64" / \
-        f"{linux_pkg}-{device.kernel.get('version','').replace('-','_')}-r0.apk"
     ui.note(f"  apk expected at: {apk}")
     return apk if apk.exists() else None
 

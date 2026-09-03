@@ -34,6 +34,17 @@ except Exception:  # pragma: no cover
 BINWRAP = Path(__file__).parent / "binwrap"
 
 
+def _debian_arch(arch: str) -> str:
+    """Map our architecture to the Debian architecture name used by debootstrap."""
+    return {"aarch64": "arm64", "armv7": "armhf", "x86_64": "amd64"}.get(arch, arch)
+
+
+def _recipe_family(soc_vendor: str) -> str:
+    """Map our SoC vendor to the debos recipe's device family dir."""
+    return {"qualcomm": "qcom", "allwinner": "sunxi", "rockchip": "rockchip",
+            "nxp": "librem5"}.get(soc_vendor, soc_vendor)
+
+
 def read_package_list(path: Path) -> list[str]:
     """Read a `.list` file: one package per line, '#' comments ignored."""
     if not path.is_file():
@@ -55,8 +66,14 @@ class DebianBackend(DistroBackend):
 
     #: upstream debos recipe git URL (subclass overrides)
     recipe_url = ""
-    #: suite passed to debos (kali-rolling / trixie / noble / ...)
+    #: the distro archive suite (debian_suite in the recipe): kali-rolling / trixie / noble
     suite = ""
+    #: the Mobian repo suite the recipe pulls device packages from (bookworm/trixie/forky)
+    mobian_suite = "trixie"
+    #: extra recipe params (username/password/hostname); overridable
+    username = "kali"
+    password = "1234"
+    hostname = "kali"
     #: default UI
     _default_desktop = "phosh"
 
@@ -76,17 +93,24 @@ class DebianBackend(DistroBackend):
                   f"({arch}, desktop={req.desktop}"
                   + (f", profile={req.profile}" if req.profile else "") + ")")
 
-        # 1. Fetch the upstream recipe.
-        self._clone_recipe(work, runner)
-
-        # 2. Stage device config + device .debs into the recipe.
-        self._stage_device(req, work)
-
-        # 3. Run debos via the binwrap wrapper (container-friendly).
-        self._run_debos(req, work, tarball)
+        # Reuse an existing rootfs tarball when iterating on later stages
+        # (MOBILELINUX_ROOTFS_REUSE=1).
+        import os
+        reuse = os.environ.get("MOBILELINUX_ROOTFS_REUSE") == "1" and tarball.exists()
+        if reuse:
+            ui.note(f"  reusing existing rootfs tarball (MOBILELINUX_ROOTFS_REUSE=1): "
+                    f"{tarball.name}")
+        else:
+            # 1. Fetch the upstream recipe.
+            self._clone_recipe(work, runner)
+            # 2. Stage device config + device .debs into the recipe.
+            self._stage_device(req, work)
+            # 3. Run debos via the binwrap wrapper (container-friendly).
+            self._run_debos(req, work, tarball)
 
         # 4. Chroot integration (the device-specific bring-up).
         self._chroot_integration(req, tarball)
+        result.rootfs_dir = req.out_dir / "rootfs"
 
         # Desktop + profile layers.
         self._apply_desktop_layer(req, result)
@@ -114,14 +138,15 @@ class DebianBackend(DistroBackend):
         cfg = self._render_device_toml(device)
         cfg_path = req.out_dir / "device.toml"
         cfg_path.write_text(cfg, encoding="utf-8")
-        # The recipe expects it under devices/<soc-vendor>/configs/.
-        dest_cfg = work / "devices" / device.soc_vendor / "configs" / "device.toml"
+        # The recipe expects it under devices/<family>/configs/ (qcom, not qualcomm).
+        family = _recipe_family(device.soc_vendor)
+        dest_cfg = work / "devices" / family / "configs" / "device.toml"
         runner.run(["sh", "-c", f"mkdir -p {dest_cfg.parent}"])
         runner.run(["cp", str(cfg_path), str(dest_cfg)])
         ui.note(f"    - device.toml -> {dest_cfg}")
 
         # Device .debs: the kernel-stage linux-image .deb + firmware + rhodep-*.
-        pkgdest = work / "devices" / device.soc_vendor / "packages"
+        pkgdest = work / "devices" / family / "packages"
         runner.run(["sh", "-c", f"mkdir -p {pkgdest}"])
         for deb in sorted(req.out_dir.glob("linux-image-*.deb")):
             runner.run(["cp", str(deb), str(pkgdest / deb.name)])
@@ -149,22 +174,41 @@ class DebianBackend(DistroBackend):
 
     def _run_debos(self, req: BuildRequest, work: Path, tarball: Path) -> None:
         runner = req.runner
-        arch = req.device.architecture
-        recipe = work / "rootfs.yaml"
+        # debos/debootstrap use the Debian architecture name (arm64), not the
+        # kernel/uname name (aarch64).
+        arch = _debian_arch(req.device.architecture)
+        # debos writes the output relative to its scratchdir (the recipe dir), so
+        # we pass a bare filename and move it out afterwards.
+        out_name = "rootfs.tar.xz"
         # PATH with binwrap first so 'debos' == the --disable-fakemachine wrapper.
         env_path = f"{BINWRAP}:{os.environ.get('PATH','')}"
         ui.note("  running debos (binwrap: --disable-fakemachine, nspawn --register=no)")
+        # sudo needed for systemd-nspawn / debootstrap inside the container.
         runner.run(
-            ["env", f"PATH={env_path}", "SYSTEMD_NSPAWN_UNIFIED_HIERARCHY=1",
-             str(BINWRAP / "debos"),
-             "-t", f"architecture:{arch}",
-             "-t", f"suite:{self.suite}",
-             "-t", f"desktop:{req.desktop}",
-             "-t", "variant:nonfree",
-             "-t", f"output:{tarball}",
-             str(recipe)],
-            tool="debos", dangerous=True,
+            ["sudo", "mkdir", "-p", "/dev/disk"], dangerous=True,
         )
+        runner.run(
+            ["sudo", "env", f"PATH={env_path}", "HOME=/root",
+             "SYSTEMD_NSPAWN_UNIFIED_HIERARCHY=1",
+             str(BINWRAP / "debos"),
+             "--scratchsize=8G",
+             "-t", f"architecture:{arch}",
+             # debian_suite = the distro archive (kali-rolling/trixie/noble);
+             # suite = the Mobian repo suite the recipe pulls device pkgs from.
+             "-t", f"debian_suite:{self.suite}",
+             "-t", f"suite:{self.mobian_suite}",
+             "-t", f"environment:{req.desktop}",
+             "-t", "nonfree:true",
+             "-t", f"username:{self.username}",
+             "-t", f"password:{self.password}",
+             "-t", f"hostname:{self.hostname}",
+             "-t", f"rootfs:{out_name}",
+             "rootfs.yaml"],
+            tool="debos", dangerous=True, cwd=str(work),
+        )
+        # Move debos' output to the expected tarball path.
+        runner.run(["sh", "-c", f"mv {work}/{out_name} {tarball} 2>/dev/null || true"],
+                   dangerous=True)
         ui.note(f"  -> {tarball.name} (~920 MB on rhodep)")
         ui.note("  -> image.yaml can't partition in a container; chroot phase follows")
 
@@ -174,10 +218,15 @@ class DebianBackend(DistroBackend):
         root = req.out_dir / "rootfs"
 
         ui.info("  chroot integration:")
-        runner.run(["sh", "-c", f"mkdir -p {root} && tar xJf {tarball} -C {root}"], dangerous=True)
-        # DNS for apt inside the chroot (Docker's resolver).
-        runner.run(["sh", "-c",
-                    f"echo 'nameserver 127.0.0.11' > {root}/etc/resolv.conf || true"],
+        runner.run(["sudo", "sh", "-c", f"rm -rf {root} && mkdir -p {root} && "
+                                        f"tar xpJf {tarball} -C {root}"], dangerous=True)
+        # DNS for apt inside the chroot + mount proc/sys/dev so chroot works.
+        runner.run(["sudo", "sh", "-c",
+                    f"rm -f {root}/etc/resolv.conf; "
+                    f"echo 'nameserver 8.8.8.8' > {root}/etc/resolv.conf; "
+                    f"mount -t proc none {root}/proc 2>/dev/null; "
+                    f"mount --rbind /sys {root}/sys 2>/dev/null; "
+                    f"mount --rbind /dev {root}/dev 2>/dev/null; true"],
                    dangerous=True)
 
         # Base + phone-role packages from the distro package lists.
@@ -186,22 +235,22 @@ class DebianBackend(DistroBackend):
         if req.desktop == "phosh":
             pkgs += read_package_list(pkgdir / "phone-role.list")
         if pkgs:
-            runner.run(["chroot", str(root), "apt-get", "install", "-y",
+            runner.run(["sudo", "chroot", str(root), "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
                         "--no-install-recommends", *pkgs],
-                       tool="chroot", dangerous=True)
+                       dangerous=True)
             ui.note(f"    - base packages: {', '.join(pkgs)}")
 
         # Build deps needed to compile device userspace helpers in-chroot.
         build_deps = read_package_list(pkgdir / "build-deps.list")
         if build_deps:
-            runner.run(["chroot", str(root), "apt-get", "install", "-y", *build_deps],
-                       tool="chroot", dangerous=True)
+            runner.run(["sudo", "chroot", str(root), "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", *build_deps],
+                       dangerous=True)
 
         # Device .debs: install the kernel-stage linux-image .deb + the device's
         # prebuilt .debs, resolving their apt dependencies.
-        runner.run(["sh", "-c", f"mkdir -p {root}/srv/debs"], dangerous=True)
+        runner.run(["sudo", "sh", "-c", f"mkdir -p {root}/srv/debs"], dangerous=True)
         # kernel linux-image .deb from the build out dir
-        runner.run(["sh", "-c",
+        runner.run(["sudo", "sh", "-c",
                     f"cp {req.out_dir}/linux-image-*.deb {root}/srv/debs/ 2>/dev/null || true"],
                    dangerous=True)
         # device-shipped prebuilt .debs (rhodep-*) from assets/debs/
@@ -211,24 +260,24 @@ class DebianBackend(DistroBackend):
         # mesa-opencl-icd, clinfo, ...) so dpkg resolution succeeds.
         apt_deps = self._collect_apt_deps(device)
         if apt_deps:
-            runner.run(["chroot", str(root), "apt-get", "install", "-y", *sorted(apt_deps)],
-                       tool="chroot", dangerous=True)
+            runner.run(["sudo", "chroot", str(root), "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", *sorted(apt_deps)],
+                       dangerous=True)
             ui.note(f"    - device apt deps: {', '.join(sorted(apt_deps))}")
 
         # Install the .debs with apt (resolves remaining deps automatically),
         # falling back to dpkg -i + apt -f for older apt.
-        runner.run(["chroot", str(root), "sh", "-c",
+        runner.run(["sudo", "chroot", str(root), "env", "DEBIAN_FRONTEND=noninteractive", "sh", "-c",
                     "apt-get install -y /srv/debs/*.deb "
                     "|| { dpkg -i /srv/debs/*.deb; apt-get -fy install; }"],
-                   tool="chroot", dangerous=True)
+                   dangerous=True)
         ui.note("    - installed device .debs (deps resolved)")
 
         # Distro integration config (services + install order).
         integ = self._load_integration()
         enable = list(integ.get("enable_services", [])) or self._soc_services(device)
         if enable:
-            runner.run(["chroot", str(root), "systemctl", "enable", *enable],
-                       tool="chroot", dangerous=True)
+            runner.run(["sudo", "chroot", str(root), "systemctl", "enable", *enable],
+                       dangerous=True)
             ui.note(f"    - enabled: {', '.join(enable)}")
 
         masks = list(integ.get("mask_services", []))
@@ -236,12 +285,20 @@ class DebianBackend(DistroBackend):
             if m not in masks:
                 masks.append(m)
         if masks:
-            runner.run(["chroot", str(root), "systemctl", "mask", *masks],
-                       tool="chroot", dangerous=True)
+            runner.run(["sudo", "chroot", str(root), "systemctl", "mask", *masks],
+                       dangerous=True)
             ui.note(f"    - masked: {', '.join(masks)}")
 
         # Device userspace installers, in the distro-declared order (apt LAST).
         self._run_userspace_installers(req, root, integ)
+
+        # Clean up: remove staged .debs, apt cache, and UNMOUNT the chroot binds
+        # (required before imaging the rootfs).
+        runner.run(["sudo", "sh", "-c",
+                    f"chroot {root} sh -c 'rm -rf /srv/debs /var/cache/apt/archives/*.deb "
+                    f"/var/lib/apt/lists/* 2>/dev/null' || true; "
+                    f"umount -lf {root}/proc {root}/sys {root}/dev 2>/dev/null; true"],
+                   dangerous=True)
 
     def _copy_device_debs(self, device, root: Path, runner: tools.Runner) -> None:
         """Copy the device's prebuilt .debs (rhodep-*) into the chroot /srv/debs."""
@@ -254,7 +311,7 @@ class DebianBackend(DistroBackend):
                 continue
             deb_path = device.dir / deb_rel
             if deb_path.exists() or runner.dry_run or not runner.execute:
-                runner.run(["sh", "-c", f"cp {deb_path} {root}/srv/debs/"], dangerous=True)
+                runner.run(["sudo", "sh", "-c", f"cp {deb_path} {root}/srv/debs/"], dangerous=True)
                 ui.note(f"    - device .deb: {deb_path.name}")
             else:
                 ui.warn(f"    - {pkg['name']}: prebuilt .deb missing at {deb_path}")
@@ -277,16 +334,20 @@ class DebianBackend(DistroBackend):
                 continue  # holds run last, below
             asset = device.dir / "assets" / "userspace" / name
             if asset.is_dir():
-                runner.run(["sh", "-c", f"cp -r {asset} {root}/srv/{name}"], dangerous=True)
-                runner.run(["chroot", str(root), "sh", f"/srv/{name}/install.sh"],
-                           tool="chroot", dangerous=True)
+                runner.run(["sudo", "sh", "-c", f"cp -r {asset} {root}/srv/{name}"], dangerous=True)
+                # Userspace installers may have expected partial failures (an
+                # optional package absent in this build); don't abort the build.
+                runner.run(["sudo", "chroot", str(root), "sh", f"/srv/{name}/install.sh"],
+                           dangerous=True, check=False)
                 ui.note(f"    - userspace: {name}")
         if integ.get("apply_apt_holds", True):
             apt_asset = device.dir / "assets" / "userspace" / "apt"
             if apt_asset.is_dir():
-                runner.run(["sh", "-c", f"cp -r {apt_asset} {root}/srv/apt"], dangerous=True)
-                runner.run(["chroot", str(root), "sh", "/srv/apt/apply-holds.sh"],
-                           tool="chroot", dangerous=True)
+                runner.run(["sudo", "sh", "-c", f"cp -r {apt_asset} {root}/srv/apt"], dangerous=True)
+                # apply-holds may 'fail' if it tries to hold non-redistributable
+                # firmware or headers that this build didn't produce; non-fatal.
+                runner.run(["sudo", "chroot", str(root), "sh", "/srv/apt/apply-holds.sh"],
+                           dangerous=True, check=False)
             ui.note("    - apply-holds.sh (LAST): pin + protect laid-down files")
 
     # -- helpers ------------------------------------------------------------

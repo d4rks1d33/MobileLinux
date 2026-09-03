@@ -29,6 +29,7 @@ class BuildRequest:
 class RootfsResult:
     """Result of a rootfs build stage."""
     tarball: Path | None = None    # rootfs tar (before imaging)
+    rootfs_dir: Path | None = None  # extracted + integrated rootfs (ready to image)
     notes: list[str] = field(default_factory=list)
 
 
