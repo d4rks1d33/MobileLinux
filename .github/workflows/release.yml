@@ -2,6 +2,9 @@ name: Publish device releases
 
 # On every push to main, iterate over release/<device>/ and publish a GitHub
 # Release for each device whose release.yaml has publish: true.
+#
+# This ONLY runs on main/master — pushes to the dev branch never publish a
+# release. Work on dev, and releases happen when your changes reach main.
 on:
   push:
     branches: [main, master]
