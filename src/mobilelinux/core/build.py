@@ -311,18 +311,29 @@ def _resolve_initramfs(device: Device, rootfs_dir: Path, kver: str,
     base boot image. Otherwise the distro's own initrd is used.
     """
     initcfg = device.boot.get("initramfs", {})
-    needs_pmos = (initcfg.get("type") == "postmarketos"
-                  or "loop-gpt-4096" in initcfg.get("features", []))
+    layout = device.storage.get("rootfs_layout", "plain")
     distro_initrd = rootfs_dir / "boot" / f"initrd.img-{kver}"
 
-    if not needs_pmos:
+    # The pmOS initramfs is only STRICTLY REQUIRED for the gpt-in-partition
+    # layout (it does the losetup --sector-size 4096 mount that the distro
+    # initramfs can't). For plain/whole-disk layouts it's optional: use the
+    # --input pmOS ramdisk if provided, else the distro initrd is fine.
+    requires_pmos = (layout == "gpt-in-partition"
+                     or "loop-gpt-4096" in initcfg.get("features", []))
+    prefers_pmos = requires_pmos or initcfg.get("type") == "postmarketos"
+
+    if not prefers_pmos:
         return distro_initrd
 
     if not input_boot or not Path(input_boot).is_file():
-        ui.warn("  device needs the postmarketOS initramfs (sector-4096 mount) but "
-                "no --input base boot image was given.")
-        ui.warn("  the boot image will use the distro initrd, which will likely drop "
-                "to a busybox emergency shell. Pass --input <known-good pmOS boot.img>.")
+        if requires_pmos:
+            ui.warn("  device REQUIRES the postmarketOS initramfs (sector-4096 mount) "
+                    "but no --input base boot image was given.")
+            ui.warn("  the boot image will use the distro initrd, which will likely drop "
+                    "to a busybox emergency shell. Pass --input <known-good pmOS boot.img>.")
+        else:
+            ui.note("  no --input pmOS boot image; using the distro initramfs "
+                    "(fine for this plain-layout device).")
         return distro_initrd
 
     # Extract the ramdisk from the Android boot image at --input.
