@@ -1,0 +1,208 @@
+schema_version: 1
+
+id: a30
+vendor: samsung
+model: Samsung Galaxy A30
+codename: samsung-a30
+aliases: [samsung-a30, SM-A305]
+year: 2019
+chassis: handset
+architecture: aarch64
+maturity: testing
+
+soc:
+  vendor: samsung
+  family: exynos7904
+  marketing_name: Exynos 7904
+  platform: exynos7904
+
+kernel:
+  # Downstream vendor BSP kernel (Exynos 4.4), NOT mainline. This is a Halium-style
+  # downstream port: the DTB is built in-tree and baked into the Android boot image.
+  type: downstream
+  version: "4.4.177"
+  # Device-support provider: the device IS in official pmaports (device/testing),
+  # so the provider source is upstream pmaports.
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/testing/device-samsung-a30
+    linux_pkg: linux-samsung-a30
+    device_pkg: device-samsung-a30
+  flavors:
+    pmos:
+      config_fragment: ''          # empty = base; downstream, no shared mainline provider model
+      distros: [postmarketos]
+  build:
+    method: pmbootstrap
+    deb_package: false             # downstream port; no Debian-based flavor
+
+device_tree:
+  dtb: ''                          # downstream: DTB is built in-tree and appended into the bootimg by the kernel build
+  append_dtb: false
+  source: in-kernel
+
+firmware:
+  redistributable: false           # proprietary blobs; extracted from the stock device, never in git
+  package: firmware-samsung-a30
+  provides: [wifi, bluetooth, gpu]
+  # Blobs come from the stock Samsung device partitions (vendor/system);
+  # they are not shipped in git and must be present from the factory image.
+
+hardware:
+  # Downstream 4.4 Exynos port in pmOS testing; per-feature status not verified
+  # (pmOS wiki unreachable). Statuses are conservative and unverified — the porter
+  # must test on real hardware and update. Only 'storage' is marked supported
+  # (block devices always enumerate).
+  display:
+    status: partial
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+    notes: "1080x2340 panel; downstream display typically brings up but unconfirmed here"
+    test: display
+  touchscreen:
+    status: partial
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+    test: touch
+  gpu:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  storage:
+    status: supported
+    evidence: "block devices always enumerate (eMMC + external microSD per deviceinfo)"
+    test: storage
+  usb:
+    status: partial
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+    notes: "USB gadget (0x04e8:0x6860) present per deviceinfo; SSH/gadget-net not confirmed"
+    test: usb
+  wifi:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  bluetooth:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  audio:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  battery:
+    status: partial
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  charging:
+    status: partial
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  modem:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  gnss:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  nfc:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  fingerprint:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  camera:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  sensors:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+  vibrator:
+    status: untested
+    evidence: "downstream 4.4 port in pmOS testing; per-feature status not verified (wiki unreachable)"
+
+first_boot:
+  mask_services: []                # downstream, no droid-juicer needed unless known
+  resize_rootfs: true              # grow ext4 rootfs to fill the system partition on first boot
+
+boot:
+  method: android-bootimg
+  android_bootimg:
+    header_version: 0              # downstream 4.4 = old boot image format
+    pagesize: 2048
+    base: "0x10000000"
+    offsets:
+      kernel: "0x00008000"
+      ramdisk: "0xf0000000"
+      tags: "0x00000100"
+    cmdline: "androidboot.selinux=permissive"
+  initramfs:
+    type: postmarketos
+
+storage:
+  rootfs_layout: plain             # ext4 written directly to the system partition (downstream Samsung)
+  rootfs_sector_size: 512
+  partitions:
+    - name: boot
+      role: boot
+      writable_via: [heimdall]
+    - name: system
+      role: rootfs
+      writable_via: [heimdall]
+
+install:
+  # Samsung download (Odin) mode via the open-source heimdall tool.
+  strategy: heimdall
+  ab_slots: false
+  fastbootd: false
+  unlock_required: false           # Samsung download mode; no fastboot unlock. NOTE: the KNOX warranty bit trips on unlock (see sources.notes)
+  boot_partition: boot
+  rootfs_target:
+    partition: system
+    method: heimdall
+  rescue:
+    method: recovery
+    notes: >
+      Samsung download (Odin) mode is always available as the rescue path: power off,
+      hold Vol-Down + Vol-Up while plugging USB to enter download mode, then reflash
+      boot/system with heimdall (or Odin). This makes recovery from a bad flash reliable.
+  steps:
+    - action: message
+      description: "Enter download mode: power off, hold Vol-Down + Vol-Up while plugging USB"
+    - action: flash-partition
+      description: "Flash the boot image to the boot partition via heimdall"
+      partition: boot
+      image: boot
+      via: heimdall
+      destructive: true
+    - action: dd-partition
+      description: "Write the rootfs image to the system partition via heimdall"
+      partition: system
+      image: rootfs
+      via: heimdall
+      destructive: true
+    - action: reboot
+      description: "Reboot into the newly installed system"
+
+ota:
+  strategy: single-rootfs
+  rollback: false
+
+tests:
+  - boot
+  - display
+  - touch
+  - storage
+  - usb
+  - wifi
+  - bluetooth
+  - audio
+  - battery
+  - charging
+  - sensors
+
+sources:
+  imported_from: pmaports
+  pmaports: device/testing/device-samsung-a30
+  postmarketos_wiki: https://wiki.postmarketos.org/wiki/Samsung_Galaxy_A30_(samsung-a30)
+  notes: >
+    Downstream (Halium-style) Samsung Exynos 7904 port on the vendor 4.4.177 kernel,
+    in official pmaports device/testing. The DTB is built in-tree and baked into the
+    Android boot image (no separate DTB / append_dtb). Install is via Samsung download
+    (Odin) mode using the open-source heimdall tool. Hardware statuses are conservative
+    and UNVERIFIED: the pmOS wiki was unreachable (Anubis), so the per-feature matrix
+    could not be confirmed — only storage is marked supported. The porter must test on
+    real hardware and update. WARNING: unlocking / flashing trips the Samsung KNOX
+    warranty bit (irreversible).

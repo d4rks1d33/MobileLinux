@@ -1,0 +1,31 @@
+# Release metadata for motorola-osprey (Motorola Moto G 2015).
+#
+# publish: false — no built images yet. Build on the machine that has the phone
+# (see this device's README.md), drop the images here, set publish: true, bump
+# version, and push to main to publish the GitHub Release.
+
+device: osprey
+device_name: Motorola Moto G 2015
+distro: kali
+desktop: phosh
+version: 0.1.0
+channel: nightly
+
+tag: kali-osprey-v0.1.0
+title: "Kali Linux for Motorola Moto G 2015 (osprey) — v0.1.0"
+
+kernel: 6.6 (mainline, msm8916-mainline)
+kali_release: rolling
+
+# Images to attach once built (relative to this dir). Small boot images here;
+# large system image goes to repo_only_artifacts (Git LFS, xz-compressed).
+artifacts:
+  - rescue.img
+  - kali-boot.img
+repo_only_artifacts:
+  - kali-userdata.img.xz
+
+default_user: kali
+default_password: "1234"
+
+publish: false

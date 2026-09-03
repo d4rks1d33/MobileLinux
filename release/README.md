@@ -26,6 +26,14 @@ release/
 |--------|-------|--------|---------|-----|
 | [`rhodep/`](rhodep/) | Motorola Moto G82 5G | Kali + Phosh | 1.0.0 | `kali-rhodep-v1.0.0` |
 
+Work-in-progress devices (definition + flashing guide ready; images not built /
+untested yet, so `publish: false`):
+
+| Device | Model | Distro | Strategy | Status |
+|--------|-------|--------|----------|--------|
+| [`osprey/`](osprey/) | Motorola Moto G 2015 | Kali + Phosh | fastboot | WIP (untested) |
+| [`a30/`](a30/) | Samsung Galaxy A30 | Kali + Phosh | heimdall | WIP (untested) |
+
 ## How the release workflow works
 
 On push to `main`, for each `release/<device>/release.yaml` with

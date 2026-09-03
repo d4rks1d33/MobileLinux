@@ -1,0 +1,28 @@
+# Release metadata for samsung-a30 (Samsung Galaxy A30).
+#
+# publish: false — no built images yet. Build on the machine that has the phone
+# (see this device's README.md), drop the images here, set publish: true, bump
+# version, and push to main to publish the GitHub Release.
+
+device: a30
+device_name: Samsung Galaxy A30
+distro: kali
+desktop: phosh
+version: 0.1.0
+channel: nightly
+
+tag: kali-a30-v0.1.0
+title: "Kali Linux for Samsung Galaxy A30 (a30) — v0.1.0"
+
+kernel: 4.4.177 (downstream, Exynos 7904)
+kali_release: rolling
+
+artifacts:
+  - kali-boot.img
+repo_only_artifacts:
+  - kali-userdata.img.xz
+
+default_user: kali
+default_password: "1234"
+
+publish: false

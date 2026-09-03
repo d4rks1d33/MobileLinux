@@ -1,0 +1,252 @@
+schema_version: 1
+
+id: osprey
+vendor: motorola
+model: Motorola Moto G 2015
+codename: motorola-osprey
+aliases: [motorola-osprey, Moto G 3rd gen, XT154x]
+year: 2015
+chassis: handset
+architecture: aarch64
+maturity: testing
+
+soc:
+  vendor: qualcomm
+  family: msm8916
+  marketing_name: Snapdragon 410
+  platform: msm8916
+
+kernel:
+  type: mainline
+  version: '6.6'
+  source: https://gitlab.com/postmarketOS/pmaports
+  # Device-support provider: pmOS supplies the shared aport. osprey is in
+  # official pmaports (device/testing), so upstreamed=true. The kernel is the
+  # SHARED msm8916-mainline package linux-postmarketos-qcom-msm8916 (NOT a
+  # per-device kernel) -- see sources.notes.
+  provider:
+    kind: postmarketos
+    upstreamed: true
+    source: https://gitlab.com/postmarketOS/pmaports
+    pmaports_ref: device/testing/device-motorola-osprey
+    linux_pkg: linux-postmarketos-qcom-msm8916
+    device_pkg: device-motorola-osprey
+  flavors:
+    pmos:
+      config_fragment: ''
+      distros:
+      - postmarketos
+  build:
+    toolchain: gcc
+    method: pmbootstrap
+    image: Image
+    deb_package: false
+
+device_tree:
+  dtb: msm8916-motorola-osprey.dtb
+  append_dtb: true
+  source: in-kernel
+
+firmware:
+  redistributable: false     # proprietary blobs extracted from the stock device
+  package: firmware-qcom-adreno-a300
+  provides: [gpu, wifi, bluetooth, modem]
+  # The device APKBUILD nonfree-firmware subpackage depends on
+  # firmware-qcom-adreno-a300 + msm-firmware-loader (plus wcnss-nv and harpia
+  # venus). msm-firmware-loader assembles the msm8916 blobs at runtime.
+  extract_from_device:
+    - { name: "wcnss NV blob", source: "stock modem/vendor", provides: wifi }
+    - { name: "adreno a300 fw", source: "stock vendor", provides: gpu }
+
+hardware:
+  display:
+    status: supported
+    driver: msm-dsi (DRM/KMS)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    notes: 720x1280
+    test: display
+  touchscreen:
+    status: supported
+    driver: touchscreen (i2c)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: touch
+  gpu:
+    status: supported
+    driver: Adreno 306 (freedreno/msm, a3xx)
+    evidence: gpu_accelerated=true in deviceinfo; msm8916-mainline project
+    test: gpu
+  storage:
+    status: supported
+    driver: SDHCI (eMMC + microSD)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: storage
+  usb:
+    status: supported
+    driver: ci_hdrc / chipidea (msm8916)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: usb
+  wifi:
+    status: partial
+    driver: wcn36xx (WCNSS)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    notes: needs extracted wcnss NV blob
+    test: wifi
+  bluetooth:
+    status: partial
+    driver: btqcomsmd (WCNSS)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: bluetooth
+  audio:
+    status: partial
+    driver: msm8916 APQ8016/WCD codec (q6/ASoC)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: audio
+  battery:
+    status: supported
+    driver: qcom SMBB / BMS (msm8916)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: battery
+  charging:
+    status: supported
+    driver: qcom SMBB charger (msm8916)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: charging
+  modem:
+    status: partial
+    driver: qrtr/rmtfs/pd-mapper + ModemManager (Hexagon MSM8916)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    notes: msm8916 modem works on many devices; not wiki-verified for osprey
+    test: modem
+  gnss:
+    status: untested
+    evidence: no per-device evidence; not wiki-verified
+  nfc:
+    status: not-present
+    notes: Moto G 2015 has no NFC on most variants
+  fingerprint:
+    status: not-present
+    notes: Moto G 2015 has no fingerprint sensor
+  camera:
+    status: untested
+    driver: CAMSS (msm8916)
+    evidence: no per-device evidence; not wiki-verified
+    test: camera
+  sensors:
+    status: partial
+    driver: iio sensors (i2c)
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: sensors
+  vibrator:
+    status: supported
+    driver: gpio/pwm vibrator
+    evidence: msm8916-mainline project; per-device details not wiki-verified
+    test: vibrator
+
+first_boot:
+  resize_rootfs: true          # grow ext4 to fill the target partition on first boot
+
+boot:
+  method: android-bootimg
+  android_bootimg:
+    header_version: 0          # msm8916 = old boot image format
+    pagesize: 2048
+    base: '0x80000000'
+    offsets:
+      kernel: '0x00080000'
+      ramdisk: '0x02000000'
+      tags: '0x01e00000'
+    cmdline: earlycon console=ttyMSM0,115200
+  initramfs:
+    type: postmarketos
+
+storage:
+  rootfs_layout: plain         # ext4 rootfs image written directly to a partition
+  rootfs_sector_size: 512
+  partitions:
+  - name: boot
+    role: boot
+    device_path: /dev/disk/by-partlabel/boot
+    writable_via:
+    - fastboot
+  - name: userdata
+    role: rootfs
+    device_path: /dev/disk/by-partlabel/userdata
+    writable_via:
+    - fastboot
+    notes: msm8916 pmOS writes the plain ext4 rootfs image here via fastboot
+
+install:
+  strategy: fastboot
+  ab_slots: false
+  fastbootd: false
+  unlock_required: true        # Motorola bootloader unlock required (fastboot oem unlock)
+  boot_partition: boot
+  rootfs_target:
+    partition: userdata
+    method: fastboot
+  rescue:
+    method: recovery
+    notes: >
+      fastboot is always available on this device for re-flashing. For a hard
+      brick, Qualcomm EDL / blankflash can recover the msm8916.
+  steps:
+  - action: message
+    description: unlock the bootloader if needed (fastboot oem unlock / Motorola unlock code)
+  - action: flash-partition
+    description: Flash the Android boot image to the boot partition
+    partition: boot
+    image: boot
+    via: fastboot
+    destructive: true
+  - action: dd-partition
+    description: Write the pmOS rootfs image to userdata (fastboot flash)
+    partition: userdata
+    image: rootfs
+    via: fastboot
+    destructive: true
+  - action: reboot
+    via: fastboot
+
+ota:
+  strategy: single-rootfs
+  rollback: false
+  updatable:
+    rootfs: true
+    kernel: true
+    initramfs: true
+    firmware: false
+    bootloader: false
+
+tests:
+- boot
+- display
+- touch
+- gpu
+- storage
+- usb
+- wifi
+- bluetooth
+- audio
+- battery
+- charging
+- modem
+- sensors
+- vibrator
+
+sources:
+  imported_from: pmaports
+  postmarketos_wiki: https://wiki.postmarketos.org/wiki/Motorola_Moto_G_2015_(motorola-osprey)
+  pmaports: device/testing/device-motorola-osprey
+  notes: >
+    Kernel is the SHARED msm8916-mainline package
+    linux-postmarketos-qcom-msm8916 -- many msm8916 devices share this exact
+    kernel/DTB base (not a per-device kernel). msm8916 has excellent, well
+    documented mainline support via the msm8916-mainline project. The pmOS wiki
+    was unreachable at authoring time, so per-device hardware statuses are
+    CONSERVATIVE and NOT wiki-verified: features are marked 'supported' only
+    where msm8916-mainline broadly provides them (display, gpu via Adreno 306
+    with gpu_accelerated=true in deviceinfo, storage, usb, battery, charging,
+    vibrator) and 'partial'/'untested' where per-device confirmation is missing
+    (wifi/bt/audio/modem/sensors partial; gnss/camera untested). NFC and
+    fingerprint are not present on this device. Flashing requires a Motorola
+    bootloader unlock (fastboot oem unlock; unlock code obtained from Motorola).
