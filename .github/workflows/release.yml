@@ -59,13 +59,20 @@ jobs:
           d = "release/${{ matrix.device }}"
           m = yaml.safe_load(open(f"{d}/release.yaml"))
           def out(k, v): print(f"{k}={v}")
+          def out_multiline(k, lines):
+              # GitHub Actions multiline output via heredoc delimiter.
+              print(f"{k}<<__ML__")
+              for ln in lines:
+                  print(ln)
+              print("__ML__")
           out("tag", m["tag"])
           out("title", m.get("title", m["tag"]))
           out("version", m["version"])
           out("dir", d)
-          # attached release assets (excludes the large repo-only userdata image)
+          # attached release assets (excludes the large repo-only userdata image).
+          # The action's 'files:' input needs ONE path per line.
           arts = [f"{d}/{a}" for a in m.get("artifacts", []) if os.path.isfile(f"{d}/{a}")]
-          out("artifacts", " ".join(arts))
+          out_multiline("artifacts", arts)
           # repo-only large images (shipped via Git LFS, linked in the notes)
           out("repo_only", " ".join(m.get("repo_only_artifacts", [])))
           PY
