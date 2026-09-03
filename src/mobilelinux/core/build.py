@@ -112,14 +112,21 @@ def build_command(
     # -- Stage: boot image --------------------------------------------------
     boot_img = out_dir / f"{prefix}-boot.img"
     if device.boot.get("method") == "android-bootimg":
-        # Pull the real kernel/DTB/initrd out of the integrated rootfs.
+        # Pull the real kernel/DTB out of the integrated rootfs.
         kver = _kernel_uname_r(device)
         dtb_name = device.device_tree.get("dtb", "")
         soc = device.soc_family
         dtb_sub = "qcom" if soc.startswith(("sm", "sdm", "msm", "qcom")) else ""
         kernel = rootfs_dir / "boot" / f"vmlinuz-{kver}"
         dtb = rootfs_dir / "usr/lib" / f"linux-image-{kver}" / dtb_sub / dtb_name
-        initrd = rootfs_dir / "boot" / f"initrd.img-{kver}"
+
+        # Initramfs: for gpt-in-partition devices the DISTRO initramfs
+        # (initramfs-tools) does NOT know how to losetup --sector-size 4096 the
+        # userdata disk and mount root by UUID — that logic lives in the pmOS
+        # initramfs. So when the device declares initramfs.type=postmarketos we
+        # embed the pmOS initramfs extracted from the --input base boot image,
+        # NOT the Debian one (which would drop to a busybox emergency shell).
+        initrd = _resolve_initramfs(device, rootfs_dir, kver, input_boot, out_dir, runner)
         images.build_android_bootimg(
             device, runner, kernel=kernel, dtb=dtb, ramdisk=initrd,
             out=boot_img, root_uuid=root_uuid,
@@ -293,6 +300,56 @@ def _pick_work_dir(ctx, device: Device) -> Path:
                     "(rootfs unpack needs a case-sensitive FS)")
             return cand
     return out_dir
+
+
+def _resolve_initramfs(device: Device, rootfs_dir: Path, kver: str,
+                       input_boot: str | None, out_dir: Path, runner) -> Path:
+    """Return the initramfs to embed in the boot image.
+
+    For gpt-in-partition devices the pmOS initramfs (which does the sector-4096
+    loop mount + mount-by-UUID) is required; it is extracted from the --input
+    base boot image. Otherwise the distro's own initrd is used.
+    """
+    initcfg = device.boot.get("initramfs", {})
+    needs_pmos = (initcfg.get("type") == "postmarketos"
+                  or "loop-gpt-4096" in initcfg.get("features", []))
+    distro_initrd = rootfs_dir / "boot" / f"initrd.img-{kver}"
+
+    if not needs_pmos:
+        return distro_initrd
+
+    if not input_boot or not Path(input_boot).is_file():
+        ui.warn("  device needs the postmarketOS initramfs (sector-4096 mount) but "
+                "no --input base boot image was given.")
+        ui.warn("  the boot image will use the distro initrd, which will likely drop "
+                "to a busybox emergency shell. Pass --input <known-good pmOS boot.img>.")
+        return distro_initrd
+
+    # Extract the ramdisk from the Android boot image at --input.
+    initrd_out = out_dir / "pmos-initramfs.cpio.gz"
+    ui.note(f"  using pmOS initramfs from {Path(input_boot).name} (sector-4096 mount)")
+    if not runner.dry_run and (runner.execute or runner.allow_dangerous):
+        _extract_bootimg_ramdisk(Path(input_boot), initrd_out)
+        return initrd_out
+    ui.info(f"  [plan] extract ramdisk from {input_boot} -> {initrd_out.name}")
+    return initrd_out
+
+
+def _extract_bootimg_ramdisk(bootimg: Path, out: Path) -> None:
+    """Extract the ramdisk from an Android boot image (header v0-v2)."""
+    import struct
+    d = bootimg.read_bytes()
+    if d[:8] != b"ANDROID!":
+        raise BuildError(f"{bootimg} is not an Android boot image")
+    ps = struct.unpack("<I", d[36:40])[0]
+    ksz = struct.unpack("<I", d[8:12])[0]
+    rsz = struct.unpack("<I", d[16:20])[0]
+
+    def pad(n: int) -> int:
+        return (n + ps - 1) // ps * ps
+
+    off = ps + pad(ksz)
+    out.write_bytes(d[off:off + rsz])
 
 
 def _kernel_uname_r(device: Device) -> str:

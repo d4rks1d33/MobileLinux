@@ -66,6 +66,24 @@ def generate_instructions(device: Device, distro: str) -> str:
             lines.append(rescue["notes"].strip())
         lines.append("")
 
+    # Boot image / initramfs note for gpt-in-partition devices.
+    initcfg = device.boot.get("initramfs", {})
+    if (initcfg.get("type") == "postmarketos"
+            or "loop-gpt-4096" in initcfg.get("features", [])):
+        lines.append("## Boot image note")
+        lines.append("")
+        lines.append("This device stores the rootfs as a **GPT disk inside the "
+                     f"`{device.storage.get('rootfs_layout')}`** (logical sector "
+                     f"{device.storage.get('rootfs_sector_size', 512)}). Mounting it "
+                     "requires the **postmarketOS initramfs** (which does "
+                     "`losetup -Pf --sector-size 4096` on the target partition and "
+                     "mounts root by UUID). The distro's own initramfs "
+                     "(initramfs-tools) does NOT do this and will drop to a busybox "
+                     "emergency shell. The build therefore embeds the pmOS initramfs "
+                     "from the `--input` base boot image — so pass a known-good pmOS "
+                     "`boot.img` to `mobilelinux build ... --input <pmos-boot.img>`.")
+        lines.append("")
+
     lines.append("## Steps")
     lines.append("")
     lines.append("`mobilelinux flash " + device.id + "` performs these automatically:")
