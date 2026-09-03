@@ -93,6 +93,47 @@ def generate_instructions(device: Device, distro: str) -> str:
         mark = "  ⚠️ destructive" if step.get("destructive") else ""
         lines.append(f"{i}. {desc}{mark}")
     lines.append("")
+    # First boot + black-screen troubleshooting (for gpt-in-partition + pmOS initramfs).
+    initcfg = device.boot.get("initramfs", {})
+    if (initcfg.get("type") == "postmarketos"
+            or "loop-gpt-4096" in initcfg.get("features", [])):
+        lines.append("## First boot")
+        lines.append("")
+        lines.append("- The device **vibrates before switch_root** — that means the "
+                     "initramfs found and mounted the rootfs by UUID. Good sign.")
+        lines.append("- On the **first boot** the initramfs runs `resize2fs` to grow "
+                     "the rootfs to fill the partition, then systemd + the desktop "
+                     "start. **A black screen / stuck logo for several minutes on the "
+                     "first boot is NORMAL.** Wait.")
+        lines.append("- You can confirm it's alive over USB: `ssh kali@172.16.42.1` "
+                     "(password `1234`).")
+        lines.append("")
+        lines.append("## Black screen after the logo — troubleshooting")
+        lines.append("")
+        lines.append("If it stays black long after the first boot (and SSH works), it "
+                     "is a userspace/kernel issue, not the boot image:")
+        lines.append("")
+        lines.append("1. **`droid-juicer` not masked** hangs `graphical.target` "
+                     "(it waits forever for Android firmware). The build masks it, "
+                     "but an `apt full-upgrade` can re-enable it. Fix:")
+        lines.append("   ```")
+        lines.append("   sudo systemctl mask droid-juicer.service systemd-repart.service")
+        lines.append("   sudo reboot")
+        lines.append("   ```")
+        lines.append("2. **GDM vs phosh.service** both claiming the display (if "
+                     "`kali-linux-default` pulled in gdm3). Ensure a single display "
+                     "owner (the login layer masks `phosh.service` and points "
+                     "`display-manager` at gdm3).")
+        lines.append("3. **Wrong cmdline**: the boot image must use the pmOS "
+                     "initramfs and a cmdline WITHOUT `rootwait` (rootwait hangs "
+                     "because the pmOS initramfs resolves root by `pmos_root_uuid`, "
+                     "not `root=`). This build already does the right thing.")
+        lines.append("4. **UUID mismatch**: the `pmos_root_uuid` in the boot image "
+                     "must equal the ext4 UUID inside userdata. Verify from a rescue "
+                     "shell: `losetup -Pf --sector-size 4096 "
+                     "/dev/disk/by-partlabel/userdata; blkid /dev/loop0p2`.")
+        lines.append("")
+
     lines.append("## Safety")
     lines.append("")
     lines.append("`flash` detects the connected device, confirms it matches this "

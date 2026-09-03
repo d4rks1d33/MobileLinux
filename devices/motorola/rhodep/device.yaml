@@ -255,7 +255,12 @@ boot:
       tags: "0x00000100"
       second: "0x00000000"
       dtb: "0x01f00000"
-    cmdline: "earlycon pmos_root_uuid=@ROOT_UUID@ pmos_rootfsopts=defaults panel_novatek_nt37701.clk_scale=100 ignore_loglevel watchdog_thresh=5 rootwait"
+    # NOTE: NO 'rootwait' here. With the postmarketOS initramfs (which resolves
+    # root by pmos_root_uuid, not by the kernel 'root=' arg), 'rootwait' makes the
+    # kernel wait forever for a root= device that never appears -> hang -> black
+    # screen after the Motorola logo. This is byte-for-byte the known-good v47
+    # cmdline (only pmos_root_uuid is substituted).
+    cmdline: "earlycon pmos_root_uuid=@ROOT_UUID@ pmos_rootfsopts=defaults panel_novatek_nt37701.clk_scale=100 ignore_loglevel watchdog_thresh=5"
     os_patch_level: "2026-07-01"
   initramfs:
     type: postmarketos
