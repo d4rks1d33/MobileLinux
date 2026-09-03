@@ -28,7 +28,7 @@ artifacts:
 # Large images that are NOT uploaded as release assets but shipped in the repo
 # (Git LFS). Listed here so the release notes can link them.
 repo_only_artifacts:
-  - kali-userdata.img
+  - kali-userdata.img.xz
 
 # Default credentials of the shipped image.
 default_user: kali

@@ -52,7 +52,7 @@ generous-but-finite sizes, and the Kali **userdata** image is several GB. So:
   [`.gitattributes`](../.gitattributes)) and listed under
   `repo_only_artifacts:` in `release.yaml`. It is **not** attached to the
   release; instead the release notes link users to download it from the repo
-  (`release/<device>/kali-userdata.img`, e.g. the `.../raw/main/...` URL, or via
+  (`release/<device>/kali-userdata.img.xz`, e.g. the `.../raw/main/...` URL, or via
   `git lfs`).
 
 Working with LFS locally requires `git lfs install` once

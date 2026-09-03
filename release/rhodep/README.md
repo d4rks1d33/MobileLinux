@@ -13,17 +13,20 @@ SM6375), produced by [MobileLinux](https://github.com/d4rks1d33/MobileLinux).
 |------|-----------------|------------|
 | `rescue.img` | **Release asset** | Rescue boot image (pmOS initramfs + debug shell). Boots a root shell over USB networking **without** mounting the system, used to write `userdata`. Reusable for recovery. |
 | `kali-boot.img` | **Release asset** | The boot image (mainline kernel + pmOS initramfs). Flashed to `boot_a`. |
-| `kali-userdata.img` | **Repo (Git LFS)** — see below | The full Kali system as a GPT disk (written to the `userdata` partition). |
+| `kali-userdata.img.xz` | **Repo (Git LFS)** — see below | The full Kali system as a GPT disk (xz-compressed, ~1.6 GB). Decompresses to ~8 GB. |
 | `CHANGELOG.md` / `CHECKSUMS.sha256` | Release asset / repo | Notes + checksums. |
 
-> **`kali-userdata.img` is downloaded separately.** It is several GB and is
+> **`kali-userdata.img.xz` is downloaded separately.** It is ~1.6 GB and is
 > **not** attached to the GitHub Release. Get it from the repository at
-> **`release/rhodep/kali-userdata.img`**:
+> **`release/rhodep/kali-userdata.img.xz`** (stored with Git LFS):
 >
 > - Direct download:
->   `https://github.com/d4rks1d33/MobileLinux/raw/main/release/rhodep/kali-userdata.img`
+>   `https://github.com/d4rks1d33/MobileLinux/raw/main/release/rhodep/kali-userdata.img.xz`
 > - Or clone with Git LFS: `git lfs install && git clone https://github.com/d4rks1d33/MobileLinux`
 >   then find it in `release/rhodep/`.
+>
+> You do **not** need to decompress it manually — the flashing step below pipes
+> it through `xz` on the fly.
 
 Default login after boot: **`kali` / `1234`** (change it immediately).
 
@@ -42,8 +45,9 @@ postmarketOS uses on this device.
   Android platform-tools).
 - `telnet` and `nc` (netcat) on your computer.
 - A USB-C cable and a charged phone.
-- The three images in one folder: `rescue.img` and `kali-boot.img` from the
-  **Release assets**, and `kali-userdata.img` from the **repo** (see above).
+- The files in one folder: `rescue.img` and `kali-boot.img` from the
+  **Release assets**, and `kali-userdata.img.xz` from the **repo** (see above).
+- `xz` on your computer (`apt install xz-utils`) to decompress the system image.
 - Verify your downloads: `sha256sum -c CHECKSUMS.sha256`.
 
 ## Install — step by step
@@ -75,14 +79,19 @@ telnet 172.16.42.1 23
 nc -l -p 5555 | dd of=/dev/disk/by-partlabel/userdata bs=4M conv=fsync
 ```
 
-**Terminal B — on your computer**, stream the image into that listener:
+**Terminal B — on your computer**, decompress and stream the image into that
+listener (the image is xz-compressed; `xz -dc` decompresses on the fly so you
+never need ~8 GB of free disk on your PC):
 
 ```bash
-nc 172.16.42.1 5555 < kali-userdata.img
+xz -dc kali-userdata.img.xz | nc 172.16.42.1 5555
 ```
 
-Wait for the transfer to finish (it's several GB — this takes a while). When
-`dd` reports it's done in Terminal A, the system disk is written.
+Wait for the transfer to finish (the decompressed stream is ~8 GB — this takes a
+while). When `dd` reports it's done in Terminal A, the system disk is written.
+
+> If you'd rather decompress first: `xz -dk kali-userdata.img.xz` (needs ~8 GB
+> free), then `nc 172.16.42.1 5555 < kali-userdata.img`.
 
 > Tip: if your `nc` doesn't support `-l -p`, use `nc -l 5555` on the phone and
 > `nc 172.16.42.1 5555 < kali-userdata.img` on the host, or use SSH if the

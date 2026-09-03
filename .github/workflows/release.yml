@@ -89,19 +89,18 @@ jobs:
             echo
             echo "Attached to this release: \`rescue.img\`, \`kali-boot.img\`."
             echo
-            if [ -n "${{ steps.meta.outputs.repo_only }}" ]; then
-              echo "> ⚠️ **\`kali-userdata.img\` is NOT attached here** (it is too large"
-              echo "> for a release asset). Download it from the repository via Git LFS:"
+            for f in ${{ steps.meta.outputs.repo_only }}; do
+              echo "> ⚠️ **\`$f\` is NOT attached here** (it is too large for a"
+              echo "> release asset). Download it from the repository (Git LFS):"
               echo ">"
-              echo "> \`release/${{ matrix.device }}/kali-userdata.img\`"
+              echo "> \`release/${{ matrix.device }}/$f\`"
               echo ">"
               echo "> Direct link:"
-              echo "> \`https://github.com/\${{ github.repository }}/raw/main/release/${{ matrix.device }}/kali-userdata.img\`"
+              echo "> \`https://github.com/${{ github.repository }}/raw/main/release/${{ matrix.device }}/$f\`"
               echo ">"
-              echo "> or clone with LFS: \`git lfs install && git clone <repo>\` (then"
-              echo "> the file is in \`release/${{ matrix.device }}/\`)."
+              echo "> or clone with LFS: \`git lfs install && git clone <repo>\`."
               echo
-            fi
+            done
             echo "Checksums (all images, including the repo-only userdata):"
             echo
             echo '```'
