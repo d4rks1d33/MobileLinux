@@ -21,6 +21,9 @@
 *.tar.xz
 *.tar.gz
 *.tar.zst
+# Prebuilt kernel-module tarballs shipped with a release ARE tracked
+# (small, attached as a release asset by the release workflow).
+!release/**/modules-*.tar.gz
 # generated kernel configs / merged flavor configs (out/ already covers most)
 config-*-kali.aarch64
 config-*-pmos.aarch64

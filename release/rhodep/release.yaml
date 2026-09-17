@@ -24,6 +24,8 @@ kali_release: 2026.3 (rolling)
 artifacts:
   - rescue.img
   - kali-boot.img
+  # Prebuilt out-of-tree kernel modules for the shipped 7.2.0-rc5 kernel.
+  - modules-rhodep-7.2.0-rc5.tar.gz
 
 # Large images that are NOT uploaded as release assets but shipped in the repo
 # (Git LFS). Listed here so the release notes can link them.
